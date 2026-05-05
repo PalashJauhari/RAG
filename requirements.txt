@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+pydantic
+pydantic-settings
+openai
+langgraph
+langchain
+langchain-core
+langchain-openai
+qdrant-client
+httpx
+langfuse
+dash
+requests
+datasets
+ragas

@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+benchmarking/hotpotqa/data/raw/*
+!benchmarking/hotpotqa/data/raw/.gitkeep
+benchmarking/hotpotqa/data/processed/*
+!benchmarking/hotpotqa/data/processed/.gitkeep
+benchmarking/hotpotqa/data/results/*
+!benchmarking/hotpotqa/data/results/.gitkeep
