@@ -1,13 +1,9 @@
 from langchain.tools import ToolRuntime, tool
-from pydantic import BaseModel, Field
 
-from clients.llm_client import get_openai_client
 from config.settings import settings
+from middleware.llm_client import get_openai_client
+from output_validation.query_rewriter import QueryRewriteResult
 from prompts.query_rewriter import SYSTEM_PROMPT
-
-
-class QueryRewriteResult(BaseModel):
-    rewritten_query: str = Field(description="The standalone retrieval-ready query.")
 
 
 client = get_openai_client()

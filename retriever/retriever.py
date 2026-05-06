@@ -6,8 +6,8 @@ from typing import Any
 import httpx
 from qdrant_client import AsyncQdrantClient, models
 
-from clients.llm_client import get_openai_client
 from config.settings import Settings
+from middleware.llm_client import get_openai_client
 
 
 class Retriever:

@@ -1,14 +1,12 @@
-import json
-import os
 from uuid import uuid4
 
-import requests
 from dash import Dash, Input, Output, State, dcc, html
 from dotenv import load_dotenv
 
+from ui.api_client import RagApiClient
 
 load_dotenv()
-API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
+api = RagApiClient()
 
 app = Dash(__name__)
 app.title = "RAG Retrieval Chat"
@@ -115,35 +113,20 @@ def submit_message(_, message, session_id, chat_state, pending_interrupt):
     if not message:
         return chat_state, pending_interrupt, "", ""
 
-    endpoint = "/resume" if pending_interrupt else "/run"
-    payload = (
-        {"session_id": session_id, "answer": message}
-        if pending_interrupt
-        else {"session_id": session_id, "message": message}
-    )
     chat_state = [*(chat_state or []), {"role": "user", "content": message}]
 
-    try:
-        api_response = requests.post(
-            f"{API_URL}{endpoint}",
-            json=payload,
-            timeout=120,
-        )
-        api_response.raise_for_status()
-        data = api_response.json()
-    except requests.RequestException as exc:
-        return chat_state, pending_interrupt, "", str(exc)
+    data = api.resume(message, session_id) if pending_interrupt else api.run(message, session_id)
+    if data.get("error"):
+        return chat_state, pending_interrupt, "", data["error"]
 
-    if data["status"] == "interrupted":
-        chat_state.append({"role": "assistant", "content": data["question"]})
+    if data.get("interrupted"):
+        chat_state.append({"role": "assistant", "content": data.get("question") or "Please clarify."})
         return chat_state, True, "", ""
 
-    response = data["response"]
-    content = (
-        response.get("answer")
-        if isinstance(response, dict) and response.get("answer")
-        else json.dumps(response, indent=2)
-    )
+    content = data.get("answer") or "Done."
+    sources = data.get("sources") or []
+    if sources:
+        content = f"{content}\n\nSources: {', '.join(str(source) for source in sources)}"
     chat_state.append({"role": "assistant", "content": content})
     return chat_state, False, "", ""
 

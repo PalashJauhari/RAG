@@ -8,7 +8,9 @@ langgraph
 langchain
 langchain-core
 langchain-openai
+langgraph-checkpoint-postgres
 qdrant-client
+psycopg[binary]
 httpx
 langfuse
 dash

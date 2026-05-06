@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     openai_llm_model: str = "gpt-4.1-mini"
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dimensions: int = 1536
+    openai_summary_model: str = "gpt-4.1-mini"
     openai_temperature: float = 0
 
     qdrant_url: str = ""
@@ -37,7 +38,22 @@ class Settings(BaseSettings):
     langfuse_tracing_enabled: bool = False
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
-    langfuse_base_url: str = "https://cloud.langfuse.com"
+    langfuse_host: str = "https://cloud.langfuse.com"
+    langfuse_base_url: str = ""
+
+    checkpointer_use_postgres: bool = False
+    database_url: str = ""
+
+    graph_recursion_limit: int = 100
+    graph_max_concurrency: int = 2
+
+    message_summary_token_threshold: int = 100000
+    message_summary_keep_recent: int = 10
+
+    openai_rate_limit_enabled: bool = True
+    openai_rate_limit_requests_per_second: float = 1.0
+    openai_rate_limit_check_every_n_seconds: float = 0.1
+    openai_rate_limit_max_bucket_size: float = 5.0
 
     api_url: str = "http://127.0.0.1:8000"
     request_timeout_seconds: int = 60

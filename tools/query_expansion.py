@@ -1,14 +1,9 @@
 from langchain.tools import ToolRuntime, tool
-from pydantic import BaseModel, Field
 
-from clients.llm_client import get_openai_client
 from config.settings import settings
+from middleware.llm_client import get_openai_client
+from output_validation.query_expansion import QueryExpansionResult
 from prompts.query_expansion import SYSTEM_PROMPT
-
-
-class QueryExpansionResult(BaseModel):
-    expanded_query: str = Field(description="The retrieval-ready expanded query.")
-    added_context: str = Field(description="Short note on what context was added.")
 
 
 client = get_openai_client()

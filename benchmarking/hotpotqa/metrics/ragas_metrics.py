@@ -6,7 +6,7 @@ from ragas.llms import llm_factory
 from ragas.metrics.collections import ContextPrecision, ContextRecall, Faithfulness
 
 from benchmarking.hotpotqa.settings import HotpotQASettings
-from clients.llm_client import get_openai_client
+from middleware.llm_client import get_openai_client
 
 
 async def main() -> None:

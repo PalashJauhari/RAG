@@ -1,13 +1,9 @@
 from langchain.tools import ToolRuntime, tool
-from pydantic import BaseModel, Field
 
-from clients.llm_client import get_openai_client
 from config.settings import settings
+from middleware.llm_client import get_openai_client
+from output_validation.query_splitter import QuerySplitResult
 from prompts.query_splitter import SYSTEM_PROMPT
-
-
-class QuerySplitResult(BaseModel):
-    queries: list[str] = Field(description="Focused retrieval queries.")
 
 
 client = get_openai_client()

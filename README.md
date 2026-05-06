@@ -18,7 +18,7 @@ FastAPI /run or /resume
   -> orchestrator final grounded answer
 ```
 
-The graph uses `session_id` as the LangGraph `thread_id`, so parallel sessions stay isolated. It uses `InMemorySaver` for now.
+The graph uses `session_id` as the LangGraph `thread_id`, so parallel sessions stay isolated. Checkpoints use `InMemorySaver` by default, or Postgres when `CHECKPOINTER_USE_POSTGRES=true`.
 
 ## Retrieval Flow
 
@@ -65,6 +65,24 @@ QDRANT_COLBERT_VECTOR_NAME=colbert
 
 These flags are loaded into the retriever config and used when creating the Qdrant client. `USE_BM25=true` enables Qdrant cloud inference on the client.
 
+Harness flags:
+
+```env
+CHECKPOINTER_USE_POSTGRES=false
+DATABASE_URL=
+
+GRAPH_RECURSION_LIMIT=100
+GRAPH_MAX_CONCURRENCY=2
+
+MESSAGE_SUMMARY_TOKEN_THRESHOLD=100000
+MESSAGE_SUMMARY_KEEP_RECENT=10
+
+OPENAI_RATE_LIMIT_ENABLED=true
+OPENAI_RATE_LIMIT_REQUESTS_PER_SECOND=1.0
+```
+
+When Postgres checkpoints are enabled, install `langgraph-checkpoint-postgres` and `psycopg[binary]`, set `DATABASE_URL`, and the API startup will run `checkpointer.setup()`.
+
 ## API
 
 Start the API:
@@ -93,13 +111,13 @@ Response shape:
 
 ```json
 {
-  "status": "completed",
   "session_id": "demo",
-  "response": {
-    "answer": "...",
-    "sources": [],
-    "confidence": "medium"
-  }
+  "interrupted": false,
+  "question": null,
+  "answer": "...",
+  "sources": [],
+  "confidence": "medium",
+  "retrieved_docs": []
 }
 ```
 
@@ -107,12 +125,13 @@ Interrupt shape:
 
 ```json
 {
-  "status": "interrupted",
   "session_id": "demo",
+  "interrupted": true,
   "question": "Which policy should I use?",
-  "interrupt": {
-    "question": "Which policy should I use?"
-  }
+  "answer": null,
+  "sources": [],
+  "confidence": null,
+  "retrieved_docs": []
 }
 ```
 
@@ -128,10 +147,12 @@ Open `http://127.0.0.1:8050`.
 
 ## Notes
 
-- Tool LLM calls use OpenAI Structured Outputs with Pydantic schemas.
+- Tool LLM calls use OpenAI Structured Outputs with Pydantic schemas in `output_validation/`.
+- `graph/RetrievalGraph` wraps graph construction, run, resume, state lookup, and checkpoint setup.
+- `middleware/` contains the shared LLM client, optional OpenAI rate limiter, and context summarization.
+- `ui/api_client.py` centralizes Dash-to-FastAPI HTTP calls.
 - The orchestrator is instructed to return final JSON with `answer`, `sources`, and `confidence`.
-- Langfuse tracing is controlled by `LANGFUSE_TRACING_ENABLED`. Add `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_BASE_URL` when enabled.
-- In production, replace `InMemorySaver` with a durable checkpointer.
+- Langfuse tracing is controlled by `LANGFUSE_TRACING_ENABLED`. Add `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_HOST` when enabled.
 
 ## Benchmarking
 
