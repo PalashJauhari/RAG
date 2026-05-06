@@ -17,10 +17,16 @@ split: validation
 Default size:
 
 ```env
-HOTPOTQA_MAX_QUESTIONS=3500
+HOTPOTQA_SPLIT=validation
+HOTPOTQA_MAX_QUESTIONS=500
+HOTPOTQA_EVAL_MAX_QUESTIONS=500
+HOTPOTQA_RAGAS_MAX_QUESTIONS=500
+HOTPOTQA_UPLOAD_BATCH_SIZE=64
 ```
 
 We use validation/dev data because it includes `reference_answer`, `supporting_facts`, and paragraph contexts. The official test split is not used for local scoring because it does not include answers.
+
+*Note: When `HOTPOTQA_MAX_QUESTIONS` is set, the dataset script uses deterministic stratified random sampling (seed 42) to ensure equal representation of all reasoning types and difficulty levels.*
 
 ## Env
 
@@ -74,7 +80,7 @@ python -m benchmarking.hotpotqa.evaluation.run_retrieval_eval
 Output:
 
 ```text
-benchmarking/hotpotqa/data/results/retrieval_results.json
+benchmarking/hotpotqa/data/results/{HOTPOTQA_EXPERIMENT_NAME}/retrieval_results.json
 ```
 
 Run RAGAS metrics:
@@ -86,7 +92,8 @@ python -m benchmarking.hotpotqa.metrics.ragas_metrics
 Output:
 
 ```text
-benchmarking/hotpotqa/data/results/ragas_results.json
+benchmarking/hotpotqa/data/results/{HOTPOTQA_EXPERIMENT_NAME}/ragas_results.json
+benchmarking/hotpotqa/data/results/{HOTPOTQA_EXPERIMENT_NAME}/type_level_metrics.xlsx
 ```
 
 ## Result Fields
@@ -132,7 +139,4 @@ RAGAS metrics:
 
 - context precision
 - context recall
-- optional faithfulness
-
-Faithfulness needs a response. If `HOTPOTQA_INCLUDE_FAITHFULNESS=true`, the script uses `generated_answer` when present in retrieval results, otherwise it uses `reference_answer` and records that source.
 

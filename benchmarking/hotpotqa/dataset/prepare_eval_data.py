@@ -13,7 +13,25 @@ def main() -> None:
         split=settings.hotpotqa_split,
     )
     if settings.hotpotqa_max_questions > 0:
-        dataset = dataset.select(range(min(settings.hotpotqa_max_questions, len(dataset))))
+        import random
+        from collections import defaultdict
+
+        groups = defaultdict(list)
+        for i, row in enumerate(dataset):
+            groups[(row["type"], row["level"])].append(i)
+
+        keys = sorted(groups.keys())
+        random.seed(42)
+        for key in keys:
+            random.shuffle(groups[key])
+
+        target_per_group = settings.hotpotqa_max_questions // len(keys)
+
+        selected_indices = []
+        for key in keys:
+            selected_indices.extend(groups[key][:target_per_group])
+
+        dataset = dataset.select(sorted(selected_indices))
 
     records = []
     for row in dataset:

@@ -1,3 +1,4 @@
+
 from pathlib import Path
 
 from pydantic_settings import SettingsConfigDict
@@ -14,16 +15,22 @@ class HotpotQASettings(Settings):
     hotpotqa_dataset_name: str = "hotpotqa/hotpot_qa"
     hotpotqa_dataset_config: str = "fullwiki"
     hotpotqa_split: str = "validation"
-    hotpotqa_max_questions: int = 3500
+    hotpotqa_max_questions: int = 500
     hotpotqa_upload_batch_size: int = 64
-    hotpotqa_eval_max_questions: int = 3500
-    hotpotqa_ragas_max_questions: int = 3500
-    hotpotqa_include_faithfulness: bool = False
+    hotpotqa_eval_max_questions: int = 500
+    hotpotqa_ragas_max_questions: int = 500
     hotpotqa_ragas_model: str = "gpt-4o-mini"
+    hotpotqa_experiment_name: str = "default_experiment"
 
     processed_dataset_path: Path = HOTPOTQA_ROOT / "data" / "processed" / "hotpotqa_eval.json"
-    retrieval_results_path: Path = HOTPOTQA_ROOT / "data" / "results" / "retrieval_results.json"
-    ragas_results_path: Path = HOTPOTQA_ROOT / "data" / "results" / "ragas_results.json"
+
+    @property
+    def retrieval_results_path(self) -> Path:
+        return HOTPOTQA_ROOT / "data" / "results" / self.hotpotqa_experiment_name / "retrieval_results.json"
+
+    @property
+    def ragas_results_path(self) -> Path:
+        return HOTPOTQA_ROOT / "data" / "results" / self.hotpotqa_experiment_name / "ragas_results.json"
 
     model_config = SettingsConfigDict(
         env_file=HOTPOTQA_ROOT / ".env",

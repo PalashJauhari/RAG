@@ -25,10 +25,7 @@ class Settings(BaseSettings):
 
     retrieval_top_k: int = 8
     retrieval_candidate_limit: int = 100
-    retrieval_dense_limit: int = 100
-    retrieval_bm25_limit: int = 100
     retrieval_mmr_diversity: float = 0.5
-    retrieval_mmr_candidates_limit: int = 100
 
     jina_api_key: str = ""
     jina_colbert_model: str = "jina-colbert-v2"
@@ -55,7 +52,6 @@ class Settings(BaseSettings):
     openai_rate_limit_check_every_n_seconds: float = 0.1
     openai_rate_limit_max_bucket_size: float = 5.0
 
-    api_url: str = "http://127.0.0.1:8000"
     request_timeout_seconds: int = 60
 
     model_config = SettingsConfigDict(

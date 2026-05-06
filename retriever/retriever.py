@@ -109,7 +109,7 @@ class Retriever:
                 nearest=dense_vector,
                 mmr=models.Mmr(
                     diversity=self.config.retrieval_mmr_diversity,
-                    candidates_limit=self.config.retrieval_mmr_candidates_limit,
+                    candidates_limit=self.config.retrieval_candidate_limit,
                 ),
             )
 
@@ -117,7 +117,7 @@ class Retriever:
             models.Prefetch(
                 query=dense_query,
                 using=self.config.qdrant_dense_vector_name,
-                limit=self.config.retrieval_dense_limit,
+                limit=self.config.retrieval_candidate_limit,
             )
         ]
         if self.config.use_bm25:
@@ -128,7 +128,7 @@ class Retriever:
                         model=self.config.qdrant_bm25_model,
                     ),
                     using=self.config.qdrant_bm25_vector_name,
-                    limit=self.config.retrieval_bm25_limit,
+                    limit=self.config.retrieval_candidate_limit,
                 )
             )
 
