@@ -63,6 +63,8 @@ async def main() -> None:
                         "payload": {
                             "benchmark": "hotpotqa",
                             "question_id": record["id"],
+                            "type": record["type"],
+                            "level": record["level"],
                             "context_id": context["context_id"],
                             "title": context["title"],
                             "text": context["text"],

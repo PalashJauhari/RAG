@@ -26,6 +26,8 @@ async def main() -> None:
             {
                 "id": record["id"],
                 "question": record["question"],
+                "type": record["type"],
+                "level": record["level"],
                 "reference_answer": record["reference_answer"],
                 "reference_contexts": reference_contexts,
                 "reference_context_ids": reference_context_ids,
