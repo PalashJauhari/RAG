@@ -17,3 +17,5 @@ dash
 requests
 datasets
 ragas
+pandas
+openpyxl
