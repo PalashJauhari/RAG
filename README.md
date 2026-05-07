@@ -96,7 +96,7 @@ Run a new turn:
 ```bash
 curl -X POST http://127.0.0.1:8000/run \
   -H "Content-Type: application/json" \
-  -d '{"session_id":"demo","message":"What does the policy say about refunds?","recursion_limit":25}'
+  -d '{"session_id":"demo","message":"What does the policy say about refunds?"}'
 ```
 
 Resume after `ask_user` interrupts:
@@ -104,7 +104,7 @@ Resume after `ask_user` interrupts:
 ```bash
 curl -X POST http://127.0.0.1:8000/resume \
   -H "Content-Type: application/json" \
-  -d '{"session_id":"demo","answer":"Use the enterprise customer policy","recursion_limit":25}'
+  -d '{"session_id":"demo","answer":"Use the enterprise customer policy"}'
 ```
 
 Response shape:
@@ -147,9 +147,10 @@ Open `http://127.0.0.1:8050`.
 
 ## Notes
 
-- Tool LLM calls use OpenAI Structured Outputs with Pydantic schemas in `output_validation/`.
+- Tool LLM calls natively use LangChain's `with_structured_output` backed by Pydantic schemas in `output_validation/`.
+- System prompts are centralized under the `prompts/` directory.
 - `graph/RetrievalGraph` wraps graph construction, run, resume, state lookup, and checkpoint setup.
-- `middleware/` contains the shared LLM client, optional OpenAI rate limiter, and context summarization.
+- `middleware/` contains the unified LangChain LLM client, optional OpenAI rate limiter, and context summarization.
 - `ui/api_client.py` centralizes Dash-to-FastAPI HTTP calls.
 - The orchestrator is instructed to return final JSON with `answer`, `sources`, and `confidence`.
 - Langfuse tracing is controlled by `LANGFUSE_TRACING_ENABLED`. Add `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_HOST` when enabled.
