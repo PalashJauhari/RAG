@@ -1,4 +1,6 @@
 import json
+import random
+from collections import defaultdict
 
 from datasets import load_dataset
 
@@ -13,8 +15,6 @@ def main() -> None:
         split=settings.hotpotqa_split,
     )
     if settings.hotpotqa_max_questions > 0:
-        import random
-        from collections import defaultdict
 
         groups = defaultdict(list)
         for i, row in enumerate(dataset):

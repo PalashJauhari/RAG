@@ -7,7 +7,7 @@ import httpx
 from qdrant_client import AsyncQdrantClient, models
 
 from config.settings import Settings
-from middleware.llm_client import get_openai_client
+from middleware.llm_client import get_embeddings_client
 
 
 class Retriever:
@@ -15,7 +15,7 @@ class Retriever:
 
     def __init__(self, config: Settings):
         self.config = config
-        self.openai = get_openai_client(config.openai_api_key)
+        self.openai = get_embeddings_client(config.openai_api_key)
         self.qdrant = AsyncQdrantClient(
             url=config.qdrant_url,
             api_key=config.qdrant_api_key,

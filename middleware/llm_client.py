@@ -9,13 +9,13 @@ from middleware.llm_rate_limit import OPENAI_RATE_LIMITER
 
 
 @lru_cache(maxsize=4)
-def get_openai_client(api_key: str | None = None) -> AsyncOpenAI:
-    """Shared OpenAI SDK client for structured outputs and embeddings."""
+def get_embeddings_client(api_key: str | None = None) -> AsyncOpenAI:
+    """Shared OpenAI SDK client for dense vector embeddings."""
 
     return AsyncOpenAI(api_key=api_key or settings.openai_api_key)
 
 
-def make_llm(
+def get_llm_client(
     *,
     model: str | None = None,
     temperature: float | None = None,

@@ -1,7 +1,7 @@
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
 
 from config.settings import settings
-from middleware.llm_client import make_llm
+from middleware.llm_client import get_llm_client
 
 
 SUMMARY_SYSTEM_PROMPT = """
@@ -36,7 +36,7 @@ def find_safe_truncation_point(messages: list, keep: int) -> int:
 async def summarize_evicted(previous_summary: str, messages_to_evict: list) -> str:
     """Merge old messages into the running conversation summary."""
 
-    llm = make_llm(model=settings.openai_summary_model, temperature=0)
+    llm = get_llm_client(model=settings.openai_summary_model, temperature=0)
     prompt_messages = [SystemMessage(content=SUMMARY_SYSTEM_PROMPT)]
     if previous_summary:
         prompt_messages.append(HumanMessage(content=f"Previous summary:\n{previous_summary}"))

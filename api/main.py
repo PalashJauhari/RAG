@@ -13,13 +13,11 @@ from output_validation.final_answer import FinalAnswer
 class RunRequest(BaseModel):
     session_id: str = Field(description="Stable session id used as LangGraph thread_id.")
     message: str = Field(description="User message to process.")
-    recursion_limit: int | None = Field(default=None, description="Optional graph recursion limit.")
 
 
 class ResumeRequest(BaseModel):
     session_id: str = Field(description="Session id from the interrupted run.")
     answer: str = Field(description="Human answer to the clarification question.")
-    recursion_limit: int | None = Field(default=None, description="Optional graph recursion limit.")
 
 
 @asynccontextmanager
@@ -88,10 +86,9 @@ def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
 
 @app.post("/run")
 async def run(request: RunRequest) -> dict[str, Any]:
-    result = await app.state.retrieval_graph.run_graph(
+    result = await app.state.retrieval_graph.run(
         request.session_id,
         request.message,
-        request.recursion_limit,
     )
     return get_api_response(request.session_id, result)
 
@@ -101,7 +98,6 @@ async def resume(request: ResumeRequest) -> dict[str, Any]:
     result = await app.state.retrieval_graph.resume(
         request.session_id,
         request.answer,
-        request.recursion_limit,
     )
     return get_api_response(request.session_id, result)
 

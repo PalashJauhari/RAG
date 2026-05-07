@@ -6,7 +6,7 @@ from ragas.llms import llm_factory
 from ragas.metrics.collections import ContextPrecision, ContextRecall
 
 from benchmarking.hotpotqa.settings import HotpotQASettings
-from middleware.llm_client import get_openai_client
+from middleware.llm_client import get_embeddings_client
 
 
 async def main() -> None:
@@ -17,7 +17,7 @@ async def main() -> None:
 
     llm = llm_factory(
         settings.hotpotqa_ragas_model,
-        client=get_openai_client(settings.openai_api_key),
+        client=get_embeddings_client(settings.openai_api_key),
     )
     context_precision = ContextPrecision(llm=llm)
     context_recall = ContextRecall(llm=llm)
