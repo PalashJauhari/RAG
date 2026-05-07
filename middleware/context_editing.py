@@ -4,14 +4,7 @@ from config.settings import settings
 from middleware.llm_client import get_llm_client
 
 
-SUMMARY_SYSTEM_PROMPT = """
-You summarize conversation history for a retrieval agent.
-
-Preserve user intent, entity references, constraints, clarification answers,
-retrieval decisions, and any facts needed to understand future follow-up queries.
-Keep the summary concise and do not invent information.
-""".strip()
-
+from prompts.context_editing import SUMMARY_SYSTEM_PROMPT
 
 def estimate_tokens(messages: list) -> int:
     """Rough token estimate based on message content length."""
@@ -26,8 +19,6 @@ def find_safe_truncation_point(messages: list, keep: int) -> int:
     while candidate < len(messages):
         message = messages[candidate]
         if isinstance(message, HumanMessage):
-            break
-        if isinstance(message, AIMessage) and not getattr(message, "tool_calls", None):
             break
         candidate += 1
     return candidate
