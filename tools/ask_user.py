@@ -1,11 +1,21 @@
 from langchain.tools import tool
 from langgraph.types import interrupt
 
-from output_validation.ask_user import AskUserInput
+from pydantic import BaseModel, Field
 
+class AskUserInput(BaseModel):
+    question: str = Field(
+        description="A direct, conversational clarifying question for the user. "
+                    "Must explicitly state what critical context or undefined pronoun is preventing retrieval.",
+        examples=["You mentioned 'it' - are you referring to the enterprise refund policy or the standard policy?"]
+    )
 
-@tool(args_schema=AskUserInput)
+@tool(args_schema=AskUserInput, name="ask_user")
 def ask_user(question: str) -> str:
-    """Ask one clarifying question and pause the graph until the user answers."""
+    """
+    [ROUTING INTENT: AMBIGUITY RESOLUTION]
+    Use WHEN: The query is dangerously ambiguous, lacks fundamental context, or relies on undefined pronouns (e.g., "What did he say about it?") that are NOT resolved in the conversation summary.
+    This pauses the graph to get human input.
+    """
 
     return interrupt({"question": question})

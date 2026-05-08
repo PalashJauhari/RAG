@@ -10,9 +10,22 @@ from prompts.query_rewriter import SYSTEM_PROMPT
 
 
 
-@tool
+from pydantic import BaseModel, Field
+
+class QueryRewriteInput(BaseModel):
+    input_query: str = Field(
+        description="The ambiguous or context-dependent user query that requires co-reference resolution. "
+                    "You must substitute all pronouns with explicit entities from the conversation summary.",
+        examples=["What is the SLA for the Enterprise Tier?"]
+    )
+
+@tool(args_schema=QueryRewriteInput, name="query_rewriter")
 async def query_rewriter(input_query: str, runtime: ToolRuntime) -> dict:
-    """Rewrite a follow-up or ambiguous user query into a standalone retrieval query."""
+    """
+    [ROUTING INTENT: PRECISION OPTIMIZATION]
+    Use WHEN: The user's intent is clear from the conversation history, but their latest input is poorly phrased, conversational, or uses pronouns.
+    Goal: Normalize the input into a standalone, explicit semantic search query.
+    """
 
     messages = runtime.state.get("messages", [])
     summary = runtime.state.get("message_summary", "")

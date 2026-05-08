@@ -10,9 +10,22 @@ from prompts.query_expansion import SYSTEM_PROMPT
 
 
 
-@tool
+from pydantic import BaseModel, Field
+
+class QueryExpansionInput(BaseModel):
+    input_query: str = Field(
+        description="The focused semantic query that requires vocabulary bridging. "
+                    "Do not alter the core intent, but prepare it for expansion with domain synonyms.",
+        examples=["database performance optimization techniques"]
+    )
+
+@tool(args_schema=QueryExpansionInput, name="query_expansion")
 async def query_expansion(input_query: str, runtime: ToolRuntime) -> dict:
-    """Expand a query with retrieval-friendly context while preserving intent."""
+    """
+    [ROUTING INTENT: RECALL OPTIMIZATION]
+    Use WHEN: The query is highly specific or uses strict terminology, risking missing relevant documents due to vocabulary mismatch.
+    Goal: Broaden the search surface by automatically generating and injecting domain-specific synonyms and parallel terms.
+    """
 
     messages = runtime.state.get("messages", [])
     summary = runtime.state.get("message_summary", "")

@@ -7,9 +7,22 @@ from middleware.llm_client import get_llm_client
 from output_validation.query_splitter import QuerySplitResult
 from prompts.query_splitter import SYSTEM_PROMPT
 
-@tool
+from pydantic import BaseModel, Field
+
+class QuerySplitInput(BaseModel):
+    input_query: str = Field(
+        description="The complex, multi-hop, or comparative user query to be decomposed. "
+                    "Must contain conjunctions or distinct topics requiring separate retrieval paths.",
+        examples=["What is the difference in pricing between AWS S3 and Azure Blob Storage?"]
+    )
+
+@tool(args_schema=QuerySplitInput, name="query_splitter")
 async def query_splitter(input_query: str, runtime: ToolRuntime) -> dict:
-    """Split a broad or multi-part query into focused retrieval queries."""
+    """
+    [ROUTING INTENT: DECOMPOSITION]
+    Use WHEN: The user asks a multi-hop question, compares multiple entities, or asks several independent questions in one prompt.
+    Goal: Break the complex query into atomic, independent sub-queries to maximize vector search precision.
+    """
 
     messages = runtime.state.get("messages", [])
     summary = runtime.state.get("message_summary", "")
