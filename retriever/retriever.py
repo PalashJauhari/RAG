@@ -11,7 +11,11 @@ from middleware.llm_client import get_embeddings_client
 
 
 class Retriever:
-    """Runs configured Qdrant retrieval for one or more rewritten queries."""
+    """
+    Advanced 3-Stage Hybrid Retriever.
+    Executes Dense (w/ MMR), Sparse (BM25), and Late Interaction (ColBERT) retrieval 
+    against a Qdrant vector database. Supports multi-query fusion using Reciprocal Rank Fusion (RRF).
+    """
 
     def __init__(self, config: Settings):
         self.config = config
@@ -60,6 +64,17 @@ class Retriever:
         return [row["embeddings"] for row in response.json()["data"]]
 
     async def retrieve(self, queries: list[str], top_k: int | None = None) -> list[dict[str, Any]]:
+        """
+        Public execution entrypoint. Runs retrieval for multiple independent queries concurrently,
+        deduplicates the results, and sorts them using Reciprocal Rank Fusion (RRF).
+        
+        Args:
+            queries: A list of standalone semantic search queries (e.g., from query_splitter).
+            top_k: The final number of documents to return.
+            
+        Returns:
+            A list of dictionary objects representing the top ranked documents.
+        """
         clean_queries = [query.strip() for query in queries if query and query.strip()]
         if not clean_queries:
             return []
@@ -74,6 +89,9 @@ class Retriever:
             for rank, point in enumerate(points):
                 point_id = str(point.id)
                 payload = point.payload or {}
+                
+                # Manual Reciprocal Rank Fusion (RRF) across the multiple query result sets
+                # Documents that show up high in multiple different queries will get a boosted rank_score
                 rank_score = 1 / (rank + 1)
 
                 if point_id not in docs_by_id:
@@ -81,10 +99,6 @@ class Retriever:
                         "id": point_id,
                         "score": point.score,
                         "rank_score": rank_score,
-                        "text": payload.get("text")
-                        or payload.get("content")
-                        or payload.get("page_content")
-                        or payload.get("document"),
                         "payload": payload,
                     }
                 else:
@@ -99,17 +113,32 @@ class Retriever:
             key=lambda doc: (doc["rank_score"], doc["score"]),
             reverse=True,
         )
-        return docs[:limit]
+        
+        final_docs = []
+        for i, doc in enumerate(docs[:limit]):
+            doc["rank"] = i + 1
+            del doc["rank_score"]
+            final_docs.append(doc)
+            
+        return final_docs
 
     async def _retrieve_one(self, query: str, top_k: int) -> list[Any]:
+        """
+        Executes the internal 3-Stage retrieval pipeline for a single query.
+        Stage 1: Dense Retrieval (with MMR 3x over-fetch) & Sparse Retrieval (BM25).
+        Stage 2: RRF Fusion of Dense and Sparse results into a candidate pool.
+        Stage 3: Late Interaction (ColBERT) re-ranking of the fused candidate pool.
+        """
         dense_vector = (await self.create_dense_embeddings([query]))[0]
         dense_query: Any = dense_vector
         if self.config.use_mmr:
+            # Stage 1a: Dense Retrieval with Maximal Marginal Relevance (MMR)
+            # Fetch 3x candidates internally so MMR has enough room to penalize redundant semantic matches
             dense_query = models.NearestQuery(
                 nearest=dense_vector,
                 mmr=models.Mmr(
                     diversity=self.config.retrieval_mmr_diversity,
-                    candidates_limit=self.config.retrieval_candidate_limit,
+                    candidates_limit=self.config.retrieval_candidate_limit * 3,
                 ),
             )
 
@@ -120,7 +149,9 @@ class Retriever:
                 limit=self.config.retrieval_candidate_limit,
             )
         ]
+        
         if self.config.use_bm25:
+            # Stage 1b: Sparse Retrieval (BM25 Keyword Search)
             prefetches.append(
                 models.Prefetch(
                     query=models.Document(
@@ -135,13 +166,18 @@ class Retriever:
         if self.config.use_late_interaction:
             colbert_vector = (await self.create_late_interaction_embeddings([query]))[0]
             candidate_prefetch: Any = prefetches[0]
+            
             if self.config.use_bm25:
+                # Stage 2: Fuse the Dense and Sparse prefetches via RRF
+                # This outputs a combined pool of elite candidates
                 candidate_prefetch = models.Prefetch(
                     prefetch=prefetches,
                     query=models.FusionQuery(fusion=models.Fusion.RRF),
                     limit=self.config.retrieval_candidate_limit,
                 )
 
+            # Stage 3: Late Interaction Re-ranking
+            # Perform ColBERT cross-attention re-ranking on the fused candidate pool
             response = await self.qdrant.query_points(
                 collection_name=self.config.qdrant_collection_name,
                 prefetch=candidate_prefetch,
