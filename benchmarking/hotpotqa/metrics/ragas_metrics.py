@@ -23,8 +23,13 @@ async def main() -> None:
     context_recall = ContextRecall(llm=llm)
 
     scored_rows = []
+    skipped = 0
     for index, row in enumerate(rows, start=1):
         retrieved_contexts = row["retrieved_contexts"]
+        if not retrieved_contexts:
+            skipped += 1
+            print(f"Skipped {index}/{len(rows)} (empty contexts)")
+            continue
         precision = await context_precision.ascore(
             user_input=row["question"],
             reference=row["reference_answer"],

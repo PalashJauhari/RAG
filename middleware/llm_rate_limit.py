@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from langchain_core.rate_limiters import InMemoryRateLimiter
 
 from config.settings import settings

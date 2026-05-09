@@ -31,7 +31,11 @@ async def main() -> None:
                 "reference_answer": record["reference_answer"],
                 "reference_contexts": reference_contexts,
                 "reference_context_ids": reference_context_ids,
-                "retrieved_contexts": [doc["text"] for doc in docs if doc.get("text")],
+                "retrieved_contexts": [
+                    doc["payload"]["text"]
+                    for doc in docs
+                    if doc.get("payload") and doc["payload"].get("text")
+                ],
                 "retrieved_context_ids": [
                     doc["payload"].get("context_id")
                     for doc in docs

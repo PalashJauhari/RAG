@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from langchain.tools import tool
 
 from config.settings import settings

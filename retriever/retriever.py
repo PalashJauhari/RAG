@@ -24,6 +24,7 @@ class Retriever:
             url=config.qdrant_url,
             api_key=config.qdrant_api_key,
             cloud_inference=config.use_bm25,
+            timeout=config.request_timeout_seconds,
         )
 
     async def create_dense_embeddings(self, queries: list[str]) -> list[list[float]]:
