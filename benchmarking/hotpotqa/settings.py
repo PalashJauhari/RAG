@@ -17,8 +17,6 @@ class HotpotQASettings(Settings):
     hotpotqa_split: str = "validation"
     hotpotqa_max_questions: int = 500
     hotpotqa_upload_batch_size: int = 64
-    hotpotqa_eval_max_questions: int = 500
-    hotpotqa_ragas_max_questions: int = 500
     hotpotqa_ragas_model: str = "gpt-4o-mini"
     hotpotqa_experiment_name: str = "default_experiment"
 

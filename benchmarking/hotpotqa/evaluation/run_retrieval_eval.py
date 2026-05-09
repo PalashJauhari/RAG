@@ -9,8 +9,8 @@ async def main() -> None:
     settings = HotpotQASettings()
     retriever = Retriever(settings)
     records = json.loads(settings.processed_dataset_path.read_text(encoding="utf-8"))
-    if settings.hotpotqa_eval_max_questions > 0:
-        records = records[: settings.hotpotqa_eval_max_questions]
+    if settings.hotpotqa_max_questions > 0:
+        records = records[: settings.hotpotqa_max_questions]
 
     results = []
     for index, record in enumerate(records, start=1):

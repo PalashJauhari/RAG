@@ -12,8 +12,8 @@ from middleware.llm_client import get_embeddings_client
 async def main() -> None:
     settings = HotpotQASettings()
     rows = json.loads(settings.retrieval_results_path.read_text(encoding="utf-8"))
-    if settings.hotpotqa_ragas_max_questions > 0:
-        rows = rows[: settings.hotpotqa_ragas_max_questions]
+    if settings.hotpotqa_max_questions > 0:
+        rows = rows[: settings.hotpotqa_max_questions]
 
     llm = llm_factory(
         settings.hotpotqa_ragas_model,
