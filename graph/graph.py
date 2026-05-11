@@ -43,7 +43,7 @@ class RetrievalGraph:
     def __init__(self, checkpointer: Any) -> None:
         self.checkpointer = checkpointer
         self._postgres_context: Any | None = None
-        self.llm_with_tools = get_llm_client(json_mode=True).bind_tools(TOOLS)
+        self.llm_with_tools = get_llm_client(json_mode=True).bind_tools(TOOLS, strict=True)
         self.graph = self.build_graph()
 
     @classmethod

@@ -102,13 +102,14 @@ def render_chat(messages):
     Output("message-input", "value"),
     Output("error", "children"),
     Input("send-button", "n_clicks"),
+    Input("message-input", "n_submit"),
     State("message-input", "value"),
     State("session-id", "data"),
     State("chat-state", "data"),
     State("pending-interrupt", "data"),
     prevent_initial_call=True,
 )
-def submit_message(_, message, session_id, chat_state, pending_interrupt):
+def submit_message(_clicks, _submits, message, session_id, chat_state, pending_interrupt):
     message = (message or "").strip()
     if not message:
         return chat_state, pending_interrupt, "", ""

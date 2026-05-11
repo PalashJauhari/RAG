@@ -1,4 +1,4 @@
-from langchain.tools import tool
+from langchain_core.tools import tool
 from langgraph.types import interrupt
 
 from pydantic import BaseModel, Field
@@ -10,7 +10,7 @@ class AskUserInput(BaseModel):
         examples=["You mentioned 'it' - are you referring to the enterprise refund policy or the standard policy?"]
     )
 
-@tool(args_schema=AskUserInput, name="ask_user")
+@tool("ask_user", args_schema=AskUserInput)
 def ask_user(question: str) -> str:
     """
     [ROUTING INTENT: AMBIGUITY RESOLUTION]

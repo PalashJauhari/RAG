@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from langchain.tools import tool
+from langchain_core.tools import tool
 
 from config.settings import settings
 from retriever.retriever import Retriever
@@ -22,7 +22,7 @@ class RetrievalToolInput(BaseModel):
         examples=[5, 10]
     )
 
-@tool(args_schema=RetrievalToolInput, name="retrieval_tool")
+@tool("retrieval_tool", args_schema=RetrievalToolInput)
 async def retrieval_tool(queries: list[str], top_k: int | None = None) -> dict:
     """
     [ROUTING INTENT: EXECUTE SEARCH]

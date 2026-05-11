@@ -26,6 +26,8 @@ class Retriever:
             cloud_inference=config.use_bm25,
             timeout=config.request_timeout_seconds,
         )
+        # Serialized access reduces Jina 429 bursts when multiple sub-queries retrieve in parallel.
+        self._jina_request_sem = asyncio.Semaphore(2)
 
     async def create_dense_embeddings(self, queries: list[str]) -> list[list[float]]:
         response = await self.openai.embeddings.create(
@@ -54,15 +56,31 @@ class Retriever:
             "Authorization": f"Bearer {self.config.jina_api_key}",
             "Content-Type": "application/json",
         }
-        async with httpx.AsyncClient(timeout=self.config.request_timeout_seconds) as client:
-            response = await client.post(
-                self.config.jina_multi_vector_url,
-                headers=headers,
-                json=payload,
-            )
-            response.raise_for_status()
+        max_attempts = 6
+        base_delay_seconds = 1.0
 
-        return [row["embeddings"] for row in response.json()["data"]]
+        async with self._jina_request_sem:
+            async with httpx.AsyncClient(timeout=self.config.request_timeout_seconds) as client:
+                for attempt in range(max_attempts):
+                    response = await client.post(
+                        self.config.jina_multi_vector_url,
+                        headers=headers,
+                        json=payload,
+                    )
+                    if response.status_code == 429 and attempt < max_attempts - 1:
+                        retry_after = response.headers.get("retry-after")
+                        wait: float
+                        if retry_after:
+                            try:
+                                wait = float(retry_after)
+                            except ValueError:
+                                wait = min(60.0, base_delay_seconds * (2**attempt))
+                        else:
+                            wait = min(60.0, base_delay_seconds * (2**attempt))
+                        await asyncio.sleep(wait)
+                        continue
+                    response.raise_for_status()
+                    return [row["embeddings"] for row in response.json()["data"]]
 
     async def retrieve(self, queries: list[str], top_k: int | None = None) -> list[dict[str, Any]]:
         """

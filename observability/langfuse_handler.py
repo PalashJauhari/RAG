@@ -37,8 +37,12 @@ def get_observe() -> Callable:
     """
 
     if not settings.langfuse_tracing_enabled:
-        def noop(fn: Callable) -> Callable:
-            return fn
+        def noop(*args, **kwargs):
+            if args and callable(args[0]):
+                return args[0]
+            def wrapper(fn: Callable) -> Callable:
+                return fn
+            return wrapper
         return noop
 
     configure_langfuse_env()
