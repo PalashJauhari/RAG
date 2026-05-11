@@ -7,7 +7,10 @@ from langchain_core.messages import AIMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 from graph import RetrievalGraph
+from observability.langfuse_handler import get_observe
 from output_validation.final_answer import FinalAnswer
+
+observe = get_observe()
 
 
 class RunRequest(BaseModel):
@@ -85,6 +88,7 @@ def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.post("/run")
+@observe(name="api_run")
 async def run(request: RunRequest) -> dict[str, Any]:
     result = await app.state.retrieval_graph.run(
         request.session_id,
@@ -94,6 +98,7 @@ async def run(request: RunRequest) -> dict[str, Any]:
 
 
 @app.post("/resume")
+@observe(name="api_resume")
 async def resume(request: ResumeRequest) -> dict[str, Any]:
     result = await app.state.retrieval_graph.resume(
         request.session_id,

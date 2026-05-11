@@ -42,7 +42,6 @@ class RetrievalGraph:
 
     def __init__(self, checkpointer: Any) -> None:
         self.checkpointer = checkpointer
-        self.callbacks = get_langfuse_callbacks()
         self._postgres_context: Any | None = None
         self.llm_with_tools = get_llm_client(json_mode=True).bind_tools(TOOLS)
         self.graph = self.build_graph()
@@ -132,8 +131,9 @@ class RetrievalGraph:
             "recursion_limit": settings.graph_recursion_limit,
             "max_concurrency": settings.graph_max_concurrency,
         }
-        if self.callbacks:
-            config["callbacks"] = self.callbacks
+        callbacks = get_langfuse_callbacks()
+        if callbacks:
+            config["callbacks"] = callbacks
 
         return await self.graph.ainvoke(
             {"messages": [HumanMessage(content=user_query)]},
@@ -152,8 +152,9 @@ class RetrievalGraph:
             "recursion_limit": settings.graph_recursion_limit,
             "max_concurrency": settings.graph_max_concurrency,
         }
-        if self.callbacks:
-            config["callbacks"] = self.callbacks
+        callbacks = get_langfuse_callbacks()
+        if callbacks:
+            config["callbacks"] = callbacks
 
         return await self.graph.ainvoke(
             Command(resume=value),

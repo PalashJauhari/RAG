@@ -1,5 +1,6 @@
 import os
-from typing import Any
+from typing import Any, Callable
+from functools import wraps
 
 from config.settings import settings
 
@@ -27,3 +28,19 @@ def get_langfuse_callbacks() -> list[Any]:
 
     return [CallbackHandler()]
 
+
+def get_observe() -> Callable:
+    """
+    Return the Langfuse @observe decorator when tracing is enabled.
+    Falls back to a transparent no-op decorator so code works unchanged
+    when LANGFUSE_TRACING_ENABLED=false.
+    """
+
+    if not settings.langfuse_tracing_enabled:
+        def noop(fn: Callable) -> Callable:
+            return fn
+        return noop
+
+    configure_langfuse_env()
+    from langfuse import observe
+    return observe

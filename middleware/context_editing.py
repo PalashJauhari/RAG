@@ -2,9 +2,10 @@ from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, Syst
 
 from config.settings import settings
 from middleware.llm_client import get_llm_client
-
-
+from observability.langfuse_handler import get_observe
 from prompts.context_editing import SUMMARY_SYSTEM_PROMPT
+
+observe = get_observe()
 
 def estimate_tokens(messages: list) -> int:
     """Rough token estimate based on message content length."""
@@ -38,6 +39,7 @@ async def summarize_evicted(previous_summary: str, messages_to_evict: list) -> s
     return str(response.content)
 
 
+@observe(name="truncate_and_summarize")
 async def truncate_and_summarize(
     messages: list,
     previous_summary: str,
