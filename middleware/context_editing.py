@@ -7,6 +7,7 @@ from prompts.context_editing import SUMMARY_SYSTEM_PROMPT
 
 observe = get_observe()
 
+
 def estimate_tokens(messages: list) -> int:
     """Rough token estimate based on message content length."""
 
