@@ -1,14 +1,15 @@
-"""Slim retrieval tool payloads for chat (HotpotQA-style payloads: payload.text)."""
+"""Compact retriever results for graph ToolMessage payloads."""
 
 from __future__ import annotations
 
 from typing import Any
 
 
-def compact_documents_for_llm(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def compact_hotqa_documents_for_llm(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
-    Reduce retriever docs to score + passage text only for ToolMessage.content.
-    Expects dicts shaped like Retriever output (payload with `text`).
+    Reduce retriever docs to the fields currently consumed by evaluator/answer prompts.
+
+    Source metadata is intentionally left out for now; only score and text are exposed.
     """
 
     slim: list[dict[str, Any]] = []

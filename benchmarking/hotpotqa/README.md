@@ -19,8 +19,6 @@ Default size:
 ```env
 HOTPOTQA_SPLIT=validation
 HOTPOTQA_MAX_QUESTIONS=500
-HOTPOTQA_EVAL_MAX_QUESTIONS=500
-HOTPOTQA_RAGAS_MAX_QUESTIONS=500
 HOTPOTQA_UPLOAD_BATCH_SIZE=64
 ```
 
@@ -139,4 +137,3 @@ RAGAS metrics:
 
 - context precision
 - context recall
-

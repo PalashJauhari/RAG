@@ -2,32 +2,36 @@
 
 This project implements a production-grade, research-backed Retrieval-Augmented Generation (RAG) orchestrator built on **LangGraph**, **Qdrant**, and **OpenAI**.
 
-The system utilizes an agentic routing pattern that intelligently prepares queries (Expansion, Rewriting, Splitting) and executes a high-precision 3-stage retrieval pipeline to minimize hallucinations and maximize recall.
+The system uses an explicit LangGraph pipeline that plans retrieval, prepares queries, retrieves evidence, evaluates information completeness, and only then produces a grounded answer.
 
 ## Key Features
 
-- **Agentic Routing**: A master orchestrator with advanced logic to choose between Precision, Recall, or Decomposition strategies.
-- **Production-Grade Tools**: All preparation tools (`query_expansion`, `query_rewriter`, `query_splitter`) use Pydantic `BaseModel` schemas with strict validation, descriptive fields, and few-shot examples to guarantee schema adherence.
+- **Typed Graph Routing**: A master orchestrator node emits validated JSON for retrieval need, decomposition, expansion, and clarification routing.
+- **Evidence Evaluation Loop**: An information evaluator node checks whether the retrieved/contextual evidence is complete, then retries through the orchestrator up to a configurable limit.
 - **3-Stage Hybrid Retrieval**:
   1. **Stage 1 (Base Retrieval)**: Concurrent Dense (w/ MMR 3x over-fetch) and Sparse (BM25) searches.
   2. **Stage 2 (Fusion)**: Reciprocal Rank Fusion (RRF) to merge and prioritize multi-modal candidates.
   3. **Stage 3 (Re-ranking)**: Late Interaction (ColBERTv2) re-ranking for pinpoint precision.
 - **Stateful Orchestration**: LangGraph-native state management with automatic conversation summarization and safe truncation on `HumanMessage` boundaries.
-- **Strict Grounding**: System prompts are engineered to force grounding in retrieved context, with confidence scoring and explicit source citation.
+- **Strict Grounding**: The answer node is prompted to answer only from message context and retrieved documents. Source citation wiring is intentionally deferred; `sources` is currently returned as an empty array.
 
 ## Architecture
 
 ```text
 FastAPI /run or /resume
-  -> LangGraph orchestrator (Master Planner)
-  -> ToolNode (Execution Layer)
-      -> query_rewriter (Context & Co-reference Resolution)
-      -> query_expansion (Recall Optimization & Vocabulary Bridging)
-      -> query_splitter (Multi-hop Decomposition)
-      -> retrieval_tool (3-Stage Hybrid Search)
-      -> ask_user (Ambiguity Resolution)
-  -> orchestrator final grounded answer (answer, sources, confidence)
+  -> orchestrator_node (route + rewrite)
+  -> ask_user_node (optional human clarification via /resume)
+  -> query_parser_node (optional decomposition first, then expansion)
+  -> retrieval_node (3-Stage Hybrid Search, stored as ToolMessage)
+  -> information_evaluator_node (evidence completeness check + retry routing)
+  -> answer_node (answer, sources, confidence)
 ```
+
+Every node appends its validated output to `state["messages"]`. Node-specific state
+keys such as `orchestrator_output`, `parsed_queries`, and `information_evaluation`
+are overwritten for routing convenience, but the message list remains the full audit
+trail. State messages preserve provider metadata for observability; prompts are built
+through plain-text formatters so response metadata is not sent back to the LLM.
 
 ## Advanced Retrieval Flow
 
@@ -57,6 +61,17 @@ RETRIEVAL_TOP_K=8
 # Context Management
 MESSAGE_SUMMARY_TOKEN_THRESHOLD=100000
 MESSAGE_SUMMARY_KEEP_RECENT=10
+INFORMATION_EVALUATION_MAX_RETRIES=5
+
+# Node Models
+ORCHESTRATOR_MODEL=gpt-5.5
+INFORMATION_EVALUATOR_MODEL=gpt-5.5
+FINAL_ANSWER_MODEL=gpt-5.5-mini
+QUERY_DECOMPOSITION_MODEL=gpt-5.5-mini
+QUERY_EXPANSION_MODEL=gpt-5.5-mini
+
+# Observability
+LANGFUSE_TRACING_ENABLED=false
 ```
 
 ## API Usage
@@ -76,16 +91,29 @@ curl -X POST http://127.0.0.1:8000/run \
 ### Response Structure:
 The system returns a structured JSON response:
 - `answer`: Grounded response based strictly on context.
-- `sources`: List of exact source IDs/labels used for the answer.
+- `sources`: Empty for now; source extraction will be wired later.
 - `confidence`: "high", "medium", or "low".
-- `retrieved_docs`: Array of documents containing `text`, `payload`, and `rank`.
+- `retrieved_docs`: Last retrieval payload, currently compacted to `score` and `text`.
+
+When the graph needs clarification, `/run` returns:
+
+```json
+{
+  "interrupted": true,
+  "question": "Which policy are you asking about?",
+  "answer": null
+}
+```
+
+Send the user's clarification to `/resume` with the same `session_id`.
 
 ## Development Notes
 
-- **Prompts**: Centralized in the `prompts/` directory. All prompts are research-aligned with explicit "Use WHEN" triggers.
-- **Tool Validation**: Tools in `tools/` use inline Pydantic models with `Field(description=..., examples=[...])` for maximum reliability with OpenAI's structured output mode.
-- **LLM Client**: Unified client in `middleware/llm_client.py` handles structured output instantiation and embedding generation.
-- **Observability**: Full Langfuse tracing integration enabled via `LANGFUSE_TRACING_ENABLED=true`.
+- **Prompts**: Centralized in the `prompts/` directory, with separate prompts for orchestrator, query parsing, information evaluation, and final answering.
+- **Output Validation**: Structured graph node outputs live in `output_validation/` and use Pydantic models with descriptive fields.
+- **LLM Client**: Unified client construction in `middleware/llm_client.py` handles model configuration, structured output wrappers, rate limiting, and embedding generation.
+- **Observability**: Langfuse integration is available at API, graph node, summarization, and LangChain callback layers when `LANGFUSE_TRACING_ENABLED=true`.
+- **UI**: The Dash app in `ui/dash_app.py` talks to `/run` and `/resume` through `ui/api_client.py`, using the `interrupted` response flag to switch into clarification mode.
 
 ## Benchmarking
 

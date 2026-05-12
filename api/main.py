@@ -55,13 +55,23 @@ def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
     messages = result.get("messages", [])
     answer = FinalAnswer(answer="", sources=[], confidence="low")
     for message in reversed(messages):
-        if isinstance(message, AIMessage) and message.content:
-            try:
-                payload = json.loads(message.content) if isinstance(message.content, str) else message.content
-                answer = FinalAnswer.model_validate(payload)
-            except (json.JSONDecodeError, ValueError, TypeError):
-                answer = FinalAnswer(answer=str(message.content), sources=[], confidence="low")
+        if not isinstance(message, AIMessage) or not message.content:
+            continue
+        if getattr(message, "name", None) != "answer_node":
+            continue
+        try:
+            payload = json.loads(message.content) if isinstance(message.content, str) else message.content
+            answer = FinalAnswer.model_validate(payload)
             break
+        except (json.JSONDecodeError, ValueError, TypeError):
+            answer = FinalAnswer(answer=str(message.content), sources=[], confidence="low")
+            break
+
+    if not answer.answer:
+        for message in reversed(messages):
+            if isinstance(message, AIMessage) and message.content:
+                answer = FinalAnswer(answer=str(message.content), sources=[], confidence="low")
+                break
 
     retrieved_docs = []
     for message in reversed(messages):
@@ -105,4 +115,3 @@ async def resume(request: ResumeRequest) -> dict[str, Any]:
         request.answer,
     )
     return get_api_response(request.session_id, result)
-
