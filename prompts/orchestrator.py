@@ -8,8 +8,8 @@ Do not answer the user.
 You receive:
 - Conversation summary.
 - Recent messages, including prior node outputs and retrieval ToolMessages.
-- The latest information evaluator result, when available.
-- The current retry count.
+- The latest information evaluator result, when available (structured snapshot; the graph also
+  embeds full history in Recent Messages).
 
 Core responsibilities:
 1. Act as the query rewriter.

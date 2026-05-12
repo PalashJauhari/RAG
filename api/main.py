@@ -6,7 +6,10 @@ from fastapi import FastAPI
 from langchain_core.messages import AIMessage, ToolMessage
 from pydantic import BaseModel, Field
 
+from config.settings import settings
 from graph import RetrievalGraph
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from observability.langfuse_handler import get_observe
 from output_validation.final_answer import FinalAnswer
 
@@ -25,7 +28,17 @@ class ResumeRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.retrieval_graph = await RetrievalGraph.create()
+    if settings.checkpointer_use_postgres:
+        if not settings.database_url.strip():
+            raise ValueError("CHECKPOINTER_USE_POSTGRES=true but DATABASE_URL is missing.")
+        postgres_context = AsyncPostgresSaver.from_conn_string(settings.database_url)
+        checkpointer = await postgres_context.__aenter__()
+        await checkpointer.setup()
+        app.state.retrieval_graph = RetrievalGraph(checkpointer, postgres_context=postgres_context)
+        print("RAG checkpointer: Postgres", flush=True)
+    else:
+        app.state.retrieval_graph = RetrievalGraph(InMemorySaver())
+        print("RAG checkpointer: InMemorySaver", flush=True)
     try:
         yield
     finally:
