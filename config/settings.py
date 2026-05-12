@@ -11,11 +11,11 @@ class Settings(BaseSettings):
     openai_summary_model: str = "gpt-4.1-mini"
     openai_temperature: float = 0
 
-    orchestrator_model: str = "gpt-5.5"
-    information_evaluator_model: str = "gpt-5.5"
-    final_answer_model: str = "gpt-5.5-mini"
-    query_decomposition_model: str = "gpt-5.5-mini"
-    query_expansion_model: str = "gpt-5.5-mini"
+    orchestrator_model: str = "gpt-4.1-mini"
+    information_evaluator_model: str = "gpt-4.1-mini"
+    final_answer_model: str = "gpt-4.1-mini"
+    query_decomposition_model: str = "gpt-4.1-mini"
+    query_expansion_model: str = "gpt-4.1-mini"
 
     qdrant_url: str = ""
     qdrant_api_key: str = ""
