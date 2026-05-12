@@ -4,6 +4,7 @@ from langchain_core.tools import tool
 
 from config.settings import settings
 from retriever.retriever import Retriever
+from tool_wrappers.hotpotqa_wrapper import compact_documents_for_llm
 
 
 retriever = Retriever(settings)
@@ -31,5 +32,5 @@ async def retrieval_tool(queries: list[str], top_k: int | None = None) -> dict:
     """
 
     docs = await retriever.retrieve(queries, top_k=top_k)
-    return {"documents": docs}
+    return {"documents": compact_documents_for_llm(docs)}
 

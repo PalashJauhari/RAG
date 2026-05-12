@@ -14,6 +14,7 @@ from middleware.llm_client import get_llm_client
 from observability.langfuse_handler import get_langfuse_callbacks
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from prompts.orchestrator import SYSTEM_PROMPT
+from tool_wrappers.prompt_plain import messages_to_plain_context
 from tools.ask_user import ask_user
 from tools.query_expansion import query_expansion
 from tools.query_rewriter import query_rewriter
@@ -78,7 +79,7 @@ class RetrievalGraph:
             "## Conversation Summary\n"
             f"{summary or '(none)'}\n\n"
             "## Recent Messages\n"
-            f"{kept_messages}\n\n"
+            f"{messages_to_plain_context(kept_messages)}\n\n"
             "Use this summary only as conversation context. Retrieve documents before answering."
         )
         response = await self.llm_with_tools.ainvoke(

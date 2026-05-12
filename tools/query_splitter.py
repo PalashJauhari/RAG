@@ -4,6 +4,7 @@ from langgraph.prebuilt import ToolRuntime
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from middleware.llm_client import get_llm_client
+from tool_wrappers.prompt_plain import messages_to_plain_context
 from output_validation.query_splitter import QuerySplitResult
 from prompts.query_splitter import SYSTEM_PROMPT
 
@@ -33,7 +34,7 @@ async def query_splitter(input_query: str, runtime: ToolRuntime) -> dict:
         "## Conversation Summary\n"
         f"{summary or '(none)'}\n\n"
         "## Recent Messages\n"
-        f"{messages}\n\n"
+        f"{messages_to_plain_context(messages)}\n\n"
         f"Input query to split:\n{input_query}\n\n"
         "Use this summary only as conversation context. Retrieve documents before answering."
     )

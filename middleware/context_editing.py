@@ -1,17 +1,21 @@
-from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
+from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 
 from config.settings import settings
 from middleware.llm_client import get_llm_client
 from observability.langfuse_handler import get_observe
 from prompts.context_editing import SUMMARY_SYSTEM_PROMPT
+from tool_wrappers.prompt_plain import messages_to_plain_context
 
 observe = get_observe()
 
 
 def estimate_tokens(messages: list) -> int:
-    """Rough token estimate based on message content length."""
+    """Rough token estimate: same informational footprint as orchestrator plain context (no LC metadata dumps)."""
 
-    return sum(len(str(getattr(message, "content", "") or "")) for message in messages) // 4
+    if not messages:
+        return 0
+    plain = messages_to_plain_context(messages)
+    return len(plain) // 4
 
 
 def find_safe_truncation_point(messages: list, keep: int) -> int:
