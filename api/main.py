@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage
 from pydantic import BaseModel, Field
 
 from config.settings import settings
@@ -17,7 +17,7 @@ observe = get_observe()
 
 
 class RunRequest(BaseModel):
-    session_id: str = Field(description="Stable session id used as LangGraph thread_id.")
+    session_id: str = Field(description="Stable session id used as conversation thread id for checkpointing.")
     message: str = Field(description="User message to process.")
 
 
@@ -49,7 +49,7 @@ app = FastAPI(title="RAG Retrieval Orchestrator", lifespan=lifespan)
 
 
 def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
-    """Build the stable API response from a LangGraph invoke result."""
+    """Build the stable API response from a completed graph invoke result."""
 
     interrupts = result.get("__interrupt__") or []
     if interrupts:
@@ -86,18 +86,7 @@ def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
                 answer = FinalAnswer(answer=str(message.content), sources=[], confidence="low")
                 break
 
-    retrieved_docs = []
-    for message in reversed(messages):
-        if not isinstance(message, ToolMessage):
-            continue
-        content = message.content
-        try:
-            payload = json.loads(content) if isinstance(content, str) else content
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if isinstance(payload, dict) and "documents" in payload:
-            retrieved_docs = payload["documents"]
-            break
+    retrieved_docs = list(result.get("retrieved_documents") or [])
 
     return {
         "session_id": session_id,

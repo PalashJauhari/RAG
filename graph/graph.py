@@ -1,22 +1,20 @@
-"""LangGraph retrieval agent: explicit routing, hybrid search, and evidence-gated answering.
+"""Retrieval agent: explicit routing, hybrid search, and evidence-gated answering.
 
 Flow (high level):
     orchestrator → [ask_user if clarify] → [query_parser → retrieval if fetch] →
     information_evaluator → [retry orchestrator or] → answer → END
 
-State is checkpointed per ``thread_id`` (API ``session_id``). Node outputs are appended as
-``AIMessage`` JSON (and retrieval as ``ToolMessage``) for a full audit trail in
-``messages``; parallel keys like ``orchestrator_output`` hold the latest structured
-outputs for routing and prompts.
+State is checkpointed per ``thread_id`` (API ``session_id``). ``messages`` holds user turns and
+node ``AIMessage`` JSON (including a short retrieval status line, not passage text). Compact
+passages live in ``retrieved_documents``. The information evaluator updates
+``information_evaluation`` without duplicating it in ``messages``.
 """
 
 from __future__ import annotations
 
 import json
 from typing import Annotated, Any, TypedDict
-from uuid import uuid4
-
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph, add_messages
 from langgraph.types import Command, interrupt
 
@@ -45,11 +43,14 @@ observe = get_observe()
 class RetrievalState(TypedDict, total=False):
     """Checkpointed conversation and scratch fields for one thread.
 
-    ``messages``: full history (user, node AIMessages, retrieval ToolMessages), merged with
-        ``add_messages``; may include RemoveMessage ops after summarization.
+    ``messages``: user turns and structured ``AIMessage`` JSON (orchestrator, query parser,
+        clarification, retrieval status notice, final answer). Passage text is not stored here;
+        it lives in ``retrieved_documents``.
     ``message_summary``: rolling summary of evicted turns when context is truncated.
     ``orchestrator_output``: last ``OrchestratorOutput`` dict (query, routing flags).
     ``parsed_queries``: strings sent to the retriever after decomposition/expansion.
+    ``retrieved_documents``: compact rows ``{score, text}``; extended on each retrieval hop;
+        cleared on each new user ``/run`` input.
     ``information_evaluation``: last ``InformationEvaluation`` dict.
     ``information_retry_count``: increments on each incomplete evaluation (caps retries).
     """
@@ -58,6 +59,7 @@ class RetrievalState(TypedDict, total=False):
     message_summary: str
     orchestrator_output: dict[str, Any]
     parsed_queries: list[str]
+    retrieved_documents: list[dict[str, Any]]
     information_evaluation: dict[str, Any]
     information_retry_count: int
 
@@ -87,7 +89,7 @@ def build_node_ai_message(
 
 
 class RetrievalGraph:
-    """Compiles the pipeline with a LangGraph checkpointer (memory or Postgres).
+    """Compiles the pipeline with a graph checkpointer (memory or Postgres).
 
     Pass a ready checkpointer from app startup (see ``api.main`` lifespan for Postgres vs memory).
     """
@@ -149,7 +151,7 @@ class RetrievalGraph:
 
         output = state.get("orchestrator_output") or {}
         question = str(output.get("clarification_question") or "Please clarify your request.")
-        # LangGraph interrupt: API returns ``interrupted`` + ``question``; resume supplies ``answer``.
+        # interrupt(): API returns ``interrupted`` + ``question``; resume supplies ``answer``.
         answer = interrupt({"question": question})
 
         question_payload = {"clarification_question": question}
@@ -244,41 +246,46 @@ class RetrievalGraph:
 
     @observe(name="retrieval_node")
     async def retrieval_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Run hybrid retriever over all queries; attach compact docs as a ToolMessage."""
+        """Hybrid Qdrant search; append compact rows to ``retrieved_documents`` plus a status line in ``messages``."""
 
-        queries = [query.strip() for query in state.get("parsed_queries", []) if query.strip()]
-        if not queries:
-            query = str((state.get("orchestrator_output") or {}).get("query") or "").strip()
-            queries = [query] if query else []
+        # Prefer query_parser output; if empty, fall back to the orchestrator’s single rewritten query.
+        search_queries = [q.strip() for q in state.get("parsed_queries", []) if q.strip()]
+        if not search_queries:
+            fallback = str((state.get("orchestrator_output") or {}).get("query") or "").strip()
+            search_queries = [fallback] if fallback else []
 
-        # Multi-query results are fused inside Retriever; payload is JSON for downstream LLM prompts.
-        docs = await self.retriever.retrieve(queries)
-        payload = {
-            "queries": queries,
-            "documents": compact_hotqa_documents_for_llm(docs),
+        ranked_hits = await self.retriever.retrieve(search_queries)
+        # Same shape as ``retrieval_payload``: list of {"score", "text"} for state and evaluators.
+        compact_document_rows = compact_hotqa_documents_for_llm(ranked_hits)
+        accumulated = list(state.get("retrieved_documents") or [])
+        updated_documents = accumulated + compact_document_rows
+
+        retrieval_notice = {
+            "detail": (
+                "Retrieved documents were updated in state and are available for "
+                "information completeness evaluation."
+            ),
+            "search_queries": search_queries,
         }
         return {
             "messages": [
-                ToolMessage(
-                    content=json.dumps(payload, ensure_ascii=False),
-                    name="retrieval_node",
-                    tool_call_id=f"retrieval-{uuid4()}",
-                    response_metadata={"node": "retrieval_node"},
+                build_node_ai_message(
+                    node_name="retrieval_node",
+                    payload=retrieval_notice,
                 )
             ],
+            "retrieved_documents": updated_documents,
         }
 
     @observe(name="information_evaluator_node")
     async def information_evaluator_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Decide if the thread has enough evidence; drive retry routing and missing_info hints."""
+        """Decide sufficiency from ``parsed_queries`` + accumulated ``retrieved_documents``."""
 
-        # Prompt: summary plus full plain-text transcript (retrieval ToolMessages and prior nodes
-        # appear in Messages). No separate evaluator JSON or retry counter — freshness comes from Messages.
         context = (
-            "## Conversation Summary\n"
-            f"{state.get('message_summary') or '(none)'}\n\n"
-            "## Messages\n"
-            f"{messages_to_plain_context(state.get('messages', []))}"
+            "## Parsed queries\n"
+            f"{json.dumps(state.get('parsed_queries') or [], ensure_ascii=False)}\n\n"
+            "## Retrieved documents\n"
+            f"{json.dumps(state.get('retrieved_documents') or [], ensure_ascii=False)}"
         )
         llm = get_llm_client(
             model=settings.information_evaluator_model,
@@ -293,21 +300,14 @@ class RetrievalGraph:
             config={"callbacks": get_langfuse_callbacks()},
         )
         response = result["parsed"]
-        raw = result["raw"]
         evaluation = response.model_dump()
         retry_count = state.get("information_retry_count", 0)
         if not evaluation["information_complete"]:
             # Counts toward ``information_evaluation_max_retries`` before answer is forced.
             retry_count += 1
 
+        # Evaluation lives only in ``information_evaluation`` (orchestrator prompt already injects it).
         return {
-            "messages": [
-                build_node_ai_message(
-                    node_name="information_evaluator_node",
-                    payload=evaluation,
-                    raw=raw,
-                )
-            ],
             "information_evaluation": evaluation,
             "information_retry_count": retry_count,
         }
@@ -316,14 +316,13 @@ class RetrievalGraph:
     async def answer_node(self, state: RetrievalState) -> dict[str, Any]:
         """Emit final ``FinalAnswer`` JSON (grounded; API reads this node from ``messages``)."""
 
-        # Three blocks only: summary, full plain transcript (includes retrieval), last evaluator JSON.
         context = (
             "## Conversation Summary\n"
             f"{state.get('message_summary') or '(none)'}\n\n"
-            "## Messages\n"
-            f"{messages_to_plain_context(state.get('messages', []))}\n\n"
-            "## Latest Information Evaluation\n"
-            f"{json.dumps(state.get('information_evaluation') or {}, ensure_ascii=False)}"
+            "## Parsed queries\n"
+            f"{json.dumps(state.get('parsed_queries') or [], ensure_ascii=False)}\n\n"
+            "## Retrieved documents\n"
+            f"{json.dumps(state.get('retrieved_documents') or [], ensure_ascii=False)}"
         )
         llm = get_llm_client(
             model=settings.final_answer_model,
@@ -418,12 +417,13 @@ class RetrievalGraph:
         if callbacks:
             config["callbacks"] = callbacks
 
-        # Merge into checkpointed state: new human turn + clear routing counters for a clean pass.
+        # Per-turn scratch: new HumanMessage plus empty routing/evaluation/doc slots for this user message.
         return await self.graph.ainvoke(
             {
                 "messages": [HumanMessage(content=user_query)],
                 "orchestrator_output": {},
                 "parsed_queries": [],
+                "retrieved_documents": [],
                 "information_evaluation": {},
                 "information_retry_count": 0,
             },
