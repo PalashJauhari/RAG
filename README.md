@@ -160,6 +160,24 @@ The system returns a structured JSON response:
   LangChain callback layers when `LANGFUSE_TRACING_ENABLED=true`.
 - **UI**: The Dash app in `ui/dash_app.py` talks to `/run` and `/resume` through `ui/api_client.py`.
 
+### Plot the LangGraph Flow
+
+Render the compiled graph to Mermaid source and a PNG image:
+
+```bash
+python scripts/plot_langgraph.py
+```
+
+Defaults:
+
+```text
+artifacts/langgraph.mmd
+artifacts/langgraph.png
+```
+
+The default PNG renderer uses Mermaid.ink through LangChain Core's `draw_mermaid_png()` API path.
+Use `--draw-method pyppeteer` if you have Pyppeteer installed and want local rendering.
+
 ## Benchmarking
 
 HotpotQA validation and RAGAS metrics live in `benchmarking/hotpotqa`. This suite evaluates the

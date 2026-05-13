@@ -9,3 +9,5 @@ benchmarking/hotpotqa/data/processed/*
 !benchmarking/hotpotqa/data/processed/.gitkeep
 benchmarking/hotpotqa/data/results/*
 !benchmarking/hotpotqa/data/results/.gitkeep
+
+artifacts/
