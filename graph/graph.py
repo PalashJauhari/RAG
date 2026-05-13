@@ -302,7 +302,7 @@ class RetrievalGraph:
         response = result["parsed"]
         evaluation = response.model_dump()
         retry_count = state.get("information_retry_count", 0)
-        if not evaluation["information_complete"]:
+        if not evaluation["is_information_complete"]:
             # Counts toward ``information_evaluation_max_retries`` before answer is forced.
             retry_count += 1
 
@@ -317,8 +317,6 @@ class RetrievalGraph:
         """Emit final ``FinalAnswer`` JSON (grounded; API reads this node from ``messages``)."""
 
         context = (
-            "## Conversation Summary\n"
-            f"{state.get('message_summary') or '(none)'}\n\n"
             "## Parsed queries\n"
             f"{json.dumps(state.get('parsed_queries') or [], ensure_ascii=False)}\n\n"
             "## Retrieved documents\n"
@@ -359,7 +357,7 @@ class RetrievalGraph:
         """After evaluation: answer if sufficient or retries exhausted; else replan at orchestrator."""
 
         evaluation = state.get("information_evaluation") or {}
-        if evaluation.get("information_complete"):
+        if evaluation.get("is_information_complete"):
             return "answer"
         if state.get("information_retry_count", 0) >= settings.information_evaluation_max_retries:
             return "answer"
