@@ -11,11 +11,15 @@ class Settings(BaseSettings):
     openai_summary_model: str = "gpt-4.1-mini"
     openai_temperature: float = 0
 
-    orchestrator_model: str = "gpt-4.1-mini"
+    query_normalisation_model: str = "gpt-4.1-mini"
+    query_complexity_model: str = "gpt-4.1-mini"
+    query_rewriter_model: str = "gpt-4.1-mini"
     information_evaluator_model: str = "gpt-4.1-mini"
     final_answer_model: str = "gpt-4.1-mini"
     query_decomposition_model: str = "gpt-4.1-mini"
     query_expansion_model: str = "gpt-4.1-mini"
+    gap_fill_model: str = "gpt-4.1-mini"
+    intent_correction_rewriter_model: str = "gpt-4.1-mini"
 
     qdrant_url: str = ""
     qdrant_api_key: str = ""
@@ -49,7 +53,8 @@ class Settings(BaseSettings):
 
     graph_recursion_limit: int = 100
     graph_max_concurrency: int = 2
-    information_evaluation_max_retries: int = 5
+    insufficient_recall_max_retries: int = 3
+    intent_mismatch_max_retries: int = 2
 
     message_summary_token_threshold: int = 100000
     message_summary_keep_recent: int = 10

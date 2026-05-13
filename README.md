@@ -1,54 +1,95 @@
 # Advanced RAG Orchestration Pipeline
 
-This project implements a production-grade, research-backed Retrieval-Augmented Generation (RAG) orchestrator built on **LangGraph**, **Qdrant**, and **OpenAI**.
+This project implements a production-grade Retrieval-Augmented Generation (RAG) pipeline built
+on **LangGraph**, **Qdrant**, and **OpenAI**.
 
-The system uses an explicit LangGraph pipeline that plans retrieval, prepares queries, retrieves evidence, evaluates information completeness, and only then produces a grounded answer.
+The system uses an explicit LangGraph flow that normalizes the user's query, classifies query
+complexity, prepares retrieval queries, retrieves evidence, evaluates whether the evidence matches
+the intent, repairs recall or intent issues when needed, and only then produces a grounded answer.
 
 ## Key Features
 
-- **Typed Graph Routing**: A master orchestrator node emits validated JSON for retrieval need, decomposition, expansion, and clarification routing.
-- **Evidence Evaluation Loop**: An information evaluator node checks whether the retrieved/contextual evidence is complete, then retries through the orchestrator up to a configurable limit.
+- **Query Normalisation First**: The latest user message is rewritten into a standalone query using
+  conversation context while preserving ambiguity instead of guessing.
+- **Typed Complexity Routing**: Query complexity is emitted as validated JSON with one exact label:
+  `simple_query`, `comparison_query`, `multihop_query`, `procedural_query`, `ambiguous_query`, or
+  `exploratory_query`.
+- **Specialized Query Preparation**:
+  - Simple queries go directly to retrieval.
+  - Comparison, multihop, and procedural queries are split into focused retrieval queries.
+  - Exploratory queries are expanded into multiple retrieval angles.
+  - Ambiguous queries are rewritten safely for now; the `/resume` endpoint remains available for
+    future clarification support.
+- **Evidence Evaluation Loop**: The evaluator returns `sufficient`, `insufficient_recall`, or
+  `intent_mismatch`. Recall gaps route through gap-fill query generation; intent mismatches route
+  through intent-correction rewriting.
 - **3-Stage Hybrid Retrieval**:
-  1. **Stage 1 (Base Retrieval)**: Concurrent Dense (w/ MMR 3x over-fetch) and Sparse (BM25) searches.
-  2. **Stage 2 (Fusion)**: Reciprocal Rank Fusion (RRF) to merge and prioritize multi-modal candidates.
-  3. **Stage 3 (Re-ranking)**: Late Interaction (ColBERTv2) re-ranking for pinpoint precision.
-- **Stateful Orchestration**: LangGraph-native state management with automatic conversation summarization and safe truncation on `HumanMessage` boundaries.
-- **Strict Grounding**: The answer node is prompted to answer only from message context and retrieved documents. Source citation wiring is intentionally deferred; `sources` is currently returned as an empty array.
+  1. **Stage 1 (Base Retrieval)**: Concurrent Dense (with optional MMR over-fetch) and Sparse
+     BM25 searches.
+  2. **Stage 2 (Fusion)**: Reciprocal Rank Fusion (RRF) to merge dense and sparse candidates.
+  3. **Stage 3 (Re-ranking)**: Optional ColBERTv2 late-interaction re-ranking.
+- **Lean Message State**: `messages` stores user turns and final answer node outputs only. Node
+  scratch data lives in explicit state keys such as `normalized_query`, `parsed_queries`,
+  `retrieved_documents`, and `information_evaluation`.
+- **Strict Grounding**: The final answer node answers only from retrieved documents. Source citation
+  wiring is intentionally deferred, so `sources` is currently returned as an empty array.
 
 ## Architecture
 
 ```text
-FastAPI /run or /resume
-  -> orchestrator_node (route + rewrite)
-  -> ask_user_node (optional human clarification via /resume)
-  -> query_parser_node (optional decomposition first, then expansion)
-  -> retrieval_node (3-Stage Hybrid Search, stored as ToolMessage)
-  -> information_evaluator_node (evidence completeness check + retry routing)
-  -> answer_node (answer, sources, confidence)
+FastAPI /run
+  -> query_normalisation_node
+  -> query_complexity_node
+      simple_query
+        -> retrieval_node
+      comparison_query / multihop_query / procedural_query
+        -> query_splitter_node
+        -> retrieval_node
+      exploratory_query
+        -> query_expansion_node
+        -> retrieval_node
+      ambiguous_query
+        -> query_rewriter_node
+        -> retrieval_node
+  -> information_evaluator_node
+      sufficient
+        -> answer_node
+      insufficient_recall
+        -> gap_fill_node
+        -> retrieval_node
+      intent_mismatch
+        -> intent_correction_rewriter_node
+        -> retrieval_node
 ```
 
-Every node appends its validated output to `state["messages"]`. Node-specific state
-keys such as `orchestrator_output`, `parsed_queries`, and `information_evaluation`
-are overwritten for routing convenience, but the message list remains the full audit
-trail. State messages preserve provider metadata for observability; prompts are built
-through plain-text formatters so response metadata is not sent back to the LLM.
+The graph appends retrieved documents across retry loops within the same user turn. A new `/run`
+input resets turn-level scratch fields such as `parsed_queries`, `retrieved_documents`, evaluator
+state, and retry counters.
+
+`/resume` is still exposed by the API so clarification can be reintroduced later without changing
+the client contract. The current graph does not interrupt for ambiguous queries; it rewrites them
+best-effort and continues to retrieval.
 
 ## Advanced Retrieval Flow
 
-The `Retriever` executes a sophisticated multi-stage pipeline for every query:
+The `Retriever` executes a multi-stage pipeline for every query:
 
-1. **Candidate Fetching**:
-   - **Dense**: Fetches `RETRIEVAL_CANDIDATE_LIMIT * 3` raw vectors, then applies MMR (Maximal Marginal Relevance) to return a diverse pool of candidates.
-   - **Sparse (BM25)**: Concurrent keyword search fetching `RETRIEVAL_CANDIDATE_LIMIT` candidates.
-2. **Hybrid Fusion**:
-   - Uses **Reciprocal Rank Fusion (RRF)** to merge the dense and sparse pools into a single, prioritized candidate list (top 100).
-3. **Late Interaction Reranking**:
-   - Uses **ColBERTv2** (via Jina multi-vectors) to perform token-level cross-attention re-ranking on the fused pool.
+1. **Candidate Fetching**
+   - **Dense**: Fetches candidates using OpenAI embeddings. With MMR enabled, Qdrant fetches a
+     larger internal candidate pool to encourage diversity.
+   - **Sparse (BM25)**: Optional keyword search using Qdrant cloud inference.
+2. **Hybrid Fusion**
+   - Uses **Reciprocal Rank Fusion (RRF)** to merge dense and sparse pools.
+3. **Late Interaction Reranking**
+   - Uses **ColBERTv2** via Jina multi-vectors to rerank the fused candidate pool.
    - Returns the final `RETRIEVAL_TOP_K` documents.
+
+For multiple parsed queries, the retriever runs each query, deduplicates by point id, and boosts
+documents that rank well across query result sets.
 
 ## Environment Configuration
 
-Copy `.env.example` to `.env`. Key performance flags:
+Copy `.env.example` to `.env`. Key flags:
 
 ```env
 # Retrieval Strategy
@@ -61,14 +102,21 @@ RETRIEVAL_TOP_K=8
 # Context Management
 MESSAGE_SUMMARY_TOKEN_THRESHOLD=100000
 MESSAGE_SUMMARY_KEEP_RECENT=10
-INFORMATION_EVALUATION_MAX_RETRIES=5
+
+# Retry Loops
+INSUFFICIENT_RECALL_MAX_RETRIES=3
+INTENT_MISMATCH_MAX_RETRIES=2
 
 # Node Models
-ORCHESTRATOR_MODEL=gpt-4.1-mini
+QUERY_NORMALISATION_MODEL=gpt-4.1-mini
+QUERY_COMPLEXITY_MODEL=gpt-4.1-mini
+QUERY_REWRITER_MODEL=gpt-4.1-mini
 INFORMATION_EVALUATOR_MODEL=gpt-4.1-mini
 FINAL_ANSWER_MODEL=gpt-4.1-mini
 QUERY_DECOMPOSITION_MODEL=gpt-4.1-mini
 QUERY_EXPANSION_MODEL=gpt-4.1-mini
+GAP_FILL_MODEL=gpt-4.1-mini
+INTENT_CORRECTION_REWRITER_MODEL=gpt-4.1-mini
 
 # Observability
 LANGFUSE_TRACING_ENABLED=false
@@ -77,47 +125,54 @@ LANGFUSE_TRACING_ENABLED=false
 ## API Usage
 
 Start the server:
+
 ```bash
 uvicorn api.main:app --reload
 ```
 
-### Run a query:
+### Run a query
+
 ```bash
 curl -X POST http://127.0.0.1:8000/run \
   -H "Content-Type: application/json" \
   -d '{"session_id":"demo","message":"Compare the refund policies for Enterprise and Consumer tiers."}'
 ```
 
-### Response Structure:
+### Response Structure
+
 The system returns a structured JSON response:
-- `answer`: Grounded response based strictly on context.
+
+- `answer`: Grounded response based strictly on retrieved documents.
 - `sources`: Empty for now; source extraction will be wired later.
-- `confidence`: "high", "medium", or "low".
-- `retrieved_docs`: Last retrieval payload, currently compacted to `score` and `text`.
-
-When the graph needs clarification, `/run` returns:
-
-```json
-{
-  "interrupted": true,
-  "question": "Which policy are you asking about?",
-  "answer": null
-}
-```
-
-Send the user's clarification to `/resume` with the same `session_id`.
+- `confidence`: `high`, `medium`, or `low`.
+- `retrieved_docs`: Last turn's compact retrieved documents, currently `score` and `text`.
 
 ## Development Notes
 
-- **Prompts**: Centralized in the `prompts/` directory, with separate prompts for orchestrator, query parsing, information evaluation, and final answering.
-- **Output Validation**: Structured graph node outputs live in `output_validation/` and use Pydantic models with descriptive fields.
-- **LLM Client**: Unified client construction in `middleware/llm_client.py` handles model configuration, structured output wrappers, rate limiting, and embedding generation.
-- **Observability**: Langfuse integration is available at API, graph node, summarization, and LangChain callback layers when `LANGFUSE_TRACING_ENABLED=true`.
-- **UI**: The Dash app in `ui/dash_app.py` talks to `/run` and `/resume` through `ui/api_client.py`, using the `interrupted` response flag to switch into clarification mode.
+- **Prompts**: Centralized in `prompts/`, one system prompt per graph node.
+- **Output Validation**: Structured node outputs live in `output_validation/` and use Pydantic
+  models with descriptive fields.
+- **LLM Client**: Unified client construction in `middleware/llm_client.py` handles model
+  configuration, structured output wrappers, and rate limiting.
+- **Metadata Handling**: Final answer messages preserve provider metadata in `messages`. Prompt
+  contexts are built as plain text or JSON so LangChain response metadata is not sent back to LLMs.
+- **Observability**: Langfuse integration is available at API, graph node, summarization, and
+  LangChain callback layers when `LANGFUSE_TRACING_ENABLED=true`.
+- **UI**: The Dash app in `ui/dash_app.py` talks to `/run` and `/resume` through `ui/api_client.py`.
 
 ## Benchmarking
 
-HotpotQA validation and RAGAS metrics live in `benchmarking/hotpotqa`. This suite evaluates the full 3-stage pipeline against standard datasets for Precision and Recall.
+HotpotQA validation and RAGAS metrics live in `benchmarking/hotpotqa`. This suite evaluates the
+retriever directly; it does not run the full LangGraph agent.
+
+```bash
+python -m benchmarking.hotpotqa.dataset.prepare_eval_data
+python -m benchmarking.hotpotqa.qdrant_upload.upload
+python -m benchmarking.hotpotqa.evaluation.run_retrieval_eval
+python -m benchmarking.hotpotqa.metrics.ragas_metrics
+python -m benchmarking.hotpotqa.metrics.exact_metrics
+```
 
 ---
-*Powered by LangGraph, Qdrant Cloud, and Advanced RAG Research.*
+
+Powered by LangGraph, Qdrant Cloud, and Advanced RAG Research.

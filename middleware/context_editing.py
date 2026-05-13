@@ -10,7 +10,7 @@ observe = get_observe()
 
 
 def estimate_tokens(messages: list) -> int:
-    """Rough token estimate: same informational footprint as orchestrator plain context (no LC metadata dumps)."""
+    """Rough token estimate from plain context (no LC metadata dumps)."""
 
     if not messages:
         return 0
@@ -61,4 +61,3 @@ async def truncate_and_summarize(
     updated_summary = await summarize_evicted(previous_summary, to_evict)
     remove_ops = [RemoveMessage(id=message.id) for message in to_evict]
     return updated_summary, messages[cut:], remove_ops
-

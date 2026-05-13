@@ -1,23 +1,27 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
-class InformationEvaluation(BaseModel):
-    """Evidence sufficiency judgment produced by the information evaluator node."""
+EvaluationStatus = Literal["sufficient", "insufficient_recall", "intent_mismatch"]
 
-    is_information_complete: bool = Field(
+
+class InformationEvaluation(BaseModel):
+    """Evidence judgment produced by the information evaluator node."""
+
+    evaluation_status: EvaluationStatus = Field(
         description=(
-            "True when retrieved passages fully support a grounded answer for the user need "
-            "implied by the parsed queries."
+            "sufficient when documents answer the parsed queries; insufficient_recall when "
+            "documents are relevant but incomplete; intent_mismatch when documents are mostly "
+            "about a different intent or entity."
         ),
-        examples=[False],
+        examples=["insufficient_recall"],
     )
     missing_evidence_details: list[str] = Field(
         default_factory=list,
         description=(
-            "When is_information_complete is false: required, non-empty list of detailed analyses. "
-            "Each item should clearly describe (1) what the current retrieved passages do cover or "
-            "partially address, and (2) what substantive evidence, facts, or scope is still absent. "
-            "When is_information_complete is true: use an empty list."
+            "Required and non-empty only for insufficient_recall. Each item should explain what "
+            "the current documents cover and what exact evidence is still missing."
         ),
         examples=[
             [
@@ -25,4 +29,8 @@ class InformationEvaluation(BaseModel):
                 "Enterprise vs Consumer tier-specific windows; need explicit per-tier deadlines.",
             ]
         ],
+    )
+    evaluation_explanation: str = Field(
+        description="Brief observable explanation of the evaluator decision.",
+        examples="The retrieved passages are relevant to refunds but do not include Consumer tier rules.",
     )

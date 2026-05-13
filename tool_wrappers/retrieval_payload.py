@@ -1,4 +1,4 @@
-"""Compact retriever results for graph ToolMessage payloads."""
+"""Compact retriever results for graph state payloads."""
 
 from __future__ import annotations
 
