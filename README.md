@@ -22,7 +22,8 @@ the intent, repairs recall or intent issues when needed, and only then produces 
     future clarification support.
 - **Evidence Evaluation Loop**: The evaluator returns `sufficient`, `insufficient_recall`, or
   `intent_mismatch`. Recall gaps route through gap-fill query generation; intent mismatches route
-  through intent-correction rewriting.
+  through intent-correction rewriting. If retry budgets are exhausted, the graph routes to a
+  partial-answer node instead of pretending the evidence is complete.
 - **3-Stage Hybrid Retrieval**:
   1. **Stage 1 (Base Retrieval)**: Concurrent Dense (with optional MMR over-fetch) and Sparse
      BM25 searches.
@@ -32,7 +33,9 @@ the intent, repairs recall or intent issues when needed, and only then produces 
   scratch data lives in explicit state keys such as `normalized_query`, `parsed_queries`,
   `retrieved_documents`, and `information_evaluation`.
 - **Strict Grounding**: The final answer node answers only from retrieved documents. Source citation
-  wiring is intentionally deferred, so `sources` is currently returned as an empty array.
+  wiring is intentionally deferred, so `sources` is currently returned as an empty array. Final and
+  partial answer prompts receive the normalized query, parsed query lists, and retrieved documents,
+  but only retrieved passages are treated as evidence.
 
 ## Architecture
 
@@ -54,17 +57,21 @@ FastAPI /run
   -> information_evaluator_node
       sufficient
         -> answer_node
-      insufficient_recall
+      insufficient_recall with retries left
         -> gap_fill_node
         -> retrieval_node
-      intent_mismatch
+      intent_mismatch with retries left
         -> intent_correction_rewriter_node
         -> retrieval_node
+      insufficient_recall / intent_mismatch exhausted
+        -> partial_answer_node
 ```
 
 The graph appends retrieved documents across retry loops within the same user turn. A new `/run`
 input resets turn-level scratch fields such as `parsed_queries`, `retrieved_documents`, evaluator
-state, and retry counters.
+state, and retry counters. Gap-fill queries are stored in `parsed_queries_insufficient_recall`;
+intent-correction queries are stored separately in `parsed_queries_intent_correction` so the
+original parsed queries remain available for debugging and final answer context.
 
 `/resume` is still exposed by the API so clarification can be reintroduced later without changing
 the client contract. The current graph does not interrupt for ambiguous queries; it rewrites them

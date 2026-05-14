@@ -70,7 +70,7 @@ def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
     for message in reversed(messages):
         if not isinstance(message, AIMessage) or not message.content:
             continue
-        if getattr(message, "name", None) != "answer_node":
+        if getattr(message, "name", None) not in {"answer_node", "partial_answer_node"}:
             continue
         try:
             payload = json.loads(message.content) if isinstance(message.content, str) else message.content

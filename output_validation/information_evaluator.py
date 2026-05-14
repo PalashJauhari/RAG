@@ -32,5 +32,7 @@ class InformationEvaluation(BaseModel):
     )
     evaluation_explanation: str = Field(
         description="Brief observable explanation of the evaluator decision.",
-        examples="The retrieved passages are relevant to refunds but do not include Consumer tier rules.",
+        examples=[
+            "The retrieved passages are relevant to refunds but do not include Consumer tier rules.",
+        ],
     )

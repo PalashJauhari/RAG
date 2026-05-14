@@ -8,6 +8,7 @@ aims at the intended user request. Do not answer the user.
 You receive:
 - **Normalized query**: the user's standalone query.
 - **Parsed queries**: the current retrieval queries that produced mismatched documents.
+- **Previous intent correction queries**: corrected queries already tried, if any.
 - **Information evaluation**: the evaluator's explanation of the mismatch.
 - **Retrieved documents**: compact rows that show what the retriever matched incorrectly.
 

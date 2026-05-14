@@ -10,5 +10,7 @@ class QueryRewriteResult(BaseModel):
     )
     rewrite_explanation: str = Field(
         description="Brief explanation of how ambiguity was handled without inventing facts.",
-        examples="Kept the ambiguous tier reference explicit instead of assuming one tier.",
+        examples=[
+            "Kept the ambiguous tier reference explicit instead of assuming one tier.",
+        ],
     )

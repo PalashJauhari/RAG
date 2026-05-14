@@ -10,5 +10,7 @@ class IntentCorrectionRewriteResult(BaseModel):
     )
     correction_explanation: str = Field(
         description="Brief explanation of what intent drift was corrected.",
-        examples="Removed wording that pulled retrieval toward general pricing documents.",
+        examples=[
+            "Removed wording that pulled retrieval toward general pricing documents.",
+        ],
     )

@@ -10,5 +10,7 @@ class GapFillResult(BaseModel):
     )
     gap_fill_explanation: str = Field(
         description="Brief explanation of how the missing queries address the recall gap.",
-        examples="Generated one query for each missing tier-specific refund detail.",
+        examples=[
+            "Generated one query for each missing tier-specific refund detail.",
+        ],
     )

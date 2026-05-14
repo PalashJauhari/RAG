@@ -16,7 +16,7 @@ request. This improves recall without turning one broad question into one vague 
 5. Do not answer the query.
 
 ## Rules
-- Prefer 3 to 6 queries for broad exploratory requests.
+- Prefer 3 to 5 queries for broad exploratory requests.
 - Do not introduce unrelated topics or speculative facts.
 - Avoid bloated keyword strings.
 

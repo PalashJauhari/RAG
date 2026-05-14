@@ -2,10 +2,10 @@
 
 Flow (high level):
     query_normalisation -> query_complexity -> retrieval preparation -> retrieval ->
-    information_evaluator -> [gap fill / intent correction retry or] -> answer -> END
+    information_evaluator -> [gap fill / intent correction retry or] -> answer/partial_answer -> END
 
 State is checkpointed per ``thread_id`` (API ``session_id``). ``messages`` stays lean:
-it stores user turns and final answer messages only. Intermediate node outputs live in
+it stores user turns and final/partial answer messages only. Intermediate node outputs live in
 node-specific state keys such as ``normalized_query``, ``parsed_queries``,
 ``retrieved_documents``, and ``information_evaluation``.
 """
@@ -20,7 +20,8 @@ from langgraph.graph import END, StateGraph, add_messages
 from langgraph.types import Command
 
 from config.settings import settings
-from middleware.context_editing import truncate_and_summarize
+# Optional long-context compaction (summarize + RemoveMessage); disabled below in normalisation node.
+# from middleware.context_editing import truncate_and_summarize
 from middleware.llm_client import get_llm_client
 from observability.langfuse_handler import get_langfuse_callbacks, get_observe
 from output_validation.final_answer import FinalAnswer
@@ -38,6 +39,7 @@ from prompts.information_evaluator import SYSTEM_PROMPT as INFORMATION_EVALUATOR
 from prompts.intent_correction_rewriter import (
     SYSTEM_PROMPT as INTENT_CORRECTION_REWRITER_PROMPT,
 )
+from prompts.partial_answer import SYSTEM_PROMPT as PARTIAL_ANSWER_PROMPT
 from prompts.query_complexity import SYSTEM_PROMPT as QUERY_COMPLEXITY_PROMPT
 from prompts.query_expansion import SYSTEM_PROMPT as QUERY_EXPANSION_PROMPT
 from prompts.query_normalisation import SYSTEM_PROMPT as QUERY_NORMALISATION_PROMPT
@@ -47,6 +49,7 @@ from retriever.retriever import Retriever
 from tool_wrappers.prompt_plain import messages_to_plain_context
 from tool_wrappers.retrieval_payload import compact_hotqa_documents_for_llm
 
+# Langfuse spans when tracing is on; no-op decorator otherwise.
 observe = get_observe()
 
 
@@ -59,9 +62,11 @@ class RetrievalState(TypedDict, total=False):
     ``normalized_query``: latest user query rewritten into standalone form.
     ``query_complexity``: last ``QueryComplexityResult`` dict used for routing.
     ``parsed_queries``: primary retrieval queries produced by simple routing, splitting,
-        expansion, ambiguous rewriting, or intent correction.
+        expansion, or ambiguous rewriting.
     ``parsed_queries_insufficient_recall``: gap-fill retrieval queries generated after an
         insufficient recall evaluation.
+    ``parsed_queries_intent_correction``: corrected retrieval queries generated after an
+        intent mismatch evaluation.
     ``retrieval_query_source``: state key the retrieval node should read for the next pass.
     ``retrieved_documents``: compact rows ``{score, text}``, appended across retry loops and
         reset for each new user ``/run`` input.
@@ -71,12 +76,14 @@ class RetrievalState(TypedDict, total=False):
     ``intent_mismatch_retry_count``: count of intent-correction loops in the current turn.
     """
 
+    # LangGraph merges updates; add_messages appends new msgs and applies RemoveMessage ops.
     messages: Annotated[list, add_messages]
     message_summary: str
     normalized_query: str
     query_complexity: dict[str, Any]
     parsed_queries: list[str]
     parsed_queries_insufficient_recall: list[str]
+    parsed_queries_intent_correction: list[str]
     retrieval_query_source: str
     retrieved_documents: list[dict[str, Any]]
     information_evaluation: dict[str, Any]
@@ -94,6 +101,7 @@ def build_node_ai_message(
 ) -> AIMessage:
     """Persist final structured output as JSON while keeping provider IDs/metadata."""
 
+    # Carry OpenAI/LangChain ids through checkpointing; tag which graph node wrote this turn.
     additional_kwargs = dict(getattr(raw, "additional_kwargs", {}) or {})
     additional_kwargs["node"] = node_name
     if extra_metadata:
@@ -116,6 +124,7 @@ class RetrievalGraph:
     """
 
     def __init__(self, checkpointer: Any, postgres_context: Any | None = None) -> None:
+        # postgres_context is only set when using AsyncPostgresSaver so close() can exit the conn ctx.
         self.checkpointer = checkpointer
         self._postgres_context = postgres_context
         self.retriever = Retriever(settings)
@@ -127,8 +136,12 @@ class RetrievalGraph:
 
         messages = state.get("messages", [])
         summary = state.get("message_summary", "")
-        summary, kept_messages, remove_ops = await truncate_and_summarize(messages, summary)
+        # When enabled: evicts old turns, updates summary, returns RemoveMessage ops for checkpoint.
+        # summary, kept_messages, remove_ops = await truncate_and_summarize(messages, summary)
+        kept_messages = messages  # No truncation: use full history for normalisation context.
+        remove_ops = []  # No RemoveMessage updates applied this step.
 
+        # Last HumanMessage in time order = current user utterance for this turn.
         latest_user_query = ""
         for message in reversed(kept_messages):
             if isinstance(message, HumanMessage):
@@ -143,6 +156,7 @@ class RetrievalGraph:
             "## Latest User Query\n"
             f"{latest_user_query}"
         )
+        # Structured LLM output → QueryNormalisationResult (standalone query).
         llm = get_llm_client(
             model=settings.query_normalisation_model,
             output_schema=QueryNormalisationResult,
@@ -159,6 +173,7 @@ class RetrievalGraph:
         output = response.model_dump()
         normalized_query = output["normalized_query"].strip() or latest_user_query.strip()
 
+        # remove_ops shrink checkpoint when truncation is on; message_summary holds rolled-up history.
         return {
             "messages": remove_ops,
             "message_summary": summary,
@@ -185,10 +200,13 @@ class RetrievalGraph:
         response = result["parsed"]
         output = response.model_dump()
 
+        # Seed retrieval state for the simple path (complexity → retrieval with no splitter/expander).
+        # Always reset gap-fill list + force primary query list so retrieval_node reads parsed_queries.
         return {
             "query_complexity": output,
             "parsed_queries": [normalized_query] if normalized_query else [],
             "parsed_queries_insufficient_recall": [],
+            "parsed_queries_intent_correction": [],
             "retrieval_query_source": "parsed_queries",
         }
 
@@ -214,9 +232,11 @@ class RetrievalGraph:
         if not queries and normalized_query:
             queries = [normalized_query]
 
+        # Decomposed sub-queries replace complexity seed; reset gap-fill routing for retrieval_node.
         return {
             "parsed_queries": queries,
             "parsed_queries_insufficient_recall": [],
+            "parsed_queries_intent_correction": [],
             "retrieval_query_source": "parsed_queries",
         }
 
@@ -242,9 +262,11 @@ class RetrievalGraph:
         if not queries and normalized_query:
             queries = [normalized_query]
 
+        # Multiple angles replace seed queries; ensure retrieval reads parsed_queries not gap-fill key.
         return {
             "parsed_queries": queries,
             "parsed_queries_insufficient_recall": [],
+            "parsed_queries_intent_correction": [],
             "retrieval_query_source": "parsed_queries",
         }
 
@@ -268,9 +290,11 @@ class RetrievalGraph:
         response = result["parsed"]
         rewritten_query = response.rewritten_query.strip() or normalized_query
 
+        # Single best-effort rewrite; same routing reset so retrieval uses primary query list.
         return {
             "parsed_queries": [rewritten_query] if rewritten_query else [],
             "parsed_queries_insufficient_recall": [],
+            "parsed_queries_intent_correction": [],
             "retrieval_query_source": "parsed_queries",
         }
 
@@ -278,11 +302,18 @@ class RetrievalGraph:
     async def retrieval_node(self, state: RetrievalState) -> dict[str, Any]:
         """Retrieve for the active parsed query key and append compact docs to state."""
 
+        # retrieval_query_source switches primary, gap-fill, and intent-correction query lists.
         source = state.get("retrieval_query_source") or "parsed_queries"
         if source == "parsed_queries_insufficient_recall":
             search_queries = [
                 query.strip()
                 for query in state.get("parsed_queries_insufficient_recall", [])
+                if query.strip()
+            ]
+        elif source == "parsed_queries_intent_correction":
+            search_queries = [
+                query.strip()
+                for query in state.get("parsed_queries_intent_correction", [])
                 if query.strip()
             ]
         else:
@@ -293,6 +324,7 @@ class RetrievalGraph:
             ]
 
         if not search_queries:
+            # Fallback when parsed_queries is empty (simple path still passes normalized_query earlier).
             fallback = str(state.get("normalized_query") or "").strip()
             search_queries = [fallback] if fallback else []
 
@@ -300,6 +332,7 @@ class RetrievalGraph:
         compact_document_rows = compact_hotqa_documents_for_llm(ranked_hits)
         accumulated = list(state.get("retrieved_documents") or [])
 
+        # Evidence stacks across retrieval passes until we answer or exhaust retry budgets.
         return {
             "retrieved_documents": accumulated + compact_document_rows,
         }
@@ -311,6 +344,12 @@ class RetrievalGraph:
         context = (
             "## Parsed queries\n"
             f"{json.dumps(state.get('parsed_queries') or [], ensure_ascii=False)}\n\n"
+            "## Insufficient recall queries\n"
+            f"{json.dumps(state.get('parsed_queries_insufficient_recall') or [], ensure_ascii=False)}\n\n"
+            "## Intent correction queries\n"
+            f"{json.dumps(state.get('parsed_queries_intent_correction') or [], ensure_ascii=False)}\n\n"
+            "## Active retrieval query source\n"
+            f"{state.get('retrieval_query_source') or 'parsed_queries'}\n\n"
             "## Retrieved documents\n"
             f"{json.dumps(state.get('retrieved_documents') or [], ensure_ascii=False)}"
         )
@@ -330,6 +369,7 @@ class RetrievalGraph:
         evaluation = response.model_dump()
         status = evaluation["evaluation_status"]
 
+        # route_after_evaluator uses these counts vs settings.*_max_retries to stop retry loops.
         insufficient_recall_retry_count = state.get("insufficient_recall_retry_count", 0)
         intent_mismatch_retry_count = state.get("intent_mismatch_retry_count", 0)
         if status == "insufficient_recall":
@@ -337,6 +377,7 @@ class RetrievalGraph:
         elif status == "intent_mismatch":
             intent_mismatch_retry_count += 1
 
+        # gap_fill_node reads missing_evidence_details; cleared when status is not insufficient_recall.
         missing_evidence_details = (
             evaluation["missing_evidence_details"]
             if status == "insufficient_recall"
@@ -355,8 +396,16 @@ class RetrievalGraph:
         """Generate targeted missing-evidence queries after insufficient recall."""
 
         context = (
+            "## Normalized query\n"
+            f"{state.get('normalized_query') or ''}\n\n"
             "## Parsed queries\n"
             f"{json.dumps(state.get('parsed_queries') or [], ensure_ascii=False)}\n\n"
+            "## Insufficient recall queries\n"
+            f"{json.dumps(state.get('parsed_queries_insufficient_recall') or [], ensure_ascii=False)}\n\n"
+            "## Intent correction queries\n"
+            f"{json.dumps(state.get('parsed_queries_intent_correction') or [], ensure_ascii=False)}\n\n"
+            "## Active retrieval query source\n"
+            f"{state.get('retrieval_query_source') or 'parsed_queries'}\n\n"
             "## Retrieved documents\n"
             f"{json.dumps(state.get('retrieved_documents') or [], ensure_ascii=False)}\n\n"
             "## Missing evidence details\n"
@@ -377,8 +426,16 @@ class RetrievalGraph:
         response = result["parsed"]
         queries = [query.strip() for query in response.missing_queries if query.strip()]
         if not queries:
-            queries = [query for query in state.get("parsed_queries", []) if query.strip()]
+            if state.get("retrieval_query_source") == "parsed_queries_intent_correction":
+                queries = [
+                    query
+                    for query in state.get("parsed_queries_intent_correction", [])
+                    if query.strip()
+                ]
+            else:
+                queries = [query for query in state.get("parsed_queries", []) if query.strip()]
 
+        # Point retrieval_node at the alternate state key for this pass only.
         return {
             "parsed_queries_insufficient_recall": queries,
             "retrieval_query_source": "parsed_queries_insufficient_recall",
@@ -394,6 +451,8 @@ class RetrievalGraph:
             f"{normalized_query}\n\n"
             "## Parsed queries\n"
             f"{json.dumps(state.get('parsed_queries') or [], ensure_ascii=False)}\n\n"
+            "## Previous intent correction queries\n"
+            f"{json.dumps(state.get('parsed_queries_intent_correction') or [], ensure_ascii=False)}\n\n"
             "## Information evaluation\n"
             f"{json.dumps(state.get('information_evaluation') or {}, ensure_ascii=False)}\n\n"
             "## Retrieved documents\n"
@@ -418,10 +477,11 @@ class RetrievalGraph:
         if not queries and normalized_query:
             queries = [normalized_query]
 
+        # Point retrieval_node at the alternate state key for this pass only.
         return {
-            "parsed_queries": queries,
             "parsed_queries_insufficient_recall": [],
-            "retrieval_query_source": "parsed_queries",
+            "parsed_queries_intent_correction": queries,
+            "retrieval_query_source": "parsed_queries_intent_correction",
         }
 
     @observe(name="answer_node")
@@ -431,6 +491,12 @@ class RetrievalGraph:
         context = (
             "## Normalized query\n"
             f"{state.get('normalized_query') or ''}\n\n"
+            "## Parsed queries\n"
+            f"{json.dumps(state.get('parsed_queries') or [], ensure_ascii=False)}\n\n"
+            "## Insufficient recall queries\n"
+            f"{json.dumps(state.get('parsed_queries_insufficient_recall') or [], ensure_ascii=False)}\n\n"
+            "## Intent correction queries\n"
+            f"{json.dumps(state.get('parsed_queries_intent_correction') or [], ensure_ascii=False)}\n\n"
             "## Retrieved documents\n"
             f"{json.dumps(state.get('retrieved_documents') or [], ensure_ascii=False)}"
         )
@@ -449,9 +515,49 @@ class RetrievalGraph:
         response = result["parsed"]
         raw = result["raw"]
         answer = response.model_dump()
+        # API scans messages for final answer node names and JSON matching FinalAnswer (see api.main).
         return {
             "messages": [
                 build_node_ai_message(node_name="answer_node", payload=answer, raw=raw)
+            ]
+        }
+
+    @observe(name="partial_answer_node")
+    async def partial_answer_node(self, state: RetrievalState) -> dict[str, Any]:
+        """Emit a grounded partial answer after evaluator retry budgets are exhausted."""
+
+        context = (
+            "## Normalized query\n"
+            f"{state.get('normalized_query') or ''}\n\n"
+            "## Parsed queries\n"
+            f"{json.dumps(state.get('parsed_queries') or [], ensure_ascii=False)}\n\n"
+            "## Insufficient recall queries\n"
+            f"{json.dumps(state.get('parsed_queries_insufficient_recall') or [], ensure_ascii=False)}\n\n"
+            "## Intent correction queries\n"
+            f"{json.dumps(state.get('parsed_queries_intent_correction') or [], ensure_ascii=False)}\n\n"
+            "## Information evaluation\n"
+            f"{json.dumps(state.get('information_evaluation') or {}, ensure_ascii=False)}\n\n"
+            "## Retrieved documents\n"
+            f"{json.dumps(state.get('retrieved_documents') or [], ensure_ascii=False)}"
+        )
+        llm = get_llm_client(
+            model=settings.final_answer_model,
+            output_schema=FinalAnswer,
+            include_raw=True,
+        )
+        result = await llm.ainvoke(
+            [
+                SystemMessage(content=PARTIAL_ANSWER_PROMPT),
+                HumanMessage(content=context),
+            ],
+            config={"callbacks": get_langfuse_callbacks()},
+        )
+        response = result["parsed"]
+        raw = result["raw"]
+        answer = response.model_dump()
+        return {
+            "messages": [
+                build_node_ai_message(node_name="partial_answer_node", payload=answer, raw=raw)
             ]
         }
 
@@ -459,6 +565,7 @@ class RetrievalGraph:
         """Map exact complexity labels to the next graph node name."""
 
         complexity = (state.get("query_complexity") or {}).get("complexity")
+        # simple_query (and anything unexpected) falls through to retrieval using seeded parsed_queries.
         if complexity in {"comparison_query", "multihop_query", "procedural_query"}:
             return "query_splitter"
         if complexity == "exploratory_query":
@@ -479,21 +586,25 @@ class RetrievalGraph:
                 state.get("insufficient_recall_retry_count", 0)
                 >= settings.insufficient_recall_max_retries
             ):
-                return "answer"
+                return "partial_answer"
+            # Loop: gap_fill sets insufficient_recall queries then retrieval runs again.
             return "gap_fill"
         if status == "intent_mismatch":
             if (
                 state.get("intent_mismatch_retry_count", 0)
                 >= settings.intent_mismatch_max_retries
             ):
-                return "answer"
+                return "partial_answer"
+            # Loop: intent_correction_rewriter sets intent-correction queries then retrieval runs again.
             return "intent_correction_rewriter"
+        # Unknown status: fail closed to answer rather than spinning retries forever.
         return "answer"
 
     def build_graph(self) -> Any:
-        # Nodes: normalize -> classify -> prepare retrieval queries -> retrieval ->
-        # evaluator -> retry repair or terminal answer.
+        # Linear spine: normalisation → complexity → (optional prep) → retrieval → evaluator → answer.
+        # Side loops: evaluator → gap_fill → retrieval; evaluator → intent_correction → retrieval.
         builder = StateGraph(RetrievalState)
+        # Internal node ids match strings returned by route_after_* for conditional_edges.
         builder.add_node("query_normalisation", self.query_normalisation_node)
         builder.add_node("query_complexity", self.query_complexity_node)
         builder.add_node("query_splitter", self.query_splitter_node)
@@ -504,9 +615,11 @@ class RetrievalGraph:
         builder.add_node("gap_fill", self.gap_fill_node)
         builder.add_node("intent_correction_rewriter", self.intent_correction_rewriter_node)
         builder.add_node("answer", self.answer_node)
+        builder.add_node("partial_answer", self.partial_answer_node)
 
         builder.set_entry_point("query_normalisation")
         builder.add_edge("query_normalisation", "query_complexity")
+        # Dict keys must equal route_after_complexity return values (retrieval | query_splitter | ...).
         builder.add_conditional_edges(
             "query_complexity",
             self.route_after_complexity,
@@ -521,11 +634,13 @@ class RetrievalGraph:
         builder.add_edge("query_expansion", "retrieval")
         builder.add_edge("query_rewriter", "retrieval")
         builder.add_edge("retrieval", "information_evaluator")
+        # Dict keys must equal route_after_evaluator return values.
         builder.add_conditional_edges(
             "information_evaluator",
             self.route_after_evaluator,
             {
                 "answer": "answer",
+                "partial_answer": "partial_answer",
                 "gap_fill": "gap_fill",
                 "intent_correction_rewriter": "intent_correction_rewriter",
             },
@@ -533,6 +648,8 @@ class RetrievalGraph:
         builder.add_edge("gap_fill", "retrieval")
         builder.add_edge("intent_correction_rewriter", "retrieval")
         builder.add_edge("answer", END)
+        builder.add_edge("partial_answer", END)
+        # Persists checkpoints keyed by thread_id (session_id from the API).
         return builder.compile(checkpointer=self.checkpointer)
 
     async def run(
@@ -551,6 +668,7 @@ class RetrievalGraph:
         if callbacks:
             config["callbacks"] = callbacks
 
+        # Turn-local scratch is wiped each invoke; messages reducer merges this HumanMessage onto the thread.
         return await self.graph.ainvoke(
             {
                 "messages": [HumanMessage(content=user_query)],
@@ -558,6 +676,7 @@ class RetrievalGraph:
                 "query_complexity": {},
                 "parsed_queries": [],
                 "parsed_queries_insufficient_recall": [],
+                "parsed_queries_intent_correction": [],
                 "retrieval_query_source": "parsed_queries",
                 "retrieved_documents": [],
                 "information_evaluation": {},
@@ -575,6 +694,7 @@ class RetrievalGraph:
     ) -> dict[str, Any]:
         """Feed a future clarification string into a paused graph interrupt."""
 
+        # Resume path for graphs that call interrupt(); the shipped agent completes without pausing today.
         config: dict[str, Any] = {
             "configurable": {"thread_id": session_id},
             "recursion_limit": settings.graph_recursion_limit,
@@ -584,6 +704,7 @@ class RetrievalGraph:
         if callbacks:
             config["callbacks"] = callbacks
 
+        # LangGraph resumes from the saved interrupt marker for this thread_id.
         return await self.graph.ainvoke(
             Command(resume=value),
             config=config,
@@ -592,10 +713,11 @@ class RetrievalGraph:
     def get_state(self, session_id: str) -> Any:
         """Inspect checkpointed graph state for debugging or tooling (optional)."""
 
+        # Latest checkpoint snapshot for thread_id without advancing the graph.
         return self.graph.get_state({"configurable": {"thread_id": session_id}})
 
     async def close(self) -> None:
-        # Qdrant client + Postgres saver context must be closed on process shutdown.
+        # Release HTTP resources (Qdrant) and async Postgres saver connection context if used.
         await self.retriever.qdrant.close()
         if self._postgres_context is not None:
             await self._postgres_context.__aexit__(None, None, None)
