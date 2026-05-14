@@ -1,0 +1,224 @@
+window.dash_clientside = window.dash_clientside || {};
+window.dash_clientside.rag_ui = window.dash_clientside.rag_ui || {};
+
+function truncate(s, maxLen) {
+  if (!s) return "";
+  if (s.length <= maxLen) return s;
+  return s.slice(0, maxLen - 1) + "…";
+}
+
+/** Bold segment is the LangGraph node id (``ev.node``); rest is detail text. */
+function progressBoldRest(ev) {
+  if (!ev || typeof ev !== "object") return { bold: "event", rest: " — " + String(ev) };
+  const node = ev.node || "";
+
+  if (ev.type === "error") {
+    return { bold: "error", rest: ev.error ? ": " + ev.error : "" };
+  }
+  if (ev.type === "final") {
+    const bold = node || "final";
+    const preview = truncate(ev.answer || "", 160);
+    return { bold: bold, rest: preview ? ": " + preview : "" };
+  }
+
+  const boldName = node || "node";
+
+  if (node === "query_normalisation" && ev.normalized_query) {
+    return { bold: boldName, rest: " — " + truncate(ev.normalized_query, 200) };
+  }
+  if (node === "query_complexity") {
+    const c = ev.complexity || "";
+    const ex = ev.explanation ? " — " + truncate(ev.explanation, 120) : "";
+    return { bold: boldName, rest: (c ? ": " + c : "") + ex };
+  }
+  if (node === "retrieval") {
+    const n = ev.retrieved_doc_count != null ? " (" + ev.retrieved_doc_count + " docs)" : "";
+    const q = (ev.retrieval_queries || []).join(" · ");
+    return { bold: boldName, rest: n + (q ? " — " + truncate(q, 160) : "") };
+  }
+  if (node === "information_evaluator") {
+    const st = ev.evaluation_status || "";
+    return { bold: boldName, rest: st ? ": " + st : "" };
+  }
+  if (["query_splitter", "query_expansion", "query_rewriter"].indexOf(node) !== -1) {
+    const pq = (ev.parsed_queries || []).join(" · ");
+    return { bold: boldName, rest: pq ? " — " + truncate(pq, 180) : "" };
+  }
+  if (node === "gap_fill") {
+    const q = (ev.parsed_queries_insufficient_recall || []).join(" · ");
+    return { bold: boldName, rest: q ? " — " + truncate(q, 160) : "" };
+  }
+  if (node === "intent_correction_rewriter") {
+    const q = (ev.parsed_queries_intent_correction || []).join(" · ");
+    return { bold: boldName, rest: q ? " — " + truncate(q, 160) : "" };
+  }
+
+  const label = ev.label || "";
+  return { bold: boldName, rest: label ? " — " + truncate(label, 120) : "" };
+}
+
+function appendProgressBold(progressEl, boldText, restText) {
+  if (!progressEl) return;
+  const row = document.createElement("div");
+  row.className = "rag-progress-line";
+  if (boldText) {
+    const s = document.createElement("strong");
+    s.textContent = boldText;
+    row.appendChild(s);
+  }
+  if (restText) row.appendChild(document.createTextNode(restText));
+  progressEl.appendChild(row);
+  progressEl.scrollTop = progressEl.scrollHeight;
+}
+
+async function parseSSEStream(response, progressEl) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalPayload = null;
+  let retrievedDocs = [];
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    buffer += decoder.decode(chunk.value, { stream: true });
+    let sep;
+    while ((sep = buffer.indexOf("\n\n")) !== -1) {
+      const frame = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      const lines = frame.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        let line = lines[i];
+        if (line.endsWith("\r")) line = line.slice(0, -1);
+        if (!line.startsWith("data: ")) continue;
+        const raw = line.slice(6);
+        let payload;
+        try {
+          payload = JSON.parse(raw);
+        } catch (e) {
+          appendProgressBold(progressEl, "sse", " — could not parse SSE frame");
+          continue;
+        }
+        if (payload.type === "final") finalPayload = payload;
+        if (payload.type === "done" && payload.retrieved_docs)
+          retrievedDocs = payload.retrieved_docs;
+        if (payload.type === "error") {
+          const pr = progressBoldRest(payload);
+          appendProgressBold(progressEl, pr.bold, pr.rest);
+          throw new Error(payload.error || "Stream error");
+        }
+        if (payload.type === "done") {
+          appendProgressBold(progressEl, "done", " — stream finished");
+          continue;
+        }
+        const pr = progressBoldRest(payload);
+        appendProgressBold(progressEl, pr.bold, pr.rest);
+      }
+    }
+  }
+  return { finalPayload: finalPayload, retrievedDocs: retrievedDocs };
+}
+
+window.dash_clientside.rag_ui.clear_progress = function (_session_gen) {
+  const el = document.getElementById("rag-stream-progress");
+  if (el) el.innerHTML = "";
+  return "";
+};
+
+window.dash_clientside.rag_ui.submit_message = async function (
+  n_clicks,
+  n_submit,
+  message,
+  session_id,
+  chat_state,
+  pending_interrupt,
+  api_base
+) {
+  const nu = window.dash_clientside.no_update;
+  const raw = (message || "").trim();
+  if (!raw) {
+    return [nu, nu, nu, ""];
+  }
+
+  let chat = Array.isArray(chat_state) ? chat_state.slice() : [];
+  chat.push({ role: "user", content: raw });
+
+  const base = (api_base || "http://127.0.0.1:8000").replace(/\/$/, "");
+  const progressEl = document.getElementById("rag-stream-progress");
+  if (progressEl) progressEl.innerHTML = "";
+
+  try {
+    if (pending_interrupt) {
+      const r = await fetch(base + "/resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ session_id: session_id, answer: raw }),
+      });
+      let data;
+      try {
+        data = await r.json();
+      } catch (e) {
+        throw new Error("Resume response was not JSON");
+      }
+      if (!r.ok) {
+        const detail = data.detail !== undefined ? data.detail : data;
+        const msg =
+          typeof detail === "string" ? detail : JSON.stringify(detail);
+        throw new Error(msg);
+      }
+      if (data.interrupted) {
+        chat.push({
+          role: "assistant",
+          content: data.question || "Please clarify.",
+        });
+        return [chat, true, "", ""];
+      }
+      let content = data.answer || "Done.";
+      const sources = data.sources || [];
+      if (sources.length)
+        content += "\n\nSources: " + sources.map(String).join(", ");
+      const rd = data.retrieved_docs || [];
+      if (rd.length) content += "\n\nRetrieved " + rd.length + " passages.";
+      chat.push({ role: "assistant", content: content });
+      return [chat, false, "", ""];
+    }
+
+    const r = await fetch(base + "/run/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify({ session_id: session_id, message: raw }),
+    });
+    if (!r.ok) {
+      let errText = await r.text();
+      try {
+        const ej = JSON.parse(errText);
+        if (ej.detail !== undefined)
+          errText =
+            typeof ej.detail === "string" ? ej.detail : JSON.stringify(ej.detail);
+      } catch (e) {}
+      throw new Error(errText || r.statusText);
+    }
+
+    const { finalPayload, retrievedDocs } = await parseSSEStream(r, progressEl);
+
+    if (!finalPayload) {
+      chat.push({
+        role: "assistant",
+        content:
+          "Run finished without a final answer event. Check API logs or graph configuration.",
+      });
+      return [chat, false, "", ""];
+    }
+
+    let content = finalPayload.answer || "Done.";
+    const sources = finalPayload.sources || [];
+    if (sources.length)
+      content += "\n\nSources: " + sources.map(String).join(", ");
+    if (retrievedDocs.length)
+      content += "\n\nRetrieved " + retrievedDocs.length + " passages.";
+    chat.push({ role: "assistant", content: content });
+    return [chat, false, "", ""];
+  } catch (e) {
+    const msg = e && e.message ? e.message : String(e);
+    return [chat, !!pending_interrupt, "", msg];
+  }
+};

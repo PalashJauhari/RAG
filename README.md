@@ -154,6 +154,46 @@ The system returns a structured JSON response:
 - `confidence`: `high`, `medium`, or `low`.
 - `retrieved_docs`: Last turn's compact retrieved documents, currently `score` and `text`.
 
+### Stream Graph Progress
+
+The existing `/run` endpoint remains unchanged. For node-level progress streaming, use:
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/run/stream \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"demo-stream","message":"Compare the refund policies for Enterprise and Consumer tiers."}'
+```
+
+`/run/stream` returns Server-Sent Events (`text/event-stream`). Each event is a JSON object in a
+`data:` frame. The stream reports graph progress after each node completes; it does not stream final
+answer tokens word by word.
+
+Example events:
+
+```text
+data: {"type":"node","node":"query_normalisation","status":"completed","label":"Normalizing query","normalized_query":"Compare the Enterprise refund policy with the Consumer refund policy."}
+
+data: {"type":"node","node":"query_complexity","status":"completed","label":"Classifying query complexity","complexity":"comparison_query","explanation":"The query compares two policy tiers."}
+
+data: {"type":"node","node":"query_splitter","status":"completed","label":"Preparing retrieval queries","parsed_queries":["Enterprise refund policy","Consumer refund policy"]}
+
+data: {"type":"node","node":"retrieval","status":"completed","label":"Retrieving documents","retrieval_query_source":"parsed_queries","retrieval_queries":["Enterprise refund policy","Consumer refund policy"],"retrieved_doc_count":8}
+
+data: {"type":"node","node":"information_evaluator","status":"completed","label":"Evaluating evidence","evaluation_status":"sufficient","missing_evidence_details":[],"insufficient_recall_retry_count":0,"intent_mismatch_retry_count":0}
+
+data: {"type":"final","node":"answer","status":"completed","label":"Answer ready","answer":"...","sources":[],"confidence":"high"}
+
+data: {"type":"done","session_id":"demo-stream","retrieved_docs":[{"score":0.42,"text":"..."}]}
+```
+
+The closing `done` frame includes `retrieved_docs` (compact `score` / `text` rows, matching `/run`)
+so streaming clients can show passage counts or tooling without a second `/run` invoke.
+
+If retry budgets are exhausted, the final event comes from `partial_answer` instead of `answer`.
+Progress events intentionally avoid sending full retrieved document text in intermediate `node`
+frames; the terminal `done` frame carries the accumulated compact docs from the last retrieval
+updates.
+
 ## Development Notes
 
 - **Prompts**: Centralized in `prompts/`, one system prompt per graph node.
@@ -165,7 +205,16 @@ The system returns a structured JSON response:
   contexts are built as plain text or JSON so LangChain response metadata is not sent back to LLMs.
 - **Observability**: Langfuse integration is available at API, graph node, summarization, and
   LangChain callback layers when `LANGFUSE_TRACING_ENABLED=true`.
-- **UI**: The Dash app in `ui/dash_app.py` talks to `/run` and `/resume` through `ui/api_client.py`.
+- **UI**: The Dash app in `ui/dash_app.py` mirrors the **ForecastingPlatform** viewport shell (muted
+  outer `#DCDCD8`, framed `#FAFAF8` card, left rail, chat column, rounded composer). It calls
+  **`POST /run/stream`** from the browser (async fetch + SSE) and appends each graph step to a
+  tall **Progress** column on the **right** (`strong` = LangGraph **node id**, remainder = detail).
+  The final answer appears in the chat bubbles; **`POST /resume`** (JSON) is still used when the API
+  reports an interrupt. Set **`API_URL`** via environment / `dcc.Store` defaults so the UI reaches
+  the same FastAPI origin as `uvicorn`. For Dash on **8050**, the API enables **CORS** for
+  `http://127.0.0.1:8050` and `http://localhost:8050`. Styles live in `ui/assets/rag_styles.css`;
+  streaming helpers in `ui/assets/rag_ui.js`. Programmatic consumers can use
+  `RagApiClient.iter_run_stream` in `ui/api_client.py`.
 
 ### Plot the LangGraph Flow
 

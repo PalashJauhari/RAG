@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
-from typing import Any
+from typing import Any, Iterator
 
 import requests
 
@@ -29,6 +30,39 @@ class RagApiClient:
             "/resume",
             {"answer": answer, "session_id": session_id},
         )
+
+    def iter_run_stream(self, message: str, session_id: str) -> Iterator[dict[str, Any]]:
+        """Yield parsed JSON payloads from ``POST /run/stream`` (SSE ``data:`` frames)."""
+
+        url = f"{self.base_url}/run/stream"
+        try:
+            with self.session.post(
+                url,
+                json={"message": message, "session_id": session_id},
+                headers={"Accept": "text/event-stream"},
+                stream=True,
+                timeout=AGENT_TIMEOUT,
+            ) as response:
+                response.raise_for_status()
+                buffer = ""
+                for chunk in response.iter_content(chunk_size=8192, decode_unicode=False):
+                    if not chunk:
+                        continue
+                    buffer += chunk.decode("utf-8", errors="replace")
+                    while True:
+                        sep = buffer.find("\n\n")
+                        if sep == -1:
+                            break
+                        frame = buffer[:sep]
+                        buffer = buffer[sep + 2 :]
+                        for raw_line in frame.split("\n"):
+                            line = raw_line[:-1] if raw_line.endswith("\r") else raw_line
+                            if not line.startswith("data: "):
+                                continue
+                            payload = json.loads(line[6:])
+                            yield payload
+        except requests.exceptions.ConnectionError as exc:
+            raise ConnectionError("Cannot reach API. Start uvicorn or set API_URL.") from exc
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         try:

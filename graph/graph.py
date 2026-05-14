@@ -13,7 +13,7 @@ node-specific state keys such as ``normalized_query``, ``parsed_queries``,
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, AsyncIterator, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph, add_messages
@@ -68,6 +68,7 @@ class RetrievalState(TypedDict, total=False):
     ``parsed_queries_intent_correction``: corrected retrieval queries generated after an
         intent mismatch evaluation.
     ``retrieval_query_source``: state key the retrieval node should read for the next pass.
+    ``last_retrieval_queries``: queries used by the latest retrieval pass, for streaming/debugging.
     ``retrieved_documents``: compact rows ``{score, text}``, appended across retry loops and
         reset for each new user ``/run`` input.
     ``information_evaluation``: last ``InformationEvaluation`` dict.
@@ -85,6 +86,7 @@ class RetrievalState(TypedDict, total=False):
     parsed_queries_insufficient_recall: list[str]
     parsed_queries_intent_correction: list[str]
     retrieval_query_source: str
+    last_retrieval_queries: list[str]
     retrieved_documents: list[dict[str, Any]]
     information_evaluation: dict[str, Any]
     missing_evidence_details: list[str]
@@ -334,6 +336,8 @@ class RetrievalGraph:
 
         # Evidence stacks across retrieval passes until we answer or exhaust retry budgets.
         return {
+            "retrieval_query_source": source,
+            "last_retrieval_queries": search_queries,
             "retrieved_documents": accumulated + compact_document_rows,
         }
 
@@ -678,6 +682,7 @@ class RetrievalGraph:
                 "parsed_queries_insufficient_recall": [],
                 "parsed_queries_intent_correction": [],
                 "retrieval_query_source": "parsed_queries",
+                "last_retrieval_queries": [],
                 "retrieved_documents": [],
                 "information_evaluation": {},
                 "missing_evidence_details": [],
@@ -686,6 +691,44 @@ class RetrievalGraph:
             },
             config=config,
         )
+
+    async def stream_run(
+        self,
+        session_id: str,
+        user_query: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Start a thread turn and yield compact node updates as the graph progresses."""
+
+        config: dict[str, Any] = {
+            "configurable": {"thread_id": session_id},
+            "recursion_limit": settings.graph_recursion_limit,
+            "max_concurrency": settings.graph_max_concurrency,
+        }
+        callbacks = get_langfuse_callbacks()
+        if callbacks:
+            config["callbacks"] = callbacks
+
+        # Same input contract as run(); only the execution method changes from ainvoke to astream.
+        async for update in self.graph.astream(
+            {
+                "messages": [HumanMessage(content=user_query)],
+                "normalized_query": "",
+                "query_complexity": {},
+                "parsed_queries": [],
+                "parsed_queries_insufficient_recall": [],
+                "parsed_queries_intent_correction": [],
+                "retrieval_query_source": "parsed_queries",
+                "last_retrieval_queries": [],
+                "retrieved_documents": [],
+                "information_evaluation": {},
+                "missing_evidence_details": [],
+                "insufficient_recall_retry_count": 0,
+                "intent_mismatch_retry_count": 0,
+            },
+            config=config,
+            stream_mode="updates",
+        ):
+            yield update
 
     async def resume(
         self,
