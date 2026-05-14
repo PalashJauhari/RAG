@@ -6,13 +6,13 @@
   --rag-border: #e5e5e5;
   --rag-text: #0d0d0d;
   --rag-muted: #8e8ea0;
-  --rag-accent: #10a37f;
-  --rag-accent-hover: #0d8f6e;
+  --rag-accent: #2c2c2c;
+  --rag-accent-hover: #3d3d3d;
   --rag-user-bubble: #f4f4f4;
   --rag-danger: #ef4146;
-  --rag-banner-bg: #eff6ff;
-  --rag-banner-border: #bfdbfe;
-  --rag-banner-text: #1e40af;
+  --rag-banner-bg: #f4f4f5;
+  --rag-banner-border: #e5e5e5;
+  --rag-banner-text: #374151;
   --rag-font: "Söhne", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     Roboto, "Helvetica Neue", Arial, sans-serif;
 }
@@ -428,6 +428,9 @@ body {
 .rag-md {
   font-size: 16px;
   line-height: 1.65;
+}
+.rag-md em {
+  color: var(--rag-muted);
 }
 .rag-md p {
   margin: 0 0 0.75em 0;

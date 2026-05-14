@@ -118,6 +118,26 @@ async function parseSSEStream(response, progressEl) {
   return { finalPayload: finalPayload, retrievedDocs: retrievedDocs };
 }
 
+function clockNowMs() {
+  return typeof performance !== "undefined" && performance.now
+    ? performance.now()
+    : Date.now();
+}
+
+function formatElapsedLabel(ms) {
+  if (ms == null || typeof ms !== "number" || ms < 0 || isNaN(ms)) return "";
+  if (ms < 1000) return Math.round(ms) + " ms";
+  var sec = ms / 1000;
+  var decimals = sec < 10 ? 1 : 0;
+  return sec.toFixed(decimals) + " s";
+}
+
+function appendTimeTakenFooter(content, elapsedMs) {
+  var label = formatElapsedLabel(elapsedMs);
+  if (!label) return content;
+  return content + "\n\n*Time taken: " + label + "*";
+}
+
 window.dash_clientside.rag_ui.clear_progress = function (_session_gen) {
   const el = document.getElementById("rag-stream-progress");
   if (el) el.innerHTML = "";
@@ -148,6 +168,7 @@ window.dash_clientside.rag_ui.submit_message = async function (
 
   try {
     if (pending_interrupt) {
+      var startResume = clockNowMs();
       const r = await fetch(base + "/resume", {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -172,16 +193,19 @@ window.dash_clientside.rag_ui.submit_message = async function (
         });
         return [chat, true, "", ""];
       }
+      var elapsedResume = clockNowMs() - startResume;
       let content = data.answer || "Done.";
       const sources = data.sources || [];
       if (sources.length)
         content += "\n\nSources: " + sources.map(String).join(", ");
       const rd = data.retrieved_docs || [];
       if (rd.length) content += "\n\nRetrieved " + rd.length + " passages.";
+      content = appendTimeTakenFooter(content, elapsedResume);
       chat.push({ role: "assistant", content: content });
       return [chat, false, "", ""];
     }
 
+    var startStream = clockNowMs();
     const r = await fetch(base + "/run/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
@@ -199,12 +223,15 @@ window.dash_clientside.rag_ui.submit_message = async function (
     }
 
     const { finalPayload, retrievedDocs } = await parseSSEStream(r, progressEl);
+    var elapsedStream = clockNowMs() - startStream;
 
     if (!finalPayload) {
       chat.push({
         role: "assistant",
-        content:
+        content: appendTimeTakenFooter(
           "Run finished without a final answer event. Check API logs or graph configuration.",
+          elapsedStream
+        ),
       });
       return [chat, false, "", ""];
     }
@@ -215,6 +242,7 @@ window.dash_clientside.rag_ui.submit_message = async function (
       content += "\n\nSources: " + sources.map(String).join(", ");
     if (retrievedDocs.length)
       content += "\n\nRetrieved " + retrievedDocs.length + " passages.";
+    content = appendTimeTakenFooter(content, elapsedStream);
     chat.push({ role: "assistant", content: content });
     return [chat, false, "", ""];
   } catch (e) {
