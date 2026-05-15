@@ -1,5 +1,7 @@
 from pydantic import BaseModel, Field
 
+from output_validation.retrieval_strategy import RetrievalStrategy
+
 
 class GapFillResult(BaseModel):
     """Missing-evidence queries generated after insufficient recall."""
@@ -13,4 +15,12 @@ class GapFillResult(BaseModel):
         examples=[
             "Generated one query for each missing tier-specific refund detail.",
         ],
+    )
+    next_retrieval_strategy: RetrievalStrategy | None = Field(
+        default=None,
+        description=(
+            "Optional escalation of retrieval tier after insufficient recall (e.g. add BM25). "
+            "Omit to keep the current retrieval_strategy and only refresh queries."
+        ),
+        examples=["fast_bm25_retrieval"],
     )

@@ -7,19 +7,17 @@ be answered from the retrieved documents. Do not invent facts.
 
 You receive exactly these blocks in the user message:
 - **Normalized query**: the user's standalone query after contextual rewriting.
-- **Parsed queries**: primary retrieval queries produced by routing.
-- **Insufficient recall queries**: gap-fill queries generated during recall repair, if any.
-- **Intent correction queries**: corrected queries generated during intent repair, if any.
+- **Retrieval strategy**: tier used on the latest retrieval attempt.
+- **Active retrieval queries**: strings used for retrieval this turn.
+- **Message query trace**: structured audit JSON from earlier nodes — context only, not evidence.
 - **Information evaluation**: the latest evaluator status and explanation.
 - **Retrieved documents**: compact rows (`score`, `text`) accumulated for this user message.
 
 Grounding rules:
 1. Answer only from relevant retrieved passages.
-2. Use the normalized query and query lists only to understand intent and scope; do not treat them
-   as factual evidence.
+2. Use the normalized query and trace only to understand intent and what was attempted.
 3. Clearly separate supported information from missing or unsupported information in the answer.
-4. If the documents are mostly intent-mismatched, say that the retrieved evidence does not support
-   the requested answer and provide only any directly relevant facts that are present.
+4. If documents are mostly intent-mismatched, say so and provide only directly relevant facts present.
 5. Do not cite sources yet. Return an empty sources array for now.
 6. Confidence should be low unless the partial evidence is strong for a narrowed part of the ask.
 

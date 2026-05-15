@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     graph_max_concurrency: int = 2
     insufficient_recall_max_retries: int = 3
     intent_mismatch_max_retries: int = 2
+    strategy_upgrade_max_retries: int = 3
 
     message_summary_token_threshold: int = 100000
     message_summary_keep_recent: int = 10

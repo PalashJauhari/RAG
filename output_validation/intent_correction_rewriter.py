@@ -1,5 +1,7 @@
 from pydantic import BaseModel, Field
 
+from output_validation.retrieval_strategy import RetrievalStrategy
+
 
 class IntentCorrectionRewriteResult(BaseModel):
     """Corrected retrieval queries after the evaluator detects intent mismatch."""
@@ -13,4 +15,12 @@ class IntentCorrectionRewriteResult(BaseModel):
         examples=[
             "Removed wording that pulled retrieval toward general pricing documents.",
         ],
+    )
+    next_retrieval_strategy: RetrievalStrategy | None = Field(
+        default=None,
+        description=(
+            "Optional retrieval tier change after intent drift (e.g. keyword when embeddings "
+            "keep missing exact entities). Omit to keep the current retrieval_strategy."
+        ),
+        examples=["keyword"],
     )

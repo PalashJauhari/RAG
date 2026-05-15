@@ -5,6 +5,9 @@ The query has been classified as ambiguous, but this version of the graph does n
 for clarification yet. Your job is to produce the safest useful retrieval query without inventing
 missing facts.
 
+Your single rewrite becomes the pipeline's **active_retrieval_queries** (one item). You do not
+change retrieval strategy here.
+
 ## Rules
 
 1. Preserve the user's wording, entities, constraints, and uncertainty.

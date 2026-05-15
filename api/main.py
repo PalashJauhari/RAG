@@ -54,7 +54,12 @@ app.add_middleware(
     allow_origins=[
         "http://127.0.0.1:8050",
         "http://localhost:8050",
+        # Browsers often send these when Dash binds to 0.0.0.0 or IPv6 loopback.
+        "http://0.0.0.0:8050",
+        "http://[::1]:8050",
     ],
+    # Any localhost-style origin with an explicit port (e.g. different Dash port).
+    allow_origin_regex=r"^http://(127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0)(:[1-9]\d*)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -65,6 +70,14 @@ def _sse(payload: dict[str, Any]) -> str:
     """Encode one Server-Sent Event data frame."""
 
     return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+
+
+def _message_query_tail(entries: list[Any], max_entries: int = 5) -> list[Any]:
+    """Last ``max_entries`` audit rows for compact SSE."""
+
+    if not isinstance(entries, list) or not entries:
+        return []
+    return entries[-max_entries:]
 
 
 def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
@@ -93,38 +106,52 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
                 "normalized_query": payload.get("normalized_query"),
             }
         )
+        mq = payload.get("message_query")
+        if mq:
+            event["message_query_tail"] = _message_query_tail(mq)
     elif node_name == "query_complexity":
         query_complexity = payload.get("query_complexity") or {}
         event.update(
             {
                 "label": "Classifying query complexity",
                 "complexity": query_complexity.get("complexity"),
+                "retrieval_strategy": query_complexity.get("retrieval_strategy"),
                 "explanation": query_complexity.get("explanation"),
             }
         )
+        mq = payload.get("message_query")
+        if mq:
+            event["message_query_tail"] = _message_query_tail(mq)
     elif node_name in {"query_splitter", "query_expansion", "query_rewriter"}:
         event.update(
             {
                 "label": "Preparing retrieval queries",
-                "parsed_queries": payload.get("parsed_queries") or [],
+                "active_retrieval_queries": payload.get("active_retrieval_queries") or [],
             }
         )
+        mq = payload.get("message_query")
+        if mq:
+            event["message_query_tail"] = _message_query_tail(mq)
     elif node_name == "retrieval":
         retrieved_documents = payload.get("retrieved_documents") or []
         event.update(
             {
                 "label": "Retrieving documents",
-                "retrieval_query_source": payload.get("retrieval_query_source"),
+                "retrieval_strategy": payload.get("retrieval_strategy"),
                 "retrieval_queries": payload.get("last_retrieval_queries") or [],
                 "retrieved_doc_count": len(retrieved_documents),
             }
         )
+        mq = payload.get("message_query")
+        if mq:
+            event["message_query_tail"] = _message_query_tail(mq)
     elif node_name == "information_evaluator":
         evaluation = payload.get("information_evaluation") or {}
         event.update(
             {
                 "label": "Evaluating evidence",
                 "evaluation_status": evaluation.get("evaluation_status"),
+                "next_retrieval_strategy": evaluation.get("next_retrieval_strategy"),
                 "missing_evidence_details": payload.get("missing_evidence_details") or [],
                 "insufficient_recall_retry_count": payload.get(
                     "insufficient_recall_retry_count",
@@ -134,26 +161,41 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
                     "intent_mismatch_retry_count",
                     0,
                 ),
+                "strategy_upgrade_retry_count": payload.get(
+                    "strategy_upgrade_retry_count",
+                    0,
+                ),
             }
         )
+        mq = payload.get("message_query")
+        if mq:
+            event["message_query_tail"] = _message_query_tail(mq)
     elif node_name == "gap_fill":
         event.update(
             {
                 "label": "Filling recall gaps",
-                "parsed_queries_insufficient_recall": payload.get(
-                    "parsed_queries_insufficient_recall"
-                )
-                or [],
+                "active_retrieval_queries": payload.get("active_retrieval_queries") or [],
+                "retrieval_strategy": payload.get("retrieval_strategy"),
             }
         )
+        mq = payload.get("message_query")
+        if mq:
+            event["message_query_tail"] = _message_query_tail(mq)
     elif node_name == "intent_correction_rewriter":
         event.update(
             {
                 "label": "Correcting retrieval intent",
-                "parsed_queries_intent_correction": payload.get(
-                    "parsed_queries_intent_correction"
-                )
-                or [],
+                "active_retrieval_queries": payload.get("active_retrieval_queries") or [],
+                "retrieval_strategy": payload.get("retrieval_strategy"),
+            }
+        )
+        mq = payload.get("message_query")
+        if mq:
+            event["message_query_tail"] = _message_query_tail(mq)
+    elif node_name == "clear_turn_trace":
+        event.update(
+            {
+                "label": "Clearing turn trace",
             }
         )
     elif node_name in {"answer", "partial_answer"}:

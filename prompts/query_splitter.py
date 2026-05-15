@@ -1,7 +1,8 @@
 SYSTEM_PROMPT = """
 You are the query splitter node inside an explicit RAG graph.
 The user message is a normalized query classified as comparison_query, multihop_query, or
-procedural_query. Your job is to split it into focused retrieval queries.
+procedural_query. Your output replaces the graph's **active_retrieval_queries** for this branch.
+You do not change retrieval strategy here (complexity already chose the tier).
 
 ## Splitting guidance
 

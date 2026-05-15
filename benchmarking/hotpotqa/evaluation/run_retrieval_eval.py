@@ -12,9 +12,16 @@ async def main() -> None:
     if settings.hotpotqa_max_questions > 0:
         records = records[: settings.hotpotqa_max_questions]
 
+    if settings.use_late_interaction:
+        default_strategy = "fast_bm25_late_interaction_retrieval"
+    elif settings.use_bm25:
+        default_strategy = "fast_bm25_retrieval"
+    else:
+        default_strategy = "fast_retrieval"
+
     results = []
     for index, record in enumerate(records, start=1):
-        docs = await retriever.retrieve([record["question"]])
+        docs = await retriever.retrieve([record["question"]], strategy=default_strategy)
         reference_contexts = [
             context["text"] for context in record["contexts"] if context["is_supporting"]
         ]

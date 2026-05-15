@@ -13,29 +13,33 @@ the intent, repairs recall or intent issues when needed, and only then produces 
   conversation context while preserving ambiguity instead of guessing.
 - **Typed Complexity Routing**: Query complexity is emitted as validated JSON with one exact label:
   `simple_query`, `comparison_query`, `multihop_query`, `procedural_query`, `ambiguous_query`, or
-  `exploratory_query`.
+  `exploratory_query`, plus an initial **`retrieval_strategy`** tier for the retriever.
 - **Specialized Query Preparation**:
   - Simple queries go directly to retrieval.
   - Comparison, multihop, and procedural queries are split into focused retrieval queries.
   - Exploratory queries are expanded into multiple retrieval angles.
   - Ambiguous queries are rewritten safely for now; the `/resume` endpoint remains available for
     future clarification support.
-- **Evidence Evaluation Loop**: The evaluator returns `sufficient`, `insufficient_recall`, or
-  `intent_mismatch`. Recall gaps route through gap-fill query generation; intent mismatches route
-  through intent-correction rewriting. If retry budgets are exhausted, the graph routes to a
-  partial-answer node instead of pretending the evidence is complete.
-- **3-Stage Hybrid Retrieval**:
-  1. **Stage 1 (Base Retrieval)**: Concurrent Dense (with optional MMR over-fetch) and Sparse
-     BM25 searches.
-  2. **Stage 2 (Fusion)**: Reciprocal Rank Fusion (RRF) to merge dense and sparse candidates.
-  3. **Stage 3 (Re-ranking)**: Optional ColBERTv2 late-interaction re-ranking.
+- **Evidence Evaluation Loop**: The evaluator returns `sufficient`, `insufficient_recall`,
+  `intent_mismatch`, or **`strategy_upgrade`** (queries OK but retrieval tier too weak—rerun retrieval
+  with a heavier strategy without gap-fill or intent rewrite). Recall gaps route through gap-fill;
+  intent mismatches route through intent-correction. Gap-fill and intent nodes may optionally bump
+  **`retrieval_strategy`**. If retry budgets are exhausted, the graph routes to `partial_answer`.
+- **Per-request retrieval strategies** (chosen by complexity / evaluator / gap / intent):
+  - **`fast_retrieval`**: dense (+ optional MMR per deployment settings).
+  - **`fast_bm25_retrieval`**: dense + BM25 + RRF fusion.
+  - **`keyword`**: BM25-only (no dense embeddings for that pass).
+  - **`fast_bm25_late_interaction_retrieval`**: hybrid fusion then ColBERT-style late interaction when Jina is configured.
+- **Structured turn trace**: Append-only **`message_query`** audit rows across nodes; a terminal
+  **`clear_turn_trace`** node resets the trace after each answer using LangGraph **`Overwrite([])`**
+  so multi-turn threads do not leak prior-turn diagnostics into the next query.
 - **Lean Message State**: `messages` stores user turns and final answer node outputs only. Node
-  scratch data lives in explicit state keys such as `normalized_query`, `parsed_queries`,
-  `retrieved_documents`, and `information_evaluation`.
+  scratch data lives in explicit keys such as `normalized_query`, `active_retrieval_queries`,
+  `retrieval_strategy`, `message_query`, `retrieved_documents`, and `information_evaluation`.
 - **Strict Grounding**: The final answer node answers only from retrieved documents. Source citation
   wiring is intentionally deferred, so `sources` is currently returned as an empty array. Final and
-  partial answer prompts receive the normalized query, parsed query lists, and retrieved documents,
-  but only retrieved passages are treated as evidence.
+  partial answer prompts receive the normalized query, active retrieval queries, full `message_query`
+  trace (for context only), and retrieved documents—only passages count as evidence.
 
 ## Architecture
 
@@ -56,22 +60,25 @@ FastAPI /run
         -> retrieval_node
   -> information_evaluator_node
       sufficient
-        -> answer_node
+        -> answer_node -> clear_turn_trace_node -> END
       insufficient_recall with retries left
         -> gap_fill_node
         -> retrieval_node
       intent_mismatch with retries left
         -> intent_correction_rewriter_node
         -> retrieval_node
-      insufficient_recall / intent_mismatch exhausted
-        -> partial_answer_node
+      strategy_upgrade with retries left
+        -> retrieval_node  # same active_retrieval_queries; heavier retrieval_strategy
+      insufficient_recall / intent_mismatch / strategy_upgrade exhausted
+        -> partial_answer_node -> clear_turn_trace_node -> END
 ```
 
-The graph appends retrieved documents across retry loops within the same user turn. A new `/run`
-input resets turn-level scratch fields such as `parsed_queries`, `retrieved_documents`, evaluator
-state, and retry counters. Gap-fill queries are stored in `parsed_queries_insufficient_recall`;
-intent-correction queries are stored separately in `parsed_queries_intent_correction` so the
-original parsed queries remain available for debugging and final answer context.
+The graph appends retrieved documents across retry loops within the same user turn. Each `/run`
+input resets turn-local scratch such as `active_retrieval_queries`, `retrieval_strategy`,
+`retrieved_documents`, and evaluator retry counters. The append-only **`message_query`** trace is
+cleared **after** `answer` / `partial_answer` by **`clear_turn_trace_node`** using LangGraph
+**`Overwrite([])`** (turn-local invokes still pass `message_query: []` with other scratch, but the
+authoritative reset for reducer-backed history is the terminal clear node).
 
 `/resume` is still exposed by the API so clarification can be reintroduced later without changing
 the client contract. The current graph does not interrupt for ambiguous queries; it rewrites them
@@ -79,20 +86,21 @@ best-effort and continues to retrieval.
 
 ## Advanced Retrieval Flow
 
-The `Retriever` executes a multi-stage pipeline for every query:
+The `Retriever.retrieve(queries, strategy)` branch selects behavior **per request**:
 
-1. **Candidate Fetching**
-   - **Dense**: Fetches candidates using OpenAI embeddings. With MMR enabled, Qdrant fetches a
-     larger internal candidate pool to encourage diversity.
-   - **Sparse (BM25)**: Optional keyword search using Qdrant cloud inference.
-2. **Hybrid Fusion**
-   - Uses **Reciprocal Rank Fusion (RRF)** to merge dense and sparse pools.
-3. **Late Interaction Reranking**
-   - Uses **ColBERTv2** via Jina multi-vectors to rerank the fused candidate pool.
-   - Returns the final `RETRIEVAL_TOP_K` documents.
+| Strategy | Dense (+MMR if enabled in settings) | BM25 | RRF fusion | Late interaction |
+|----------|-------------------------------------|------|------------|------------------|
+| `fast_retrieval` | yes | no | no | no |
+| `fast_bm25_retrieval` | yes | yes | yes | no |
+| `keyword` | no | yes | no | no |
+| `fast_bm25_late_interaction_retrieval` | yes | yes | yes | yes |
 
-For multiple parsed queries, the retriever runs each query, deduplicates by point id, and boosts
-documents that rank well across query result sets.
+Environment flags **`USE_BM25`**, **`USE_LATE_INTERACTION`**, and **`USE_MMR`** still configure the
+Qdrant client (e.g. cloud inference), embedding/MMR parameters, and Jina availability; the
+**`strategy`** argument chooses which branches run inside `_retrieve_one`.
+
+For multiple active retrieval queries, the retriever runs each query, deduplicates by point id, and boosts
+documents that rank well across query result sets (RRF across queries).
 
 ## Environment Configuration
 
@@ -113,6 +121,7 @@ MESSAGE_SUMMARY_KEEP_RECENT=10
 # Retry Loops
 INSUFFICIENT_RECALL_MAX_RETRIES=3
 INTENT_MISMATCH_MAX_RETRIES=2
+STRATEGY_UPGRADE_MAX_RETRIES=3
 
 # Node Models
 QUERY_NORMALISATION_MODEL=gpt-4.1-mini
@@ -173,15 +182,17 @@ Example events:
 ```text
 data: {"type":"node","node":"query_normalisation","status":"completed","label":"Normalizing query","normalized_query":"Compare the Enterprise refund policy with the Consumer refund policy."}
 
-data: {"type":"node","node":"query_complexity","status":"completed","label":"Classifying query complexity","complexity":"comparison_query","explanation":"The query compares two policy tiers."}
+data: {"type":"node","node":"query_complexity","status":"completed","label":"Classifying query complexity","complexity":"comparison_query","retrieval_strategy":"fast_bm25_retrieval","explanation":"..."}
 
-data: {"type":"node","node":"query_splitter","status":"completed","label":"Preparing retrieval queries","parsed_queries":["Enterprise refund policy","Consumer refund policy"]}
+data: {"type":"node","node":"query_splitter","status":"completed","label":"Preparing retrieval queries","active_retrieval_queries":["Enterprise refund policy","Consumer refund policy"]}
 
-data: {"type":"node","node":"retrieval","status":"completed","label":"Retrieving documents","retrieval_query_source":"parsed_queries","retrieval_queries":["Enterprise refund policy","Consumer refund policy"],"retrieved_doc_count":8}
+data: {"type":"node","node":"retrieval","status":"completed","label":"Retrieving documents","retrieval_strategy":"fast_bm25_retrieval","retrieval_queries":["Enterprise refund policy","Consumer refund policy"],"retrieved_doc_count":8}
 
-data: {"type":"node","node":"information_evaluator","status":"completed","label":"Evaluating evidence","evaluation_status":"sufficient","missing_evidence_details":[],"insufficient_recall_retry_count":0,"intent_mismatch_retry_count":0}
+data: {"type":"node","node":"information_evaluator","status":"completed","label":"Evaluating evidence","evaluation_status":"sufficient","next_retrieval_strategy":null,"missing_evidence_details":[],"insufficient_recall_retry_count":0,"intent_mismatch_retry_count":0,"strategy_upgrade_retry_count":0}
 
 data: {"type":"final","node":"answer","status":"completed","label":"Answer ready","answer":"...","sources":[],"confidence":"high"}
+
+data: {"type":"node","node":"clear_turn_trace","status":"completed","label":"Clearing turn trace"}
 
 data: {"type":"done","session_id":"demo-stream","retrieved_docs":[{"score":0.42,"text":"..."}]}
 ```
@@ -209,10 +220,11 @@ updates.
   outer `#DCDCD8`, framed `#FAFAF8` card, left rail, chat column, rounded composer). It calls
   **`POST /run/stream`** from the browser (async fetch + SSE) and appends each graph step to a
   tall **Progress** column on the **right** (`strong` = LangGraph **node id**, remainder = detail).
-  The final answer appears in the chat bubbles; **`POST /resume`** (JSON) is still used when the API
-  reports an interrupt. Set **`API_URL`** via environment / `dcc.Store` defaults so the UI reaches
+  Steps include **`clear_turn_trace`** after final or partial answers. The final answer appears in
+  the chat bubbles; **`POST /resume`** (JSON) is still used when the API reports an interrupt. Set **`API_URL`** via environment / `dcc.Store` defaults so the UI reaches
   the same FastAPI origin as `uvicorn`. For Dash on **8050**, the API enables **CORS** for
-  `http://127.0.0.1:8050` and `http://localhost:8050`. Styles live in `ui/assets/rag_styles.css`;
+  loopback origins (`127.0.0.1`, `localhost`, `0.0.0.0`, `[::1]`) plus a small localhost regex so
+  OPTIONS preflight from the UI succeeds. Styles live in `ui/assets/rag_styles.css`;
   streaming helpers in `ui/assets/rag_ui.js`. Programmatic consumers can use
   `RagApiClient.iter_run_stream` in `ui/api_client.py`.
 

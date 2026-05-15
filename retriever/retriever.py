@@ -8,6 +8,7 @@ from qdrant_client import AsyncQdrantClient, models
 
 from config.settings import Settings
 from middleware.llm_client import get_embeddings_client
+from output_validation.retrieval_strategy import RetrievalStrategy
 
 
 class Retriever:
@@ -82,17 +83,18 @@ class Retriever:
                     response.raise_for_status()
                     return [row["embeddings"] for row in response.json()["data"]]
 
-    async def retrieve(self, queries: list[str], top_k: int | None = None) -> list[dict[str, Any]]:
+    async def retrieve(
+        self,
+        queries: list[str],
+        strategy: RetrievalStrategy,
+        top_k: int | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Public execution entrypoint. Runs retrieval for multiple independent queries concurrently,
-        deduplicates the results, and sorts them using Reciprocal Rank Fusion (RRF).
-        
-        Args:
-            queries: A list of standalone semantic search queries (e.g., from query_splitter).
-            top_k: The final number of documents to return.
-            
-        Returns:
-            A list of dictionary objects representing the top ranked documents.
+        deduplicates the results, and sorts them using Reciprocal Rank Fusion (RRF) across queries.
+
+        ``strategy`` selects dense / BM25 / fusion / ColBERT behavior per request (overrides are
+        encoded in branches below rather than global flags alone).
         """
         clean_queries = [query.strip() for query in queries if query and query.strip()]
         if not clean_queries:
@@ -100,7 +102,7 @@ class Retriever:
 
         limit = top_k or self.config.retrieval_top_k
         results = await asyncio.gather(
-            *(self._retrieve_one(query, limit) for query in clean_queries)
+            *(self._retrieve_one(query, limit, strategy) for query in clean_queries)
         )
 
         docs_by_id: dict[str, dict[str, Any]] = {}
@@ -141,18 +143,23 @@ class Retriever:
             
         return final_docs
 
-    async def _retrieve_one(self, query: str, top_k: int) -> list[Any]:
-        """
-        Executes the internal 3-Stage retrieval pipeline for a single query.
-        Stage 1: Dense Retrieval (with MMR 3x over-fetch) & Sparse Retrieval (BM25).
-        Stage 2: RRF Fusion of Dense and Sparse results into a candidate pool.
-        Stage 3: Late Interaction (ColBERT) re-ranking of the fused candidate pool.
-        """
+    async def _retrieve_one(self, query: str, top_k: int, strategy: RetrievalStrategy) -> list[Any]:
+        """Single-query pipeline chosen by ``strategy`` (dense / hybrid / BM25-only / +ColBERT)."""
+
+        if strategy == "keyword":
+            response = await self.qdrant.query_points(
+                collection_name=self.config.qdrant_collection_name,
+                query=models.Document(text=query, model=self.config.qdrant_bm25_model),
+                using=self.config.qdrant_bm25_vector_name,
+                limit=top_k,
+                with_payload=True,
+                with_vectors=False,
+            )
+            return response.points
+
         dense_vector = (await self.create_dense_embeddings([query]))[0]
         dense_query: Any = dense_vector
         if self.config.use_mmr:
-            # Stage 1a: Dense Retrieval with Maximal Marginal Relevance (MMR)
-            # Fetch 3x candidates internally so MMR has enough room to penalize redundant semantic matches
             dense_query = models.NearestQuery(
                 nearest=dense_vector,
                 mmr=models.Mmr(
@@ -161,42 +168,48 @@ class Retriever:
                 ),
             )
 
+        if strategy == "fast_retrieval":
+            response = await self.qdrant.query_points(
+                collection_name=self.config.qdrant_collection_name,
+                query=dense_query,
+                using=self.config.qdrant_dense_vector_name,
+                limit=top_k,
+                with_payload=True,
+                with_vectors=False,
+            )
+            return response.points
+
         prefetches = [
             models.Prefetch(
                 query=dense_query,
                 using=self.config.qdrant_dense_vector_name,
                 limit=self.config.retrieval_candidate_limit,
-            )
+            ),
+            models.Prefetch(
+                query=models.Document(text=query, model=self.config.qdrant_bm25_model),
+                using=self.config.qdrant_bm25_vector_name,
+                limit=self.config.retrieval_candidate_limit,
+            ),
         ]
-        
-        if self.config.use_bm25:
-            # Stage 1b: Sparse Retrieval (BM25 Keyword Search)
-            prefetches.append(
-                models.Prefetch(
-                    query=models.Document(
-                        text=query,
-                        model=self.config.qdrant_bm25_model,
-                    ),
-                    using=self.config.qdrant_bm25_vector_name,
-                    limit=self.config.retrieval_candidate_limit,
-                )
+
+        if strategy == "fast_bm25_retrieval":
+            response = await self.qdrant.query_points(
+                collection_name=self.config.qdrant_collection_name,
+                prefetch=prefetches,
+                query=models.FusionQuery(fusion=models.Fusion.RRF),
+                limit=top_k,
+                with_payload=True,
+                with_vectors=False,
             )
+            return response.points
 
-        if self.config.use_late_interaction:
+        if strategy == "fast_bm25_late_interaction_retrieval":
             colbert_vector = (await self.create_late_interaction_embeddings([query]))[0]
-            candidate_prefetch: Any = prefetches[0]
-            
-            if self.config.use_bm25:
-                # Stage 2: Fuse the Dense and Sparse prefetches via RRF
-                # This outputs a combined pool of elite candidates
-                candidate_prefetch = models.Prefetch(
-                    prefetch=prefetches,
-                    query=models.FusionQuery(fusion=models.Fusion.RRF),
-                    limit=self.config.retrieval_candidate_limit,
-                )
-
-            # Stage 3: Late Interaction Re-ranking
-            # Perform ColBERT cross-attention re-ranking on the fused candidate pool
+            candidate_prefetch = models.Prefetch(
+                prefetch=prefetches,
+                query=models.FusionQuery(fusion=models.Fusion.RRF),
+                limit=self.config.retrieval_candidate_limit,
+            )
             response = await self.qdrant.query_points(
                 collection_name=self.config.qdrant_collection_name,
                 prefetch=candidate_prefetch,
@@ -208,23 +221,4 @@ class Retriever:
             )
             return response.points
 
-        if self.config.use_bm25:
-            response = await self.qdrant.query_points(
-                collection_name=self.config.qdrant_collection_name,
-                prefetch=prefetches,
-                query=models.FusionQuery(fusion=models.Fusion.RRF),
-                limit=top_k,
-                with_payload=True,
-                with_vectors=False,
-            )
-            return response.points
-
-        response = await self.qdrant.query_points(
-            collection_name=self.config.qdrant_collection_name,
-            query=dense_query,
-            using=self.config.qdrant_dense_vector_name,
-            limit=top_k,
-            with_payload=True,
-            with_vectors=False,
-        )
-        return response.points
+        raise ValueError(f"Unknown retrieval strategy: {strategy!r}")

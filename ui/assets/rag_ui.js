@@ -28,29 +28,41 @@ function progressBoldRest(ev) {
   }
   if (node === "query_complexity") {
     const c = ev.complexity || "";
+    const rs = ev.retrieval_strategy ? " · " + ev.retrieval_strategy : "";
     const ex = ev.explanation ? " — " + truncate(ev.explanation, 120) : "";
-    return { bold: boldName, rest: (c ? ": " + c : "") + ex };
+    return { bold: boldName, rest: (c ? ": " + c : "") + rs + ex };
   }
   if (node === "retrieval") {
+    const strat = ev.retrieval_strategy ? " · " + ev.retrieval_strategy : "";
     const n = ev.retrieved_doc_count != null ? " (" + ev.retrieved_doc_count + " docs)" : "";
     const q = (ev.retrieval_queries || []).join(" · ");
-    return { bold: boldName, rest: n + (q ? " — " + truncate(q, 160) : "") };
+    return { bold: boldName, rest: strat + n + (q ? " — " + truncate(q, 160) : "") };
   }
   if (node === "information_evaluator") {
     const st = ev.evaluation_status || "";
-    return { bold: boldName, rest: st ? ": " + st : "" };
+    const nu = ev.next_retrieval_strategy ? " → " + ev.next_retrieval_strategy : "";
+    const su =
+      ev.strategy_upgrade_retry_count != null
+        ? " · upg " + ev.strategy_upgrade_retry_count
+        : "";
+    return { bold: boldName, rest: (st ? ": " + st : "") + nu + su };
   }
   if (["query_splitter", "query_expansion", "query_rewriter"].indexOf(node) !== -1) {
-    const pq = (ev.parsed_queries || []).join(" · ");
+    const pq = (ev.active_retrieval_queries || []).join(" · ");
     return { bold: boldName, rest: pq ? " — " + truncate(pq, 180) : "" };
   }
   if (node === "gap_fill") {
-    const q = (ev.parsed_queries_insufficient_recall || []).join(" · ");
-    return { bold: boldName, rest: q ? " — " + truncate(q, 160) : "" };
+    const q = (ev.active_retrieval_queries || []).join(" · ");
+    const rs = ev.retrieval_strategy ? " · " + ev.retrieval_strategy : "";
+    return { bold: boldName, rest: rs + (q ? " — " + truncate(q, 160) : "") };
   }
   if (node === "intent_correction_rewriter") {
-    const q = (ev.parsed_queries_intent_correction || []).join(" · ");
-    return { bold: boldName, rest: q ? " — " + truncate(q, 160) : "" };
+    const q = (ev.active_retrieval_queries || []).join(" · ");
+    const rs = ev.retrieval_strategy ? " · " + ev.retrieval_strategy : "";
+    return { bold: boldName, rest: rs + (q ? " — " + truncate(q, 160) : "") };
+  }
+  if (node === "clear_turn_trace") {
+    return { bold: boldName, rest: " — turn trace cleared" };
   }
 
   const label = ev.label || "";

@@ -2,6 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from output_validation.retrieval_strategy import RetrievalStrategy
+
 
 QueryComplexity = Literal[
     "simple_query",
@@ -20,7 +22,17 @@ class QueryComplexityResult(BaseModel):
         description="Exact query complexity label used for graph routing.",
         examples=["comparison_query"],
     )
+    retrieval_strategy: RetrievalStrategy = Field(
+        description=(
+            "Initial retrieval tier for this turn: fast_retrieval (dense+optional MMR only); "
+            "fast_bm25_retrieval (dense + BM25 + RRF); keyword (BM25-only); "
+            "fast_bm25_late_interaction_retrieval (hybrid + ColBERT re-rank when configured)."
+        ),
+        examples=["fast_bm25_retrieval"],
+    )
     explanation: str = Field(
-        description="Brief observable explanation for the selected complexity label.",
-        examples=["The user asks to compare two policy tiers, so separate retrieval is useful."],
+        description=(
+            "Brief observable explanation covering routing label and why this retrieval_strategy fits."
+        ),
+        examples=["The user asks to compare two policy tiers; use hybrid lexical+dense retrieval."],
     )
