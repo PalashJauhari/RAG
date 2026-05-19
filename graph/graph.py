@@ -28,7 +28,10 @@ from middleware.llm_client import get_llm_client
 from observability.langfuse_handler import get_langfuse_callbacks, get_observe
 from output_validation.final_answer import FinalAnswer
 from output_validation.gap_fill import GapFillResult
-from output_validation.information_evaluator import InformationEvaluation
+from output_validation.information_evaluator import (
+    InformationEvaluation,
+    resolve_strategy_upgrade,
+)
 from output_validation.intent_correction_rewriter import IntentCorrectionRewriteResult
 from output_validation.message_query_entry import MessageQueryEntry
 from output_validation.query_complexity import QueryComplexityResult
@@ -382,8 +385,15 @@ class RetrievalGraph:
             ],
             config={"callbacks": get_langfuse_callbacks()},
         )
-        response = result["parsed"]
-        evaluation = response.model_dump()
+        evaluation_model: InformationEvaluation = result["parsed"]
+        force_partial = False
+        if evaluation_model.evaluation_status == "strategy_upgrade":
+            evaluation_model, force_partial = resolve_strategy_upgrade(
+                str(state.get("retrieval_strategy") or ""),
+                evaluation_model,
+                max_upgrade_retries=settings.strategy_upgrade_max_retries,
+            )
+        evaluation = evaluation_model.model_dump()
         status = evaluation["evaluation_status"]
 
         # route_after_evaluator uses these counts vs settings.*_max_retries to stop retry loops.
@@ -395,7 +405,10 @@ class RetrievalGraph:
         elif status == "intent_mismatch":
             intent_mismatch_retry_count += 1
         elif status == "strategy_upgrade":
-            strategy_upgrade_retry_count += 1
+            if force_partial:
+                strategy_upgrade_retry_count = settings.strategy_upgrade_max_retries
+            else:
+                strategy_upgrade_retry_count += 1
 
         merge: dict[str, Any] = {
             "information_evaluation": evaluation,
@@ -403,7 +416,7 @@ class RetrievalGraph:
             "intent_mismatch_retry_count": intent_mismatch_retry_count,
             "strategy_upgrade_retry_count": strategy_upgrade_retry_count,
         }
-        if status == "strategy_upgrade":
+        if status == "strategy_upgrade" and not force_partial:
             merge["retrieval_strategy"] = evaluation["next_retrieval_strategy"]
 
         merge.update(

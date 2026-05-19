@@ -14,6 +14,12 @@ You receive exactly:
 - **Retrieved documents**: compact rows with `score` and `text`, accumulated across retrieval loops
   for the current user turn.
 
+## Retrieval tier order (low → high)
+
+Use this ladder when choosing `next_retrieval_strategy` for `strategy_upgrade` (strictly move up only):
+
+`fast_retrieval` → `keyword` → `fast_bm25_retrieval` → `fast_bm25_late_interaction_retrieval`
+
 ## Evaluation statuses
 
 Return exactly one of:

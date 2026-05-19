@@ -25,6 +25,7 @@ the intent, repairs recall or intent issues when needed, and only then produces 
   with a heavier strategy without gap-fill or intent rewrite). Recall gaps route through gap-fill;
   intent mismatches route through intent-correction. Gap-fill and intent nodes may optionally bump
   **`retrieval_strategy`**. If retry budgets are exhausted, the graph routes to `partial_answer`.
+  Structured outputs are validated in `output_validation/` (see **Output validation** below).
 - **Per-request retrieval strategies** (chosen by complexity / evaluator / gap / intent):
   - **`fast_retrieval`**: dense (+ optional MMR per deployment settings).
   - **`fast_bm25_retrieval`**: dense + BM25 + RRF fusion.
@@ -194,6 +195,8 @@ data: {"type":"node","node":"retrieval","status":"completed","label":"Retrieving
 
 data: {"type":"node","node":"information_evaluator","status":"completed","label":"Evaluating evidence","evaluation_status":"sufficient","next_retrieval_strategy":null,"missing_evidence_details":[],"insufficient_recall_retry_count":0,"intent_mismatch_retry_count":0,"strategy_upgrade_retry_count":0}
 
+data: {"type":"node","node":"information_evaluator","status":"completed","label":"Evaluating evidence","evaluation_status":"insufficient_recall","next_retrieval_strategy":null,"missing_evidence_details":["Passages cover Enterprise refunds but not Consumer tier deadlines."],"insufficient_recall_retry_count":1,"intent_mismatch_retry_count":0,"strategy_upgrade_retry_count":0}
+
 data: {"type":"final","node":"answer","status":"completed","label":"Answer ready","answer":"...","sources":[],"confidence":"high"}
 
 data: {"type":"node","node":"clear_turn_trace","status":"completed","label":"Clearing turn trace"}
@@ -209,11 +212,38 @@ Retrieval `node` frames include `new_retrieved_documents` and `retrieved_doc_cou
 retrieval pass only** (not the full accumulated corpus). The terminal `done` frame carries all
 compact docs accumulated across retry loops in the turn.
 
+## Output validation
+
+Evaluator and retrieval-tier rules are enforced in code and at parse time:
+
+### Retrieval tier order
+
+Canonical low → high order (`RETRIEVAL_STRATEGY_ORDER` in `output_validation/retrieval_strategy.py`):
+
+```text
+fast_retrieval → keyword → fast_bm25_retrieval → fast_bm25_late_interaction_retrieval
+```
+
+`strategy_upgrade` must request a tier **strictly above** the current `retrieval_strategy`. After the
+LLM responds, `resolve_strategy_upgrade()` in `output_validation/information_evaluator.py` clamps
+invalid or equal/lighter choices to the minimum heavier tier when one exists.
+
+### `insufficient_recall`
+
+When `evaluation_status` is `insufficient_recall`, `missing_evidence_details` must contain at least
+one non-empty string (Pydantic on `InformationEvaluation`). Other statuses must leave this array empty.
+
+### `strategy_upgrade` at max tier
+
+If the current tier is already `fast_bm25_late_interaction_retrieval` and the evaluator still requests
+`strategy_upgrade`, the graph sets `strategy_upgrade_retry_count` to the configured maximum so the
+same turn routes to **`partial_answer`** without another retrieval pass.
+
 ## Development Notes
 
 - **Prompts**: Centralized in `prompts/`, one system prompt per graph node.
 - **Output Validation**: Structured node outputs live in `output_validation/` and use Pydantic
-  models with descriptive fields.
+  models with descriptive fields (evaluator rules above).
 - **LLM Client**: Unified client construction in `middleware/llm_client.py` handles model
   configuration, structured output wrappers, and rate limiting.
 - **Metadata Handling**: Final answer messages preserve provider metadata in `messages`. Prompt
