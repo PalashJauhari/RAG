@@ -11,8 +11,8 @@ class MessageQueryEntry(BaseModel):
     node: str = Field(description="LangGraph node id that produced this entry.")
     kind: str = Field(
         description=(
-            "Trace category, e.g. normalisation, complexity, query_prep, retrieval, "
-            "evaluation, gap_fill, intent_correction, answer."
+            "Trace category, e.g. normalisation, complexity, query_prep (splitter/expansion/rewriter), "
+            "retrieval, evaluation, gap_fill, intent_correction."
         ),
     )
     payload: dict[str, Any] = Field(default_factory=dict, description="JSON-safe detail blob.")

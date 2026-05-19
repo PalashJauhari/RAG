@@ -133,13 +133,14 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
         if mq:
             event["message_query_tail"] = _message_query_tail(mq)
     elif node_name == "retrieval":
-        retrieved_documents = payload.get("retrieved_documents") or []
+        new_retrieved_documents = payload.get("new_retrieved_documents") or []
         event.update(
             {
                 "label": "Retrieving documents",
                 "retrieval_strategy": payload.get("retrieval_strategy"),
-                "retrieval_queries": payload.get("last_retrieval_queries") or [],
-                "retrieved_doc_count": len(retrieved_documents),
+                "retrieval_queries": payload.get("active_retrieval_queries") or [],
+                "new_retrieved_documents": new_retrieved_documents,
+                "retrieved_doc_count": len(new_retrieved_documents),
             }
         )
         mq = payload.get("message_query")
@@ -152,7 +153,7 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
                 "label": "Evaluating evidence",
                 "evaluation_status": evaluation.get("evaluation_status"),
                 "next_retrieval_strategy": evaluation.get("next_retrieval_strategy"),
-                "missing_evidence_details": payload.get("missing_evidence_details") or [],
+                "missing_evidence_details": evaluation.get("missing_evidence_details") or [],
                 "insufficient_recall_retry_count": payload.get(
                     "insufficient_recall_retry_count",
                     0,

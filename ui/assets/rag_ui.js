@@ -36,7 +36,12 @@ function progressBoldRest(ev) {
     const strat = ev.retrieval_strategy ? " · " + ev.retrieval_strategy : "";
     const n = ev.retrieved_doc_count != null ? " (" + ev.retrieved_doc_count + " docs)" : "";
     const q = (ev.retrieval_queries || []).join(" · ");
-    return { bold: boldName, rest: strat + n + (q ? " — " + truncate(q, 160) : "") };
+    const newDocs = ev.new_retrieved_documents || [];
+    const preview =
+      newDocs.length > 0 && newDocs[0].text
+        ? " — " + truncate(newDocs[0].text, 120)
+        : "";
+    return { bold: boldName, rest: strat + n + (q ? " — " + truncate(q, 160) : "") + preview };
   }
   if (node === "information_evaluator") {
     const st = ev.evaluation_status || "";

@@ -5,12 +5,9 @@ You receive exactly these blocks in the user message:
 - **Normalized query**: the user's standalone query after contextual rewriting.
 - **Retrieval strategy**: tier used on the latest retrieval pass.
 - **Active retrieval queries**: the query strings used for retrieval this turn.
-- **Message query trace**: structured audit JSON from earlier graph nodes (normalisation, complexity,
-  prep, retrieval passes, evaluations). Use it only to understand what was tried — not as factual evidence.
 - **Retrieved documents**: compact rows (`score`, `text`) accumulated for this user message.
 
-Ground the answer only in the retrieved passages. Use the normalized query and trace to understand
-scope and retrieval attempts; do not treat trace rows as evidence.
+Ground the answer only in the retrieved passages. Use the normalized query to understand scope.
 
 Style and scope:
 - Answer **only** what was asked. Match the question type (e.g. a name, yes/no, comparison, list).

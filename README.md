@@ -37,9 +37,13 @@ the intent, repairs recall or intent issues when needed, and only then produces 
   scratch data lives in explicit keys such as `normalized_query`, `active_retrieval_queries`,
   `retrieval_strategy`, `message_query`, `retrieved_documents`, and `information_evaluation`.
 - **Strict Grounding**: The final answer node answers only from retrieved documents. Source citation
-  wiring is intentionally deferred, so `sources` is currently returned as an empty array. Final and
-  partial answer prompts receive the normalized query, active retrieval queries, full `message_query`
-  trace (for context only), and retrieved documents—only passages count as evidence.
+  wiring is intentionally deferred, so `sources` is currently returned as an empty array. The final
+  answer prompt receives the normalized query, retrieval strategy, active retrieval queries, and
+  retrieved documents. Partial answer also receives `information_evaluation`. Mid-graph nodes
+  (evaluator, gap-fill, intent) still receive the slim `message_query` trace for retry history.
+- **Slim audit trace**: `message_query` rows avoid duplicating live state (e.g. no `prep` — use
+  `node`; evaluator rows carry `evaluation_status` only; retrieval rows carry `queries`, `strategy`,
+  `new_doc_count`). Gap details live in `information_evaluation`, not a separate state key.
 
 ## Architecture
 
@@ -186,7 +190,7 @@ data: {"type":"node","node":"query_complexity","status":"completed","label":"Cla
 
 data: {"type":"node","node":"query_splitter","status":"completed","label":"Preparing retrieval queries","active_retrieval_queries":["Enterprise refund policy","Consumer refund policy"]}
 
-data: {"type":"node","node":"retrieval","status":"completed","label":"Retrieving documents","retrieval_strategy":"fast_bm25_retrieval","retrieval_queries":["Enterprise refund policy","Consumer refund policy"],"retrieved_doc_count":8}
+data: {"type":"node","node":"retrieval","status":"completed","label":"Retrieving documents","retrieval_strategy":"fast_bm25_retrieval","retrieval_queries":["Enterprise refund policy","Consumer refund policy"],"new_retrieved_documents":[{"score":0.42,"text":"..."}],"retrieved_doc_count":8}
 
 data: {"type":"node","node":"information_evaluator","status":"completed","label":"Evaluating evidence","evaluation_status":"sufficient","next_retrieval_strategy":null,"missing_evidence_details":[],"insufficient_recall_retry_count":0,"intent_mismatch_retry_count":0,"strategy_upgrade_retry_count":0}
 
@@ -201,9 +205,9 @@ The closing `done` frame includes `retrieved_docs` (compact `score` / `text` row
 so streaming clients can show passage counts or tooling without a second `/run` invoke.
 
 If retry budgets are exhausted, the final event comes from `partial_answer` instead of `answer`.
-Progress events intentionally avoid sending full retrieved document text in intermediate `node`
-frames; the terminal `done` frame carries the accumulated compact docs from the last retrieval
-updates.
+Retrieval `node` frames include `new_retrieved_documents` and `retrieved_doc_count` for **this
+retrieval pass only** (not the full accumulated corpus). The terminal `done` frame carries all
+compact docs accumulated across retry loops in the turn.
 
 ## Development Notes
 

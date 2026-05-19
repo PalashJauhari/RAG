@@ -10,8 +10,8 @@ You receive:
 - **Retrieval strategy**: tier used on the latest retrieval pass.
 - **Active retrieval queries**: strings used for that pass (replace these with your missing_queries).
 - **Message query trace**: structured audit rows for this turn.
+- **Information evaluation**: latest evaluator output including `missing_evidence_details` when status is insufficient_recall.
 - **Retrieved documents**: compact rows already retrieved in this turn.
-- **Missing evidence details**: evaluator notes describing what is covered and what is absent.
 
 ## Rules
 

@@ -68,11 +68,10 @@ class RetrievalState(TypedDict, total=False):
     ``retrieval_strategy``: scalar tier applied by ``retrieval_node`` (may change after evaluator/gap/intent).
     ``active_retrieval_queries``: current retrieval query strings for this turn.
     ``message_query``: append-only structured audit trace (``operator.add`` reducer).
-    ``last_retrieval_queries``: queries used by the latest retrieval pass, for streaming/debugging.
     ``retrieved_documents``: compact rows ``{score, text}``, appended across retry loops and
         reset for each new user ``/run`` input.
-    ``information_evaluation``: last ``InformationEvaluation`` dict.
-    ``missing_evidence_details``: evaluator gap details for insufficient recall.
+    ``new_retrieved_documents``: compact rows from the latest retrieval pass only (for SSE / UI).
+    ``information_evaluation``: last ``InformationEvaluation`` dict (includes missing_evidence_details when applicable).
     ``insufficient_recall_retry_count``: count of recall-repair loops in the current turn.
     ``intent_mismatch_retry_count``: count of intent-correction loops in the current turn.
     ``strategy_upgrade_retry_count``: count of evaluator-driven retrieval tier upgrades this turn.
@@ -86,10 +85,9 @@ class RetrievalState(TypedDict, total=False):
     retrieval_strategy: str
     active_retrieval_queries: list[str]
     message_query: Annotated[list[dict[str, Any]], operator.add]
-    last_retrieval_queries: list[str]
     retrieved_documents: list[dict[str, Any]]
+    new_retrieved_documents: list[dict[str, Any]]
     information_evaluation: dict[str, Any]
-    missing_evidence_details: list[str]
     insufficient_recall_retry_count: int
     intent_mismatch_retry_count: int
     strategy_upgrade_retry_count: int
@@ -189,13 +187,7 @@ class RetrievalGraph:
             "message_summary": summary,
             "normalized_query": normalized_query,
         }
-        merge.update(
-            trace_row(
-                "query_normalisation",
-                "normalisation",
-                {"normalized_query": normalized_query},
-            )
-        )
+        merge.update(trace_row("query_normalisation", "normalisation", {}))
         return merge
 
     @observe(name="query_complexity_node")
@@ -229,7 +221,7 @@ class RetrievalGraph:
             trace_row(
                 "query_complexity",
                 "complexity",
-                {"complexity": output["complexity"], "retrieval_strategy": retrieval_strategy},
+                {"complexity": output["complexity"]},
                 notes=output.get("explanation"),
             )
         )
@@ -258,7 +250,7 @@ class RetrievalGraph:
             queries = [normalized_query]
 
         merge = {"active_retrieval_queries": queries}
-        merge.update(trace_row("query_splitter", "query_prep", {"queries": queries, "prep": "splitter"}))
+        merge.update(trace_row("query_splitter", "query_prep", {"queries": queries}))
         return merge
 
     @observe(name="query_expansion_node")
@@ -284,7 +276,7 @@ class RetrievalGraph:
             queries = [normalized_query]
 
         merge = {"active_retrieval_queries": queries}
-        merge.update(trace_row("query_expansion", "query_prep", {"queries": queries, "prep": "expansion"}))
+        merge.update(trace_row("query_expansion", "query_prep", {"queries": queries}))
         return merge
 
     @observe(name="query_rewriter_node")
@@ -309,7 +301,7 @@ class RetrievalGraph:
 
         queries = [rewritten_query] if rewritten_query else []
         merge = {"active_retrieval_queries": queries}
-        merge.update(trace_row("query_rewriter", "query_prep", {"queries": queries, "prep": "rewriter"}))
+        merge.update(trace_row("query_rewriter", "query_prep", {"queries": queries}))
         return merge
 
     @observe(name="retrieval_node")
@@ -344,9 +336,10 @@ class RetrievalGraph:
         accumulated = list(state.get("retrieved_documents") or [])
 
         merge = {
-            "last_retrieval_queries": search_queries,
             "retrieved_documents": accumulated + compact_document_rows,
             "retrieval_strategy": strategy,
+            "new_retrieved_documents": compact_document_rows,
+            "active_retrieval_queries": search_queries,
         }
         merge.update(
             trace_row(
@@ -404,16 +397,8 @@ class RetrievalGraph:
         elif status == "strategy_upgrade":
             strategy_upgrade_retry_count += 1
 
-        # gap_fill_node reads missing_evidence_details; cleared when status is not insufficient_recall.
-        missing_evidence_details = (
-            evaluation["missing_evidence_details"]
-            if status == "insufficient_recall"
-            else []
-        )
-
         merge: dict[str, Any] = {
             "information_evaluation": evaluation,
-            "missing_evidence_details": missing_evidence_details,
             "insufficient_recall_retry_count": insufficient_recall_retry_count,
             "intent_mismatch_retry_count": intent_mismatch_retry_count,
             "strategy_upgrade_retry_count": strategy_upgrade_retry_count,
@@ -425,7 +410,7 @@ class RetrievalGraph:
             trace_row(
                 "information_evaluator",
                 "evaluation",
-                {"evaluation_status": status, "strategy": state.get("retrieval_strategy")},
+                {"evaluation_status": status},
                 notes=evaluation.get("evaluation_explanation"),
             )
         )
@@ -444,10 +429,10 @@ class RetrievalGraph:
             f"{json.dumps(state.get('active_retrieval_queries') or [], ensure_ascii=False)}\n\n"
             "## Message query trace\n"
             f"{json.dumps(state.get('message_query') or [], ensure_ascii=False)}\n\n"
+            "## Information evaluation\n"
+            f"{json.dumps(state.get('information_evaluation') or {}, ensure_ascii=False)}\n\n"
             "## Retrieved documents\n"
-            f"{json.dumps(state.get('retrieved_documents') or [], ensure_ascii=False)}\n\n"
-            "## Missing evidence details\n"
-            f"{json.dumps(state.get('missing_evidence_details') or [], ensure_ascii=False)}"
+            f"{json.dumps(state.get('retrieved_documents') or [], ensure_ascii=False)}"
         )
         llm = get_llm_client(
             model=settings.gap_fill_model,
@@ -551,8 +536,6 @@ class RetrievalGraph:
             f"{state.get('retrieval_strategy') or ''}\n\n"
             "## Active retrieval queries\n"
             f"{json.dumps(state.get('active_retrieval_queries') or [], ensure_ascii=False)}\n\n"
-            "## Message query trace\n"
-            f"{json.dumps(state.get('message_query') or [], ensure_ascii=False)}\n\n"
             "## Retrieved documents\n"
             f"{json.dumps(state.get('retrieved_documents') or [], ensure_ascii=False)}"
         )
@@ -589,8 +572,6 @@ class RetrievalGraph:
             f"{state.get('retrieval_strategy') or ''}\n\n"
             "## Active retrieval queries\n"
             f"{json.dumps(state.get('active_retrieval_queries') or [], ensure_ascii=False)}\n\n"
-            "## Message query trace\n"
-            f"{json.dumps(state.get('message_query') or [], ensure_ascii=False)}\n\n"
             "## Information evaluation\n"
             f"{json.dumps(state.get('information_evaluation') or {}, ensure_ascii=False)}\n\n"
             "## Retrieved documents\n"
@@ -749,14 +730,13 @@ class RetrievalGraph:
                 "query_complexity": {},
                 "retrieval_strategy": "",
                 "active_retrieval_queries": [],
-                "last_retrieval_queries": [],
                 "retrieved_documents": [],
+                "new_retrieved_documents": [],
                 "information_evaluation": {},
-                "missing_evidence_details": [],
                 "insufficient_recall_retry_count": 0,
                 "intent_mismatch_retry_count": 0,
                 "strategy_upgrade_retry_count": 0,
-                "message_query": [],
+                "message_query": Overwrite([]),
             },
             config=config,
         )
@@ -785,14 +765,13 @@ class RetrievalGraph:
                 "query_complexity": {},
                 "retrieval_strategy": "",
                 "active_retrieval_queries": [],
-                "last_retrieval_queries": [],
                 "retrieved_documents": [],
+                "new_retrieved_documents": [],
                 "information_evaluation": {},
-                "missing_evidence_details": [],
                 "insufficient_recall_retry_count": 0,
                 "intent_mismatch_retry_count": 0,
                 "strategy_upgrade_retry_count": 0,
-                "message_query": [],
+                "message_query": Overwrite([]),
             },
             config=config,
             stream_mode="updates",
