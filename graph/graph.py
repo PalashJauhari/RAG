@@ -338,8 +338,17 @@ class RetrievalGraph:
         compact_document_rows = compact_hotqa_documents_for_llm(ranked_hits)
         accumulated = list(state.get("retrieved_documents") or [])
 
+        seen_texts = {doc.get("text") for doc in accumulated if doc.get("text") is not None}
+        rows_to_add: list[dict[str, Any]] = []
+        for row in compact_document_rows:
+            text = row.get("text")
+            if text is None or text in seen_texts:
+                continue
+            rows_to_add.append(row)
+            seen_texts.add(text)
+
         merge = {
-            "retrieved_documents": accumulated + compact_document_rows,
+            "retrieved_documents": accumulated + rows_to_add,
             "retrieval_strategy": strategy,
             "new_retrieved_documents": compact_document_rows,
             "active_retrieval_queries": search_queries,

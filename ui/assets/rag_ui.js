@@ -1,5 +1,13 @@
 window.dash_clientside = window.dash_clientside || {};
 window.dash_clientside.rag_ui = window.dash_clientside.rag_ui || {};
+window.dash_clientside.rag_ui._inFlight = false;
+
+function setComposerDisabled(disabled) {
+  const btn = document.getElementById("send-button");
+  const input = document.getElementById("message-input");
+  if (btn) btn.disabled = !!disabled;
+  if (input) input.disabled = !!disabled;
+}
 
 function truncate(s, maxLen) {
   if (!s) return "";
@@ -158,6 +166,8 @@ function appendTimeTakenFooter(content, elapsedMs) {
 window.dash_clientside.rag_ui.clear_progress = function (_session_gen) {
   const el = document.getElementById("rag-stream-progress");
   if (el) el.innerHTML = "";
+  window.dash_clientside.rag_ui._inFlight = false;
+  setComposerDisabled(false);
   return "";
 };
 
@@ -175,6 +185,13 @@ window.dash_clientside.rag_ui.submit_message = async function (
   if (!raw) {
     return [nu, nu, nu, ""];
   }
+
+  if (window.dash_clientside.rag_ui._inFlight) {
+    return [nu, nu, nu, "Please wait for the current response."];
+  }
+
+  window.dash_clientside.rag_ui._inFlight = true;
+  setComposerDisabled(true);
 
   let chat = Array.isArray(chat_state) ? chat_state.slice() : [];
   chat.push({ role: "user", content: raw });
@@ -265,5 +282,8 @@ window.dash_clientside.rag_ui.submit_message = async function (
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
     return [chat, !!pending_interrupt, "", msg];
+  } finally {
+    window.dash_clientside.rag_ui._inFlight = false;
+    setComposerDisabled(false);
   }
 };

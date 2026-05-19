@@ -336,6 +336,12 @@ body {
   opacity: 0.92;
 }
 
+#send-button:disabled,
+#message-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .rag-error {
   max-width: 768px;
   margin: 10px auto 0;
