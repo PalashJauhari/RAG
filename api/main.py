@@ -20,10 +20,7 @@ from config.settings import settings
 from graph import RetrievalGraph
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from observability.langfuse_handler import get_observe
 from output_validation.final_answer import FinalAnswer
-
-observe = get_observe()
 
 
 # --- Request models ---
@@ -338,11 +335,10 @@ def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# --- HTTP routes ---
+# --- HTTP routes (session_id == LangGraph thread_id) ---
 
 
 @app.post("/run")
-@observe(name="api_run")
 async def run(request: RunRequest) -> dict[str, Any]:
     """Run one user turn to completion and return the final answer payload."""
     result = await app.state.retrieval_graph.run(
@@ -353,12 +349,11 @@ async def run(request: RunRequest) -> dict[str, Any]:
 
 
 @app.post("/run/stream")
-@observe(name="api_run_stream")
 async def run_stream(request: RunRequest) -> StreamingResponse:
     """Stream node-level graph progress as Server-Sent Events (``text/event-stream``)."""
 
     async def event_generator():
-        # Accumulated corpus across retry loops; retrieval node updates this field.
+        # Map each LangGraph stream chunk to SSE; track final retrieved_documents for the done frame.
         last_retrieved_docs: list[Any] = []
         try:
             async for update in app.state.retrieval_graph.stream_run(
@@ -401,7 +396,6 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
 
 
 @app.post("/resume")
-@observe(name="api_resume")
 async def resume(request: ResumeRequest) -> dict[str, Any]:
     """Resume a paused graph after a human clarification (when interrupts are enabled)."""
     result = await app.state.retrieval_graph.resume(

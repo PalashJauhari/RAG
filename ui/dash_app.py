@@ -28,6 +28,7 @@ app.title = "GaussianBlurr RAG Chat"
 
 
 # --- Layout (stores + three-column shell) ---
+# Lambda layout so session-id is fresh per page load; stores hold API URL and chat state.
 
 app.layout = lambda: html.Div(
     className="rag-shell",

@@ -59,6 +59,7 @@ def get_llm_client(
         kwargs["rate_limiter"] = OPENAI_RATE_LIMITER
 
     llm = ChatOpenAI(**kwargs)
+    # Graph nodes pass Pydantic models from output_validation/; include_raw preserves AIMessage metadata.
     if output_schema is not None:
         return llm.with_structured_output(output_schema, include_raw=include_raw)
     return llm

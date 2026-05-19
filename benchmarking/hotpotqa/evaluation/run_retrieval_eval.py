@@ -39,6 +39,7 @@ async def main() -> None:
             context["context_id"] for context in record["contexts"] if context["is_supporting"]
         ]
 
+        # Store both text lists (for RAGAS) and raw Qdrant docs (for debugging).
         results.append(
             {
                 "id": record["id"],

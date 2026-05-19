@@ -25,6 +25,7 @@ class HotpotQASettings(Settings):
     hotpotqa_ragas_model: str = "gpt-4o-mini"
     hotpotqa_experiment_name: str = "default_experiment"
 
+    # --- Artifact paths (under benchmarking/hotpotqa/data/) ---
     processed_dataset_path: Path = HOTPOTQA_ROOT / "data" / "processed" / "hotpotqa_eval.json"
 
     @property

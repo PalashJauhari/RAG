@@ -1,3 +1,8 @@
+/**
+ * Dash clientside SSE consumer for POST /run/stream.
+ * Event shape matches api.main.get_stream_event (node, type, label, node-specific fields).
+ * Progress column: bold = LangGraph node id; remainder = human-readable detail.
+ */
 window.dash_clientside = window.dash_clientside || {};
 window.dash_clientside.rag_ui = window.dash_clientside.rag_ui || {};
 window.dash_clientside.rag_ui._inFlight = false;

@@ -18,6 +18,7 @@ def compact_hotqa_documents_for_llm(documents: list[dict[str, Any]]) -> list[dic
 
     slim: list[dict[str, Any]] = []
     for doc in documents:
+        # Qdrant returns id/payload/rank; graph state and prompts only need score + text.
         payload = doc.get("payload") or {}
         raw = payload.get("text")
         if raw is None:

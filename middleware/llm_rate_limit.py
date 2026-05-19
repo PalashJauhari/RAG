@@ -11,6 +11,7 @@ from langchain_core.rate_limiters import InMemoryRateLimiter
 from config.settings import settings
 
 
+# Shared bucket across all graph nodes; None disables rate limiting on ChatOpenAI.
 OPENAI_RATE_LIMITER: InMemoryRateLimiter | None = None
 if settings.openai_rate_limit_enabled:
     OPENAI_RATE_LIMITER = InMemoryRateLimiter(

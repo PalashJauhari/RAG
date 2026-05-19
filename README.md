@@ -104,8 +104,16 @@ Environment flags **`USE_BM25`**, **`USE_LATE_INTERACTION`**, and **`USE_MMR`** 
 Qdrant client (e.g. cloud inference), embedding/MMR parameters, and Jina availability; the
 **`strategy`** argument chooses which branches run inside `_retrieve_one`.
 
-For multiple active retrieval queries, the retriever runs each query, deduplicates by point id, and boosts
-documents that rank well across query result sets (RRF across queries).
+For multiple active retrieval queries (e.g. from `query_splitter` or `query_expansion`), the retriever runs
+each query concurrently with the same per-request strategy. Each sub-query returns up to
+`RETRIEVAL_TOP_K` hits from Qdrant. Results are merged in query order: deduplicate by Qdrant point id
+(first occurrence wins), then return the combined list. There is no cross-query RRF and no global
+`[:top_k]` cap on the merged result.
+
+Example: `RETRIEVAL_TOP_K=8` with three active queries yields up to 24 documents per retrieval pass
+(fewer if the same point id appears in more than one sub-query list). The graph's `retrieval_node`
+then deduplicates by passage text and appends new rows to `retrieved_documents` (including across
+retry loops in the same user turn).
 
 ## Environment Configuration
 
@@ -117,6 +125,7 @@ USE_BM25=true
 USE_LATE_INTERACTION=true
 USE_MMR=true
 RETRIEVAL_CANDIDATE_LIMIT=100
+# Per sub-query; multi-query passes return up to RETRIEVAL_TOP_K × num(active_retrieval_queries) (before id dedup)
 RETRIEVAL_TOP_K=8
 
 # Context Management
@@ -139,7 +148,7 @@ QUERY_EXPANSION_MODEL=gpt-4.1-mini
 GAP_FILL_MODEL=gpt-4.1-mini
 INTENT_CORRECTION_REWRITER_MODEL=gpt-4.1-mini
 
-# Observability
+# Observability (when false: no Langfuse spans or network traffic)
 LANGFUSE_TRACING_ENABLED=false
 ```
 
@@ -209,8 +218,9 @@ so streaming clients can show passage counts or tooling without a second `/run` 
 
 If retry budgets are exhausted, the final event comes from `partial_answer` instead of `answer`.
 Retrieval `node` frames include `new_retrieved_documents` and `retrieved_doc_count` for **this
-retrieval pass only** (not the full accumulated corpus). The terminal `done` frame carries all
-compact docs accumulated across retry loops in the turn.
+retrieval pass only** (not the full accumulated corpus). With multiple `active_retrieval_queries`,
+those counts reflect the per-query top-k merge (up to `RETRIEVAL_TOP_K` per query), not a single
+global top-k. The terminal `done` frame carries all compact docs accumulated across retry loops in the turn.
 
 ## Output validation
 
@@ -248,8 +258,30 @@ same turn routes to **`partial_answer`** without another retrieval pass.
   configuration, structured output wrappers, and rate limiting.
 - **Metadata Handling**: Final answer messages preserve provider metadata in `messages`. Prompt
   contexts are built as plain text or JSON so LangChain response metadata is not sent back to LLMs.
-- **Observability**: Langfuse integration is available at API, graph node, summarization, and
-  LangChain callback layers when `LANGFUSE_TRACING_ENABLED=true`.
+- **Observability**: When `LANGFUSE_TRACING_ENABLED=true`, each `/run` or `/run/stream` creates one
+  Langfuse trace rooted at `run` or `stream_run` (`session_id` via `propagate_attributes`). Graph
+  nodes emit spans with `output` only; LLM steps emit `{node}-llm` generations with **model**, **input**
+  (input token count), **output** (output token count), and automatic latency. No LangChain
+  `CallbackHandler`. When `false`, tracing is fully off. See `observability/langfuse_handler.py` and
+  retrieval logging in `graph/graph.py` (`retrieval_node`).
+
+  **Retrieval span** (`name="retrieval"`): `output` includes:
+
+  | Field | Meaning |
+  |--------|---------|
+  | `strategy` | Active `retrieval_strategy` tier for this pass |
+  | `queries` | `active_retrieval_queries` used (or fallback from `normalized_query`) |
+  | `new_doc_count` | Count of compact docs returned this pass (before cross-turn text dedup) |
+  | `rows_to_add` | Unique `{score, text}` rows appended this pass (after dedup vs prior corpus) |
+  | `retrieved_documents` | Full accumulated corpus after merge (`prior + rows_to_add`) |
+
+  Full passage text in traces can be **large** on retry loops or long chunks; Langfuse UI may be slower.
+  SSE `/run/stream` events are **unchanged** (still expose `new_retrieved_documents` and counts for the
+  Dash UI, not the Langfuse-only accumulated payload).
+- **Code comments**: Python modules use module docstrings, `# --- section ---` headers, and inline notes
+  for non-obvious routing, dedup, retries, and Langfuse branches. Prompt bodies in `prompts/` stay
+  uncommented inside `SYSTEM_PROMPT` strings; each prompt file’s module docstring links prompt → graph
+  node → `output_validation` schema.
 - **UI**: The Dash app in `ui/dash_app.py` mirrors the **ForecastingPlatform** viewport shell (muted
   outer `#DCDCD8`, framed `#FAFAF8` card, left rail, chat column, rounded composer). It calls
   **`POST /run/stream`** from the browser (async fetch + SSE) and appends each graph step to a

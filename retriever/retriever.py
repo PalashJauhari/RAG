@@ -3,8 +3,8 @@
 Used by :class:`~graph.graph.RetrievalGraph` and HotpotQA benchmarks. Strategy matrix
 (see README): ``fast_retrieval`` (dense + optional MMR), ``keyword`` (BM25 only),
 ``fast_bm25_retrieval`` (dense + BM25 + RRF), ``fast_bm25_late_interaction_retrieval``
-(hybrid candidates + ColBERT re-rank via Jina). Multi-query calls fuse with RRF across
-query result lists inside :meth:`Retriever.retrieve`.
+(hybrid candidates + ColBERT re-rank via Jina). Multi-query calls keep up to ``top_k`` hits
+per sub-query, merge in query order, and deduplicate by point id inside :meth:`Retriever.retrieve`.
 """
 
 from __future__ import annotations
@@ -87,6 +87,7 @@ class Retriever:
         max_attempts = 6
         base_delay_seconds = 1.0
 
+        # Semaphore + 429 backoff: multihop queries fan out parallel sub-queries that share Jina quota.
         async with self._jina_request_sem:
             async with httpx.AsyncClient(timeout=self.config.request_timeout_seconds) as client:
                 for attempt in range(max_attempts):
@@ -116,7 +117,11 @@ class Retriever:
         strategy: RetrievalStrategy,
         top_k: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Run retrieval for each query concurrently, then fuse with cross-query RRF.
+        """Run retrieval for each query concurrently, then merge per-query top-k lists.
+
+        Each sub-query returns up to ``top_k`` (or ``retrieval_top_k``) Qdrant hits. Results are
+        concatenated in query order with point-id deduplication (first occurrence wins). There is no
+        cross-query RRF and no global ``[:top_k]`` cap on the merged list.
 
         ``strategy`` selects dense / BM25 / fusion / ColBERT behavior per request (see
         :meth:`_retrieve_one`). Global ``USE_*`` flags still configure the Qdrant client
@@ -125,10 +130,10 @@ class Retriever:
         Args:
             queries: One or more retrieval query strings.
             strategy: Per-request tier from complexity or evaluator.
-            top_k: Override for ``retrieval_top_k`` when set.
+            top_k: Per sub-query limit; overrides ``retrieval_top_k`` when set.
 
         Returns:
-            Up to ``top_k`` dicts with ``id``, ``score``, ``rank``, and ``payload``.
+            Up to ``top_k * len(queries)`` dicts with ``id``, ``score``, ``rank``, and ``payload``.
         """
         clean_queries = [query.strip() for query in queries if query and query.strip()]
         if not clean_queries:
@@ -139,41 +144,25 @@ class Retriever:
             *(self._retrieve_one(query, limit, strategy) for query in clean_queries)
         )
 
-        # --- Cross-query reciprocal rank fusion ---
-        docs_by_id: dict[str, dict[str, Any]] = {}
+        # --- Merge per-query top-k: query order, dedupe by point id (no cross-query RRF) ---
+        seen_ids: set[str] = set()
+        final_docs: list[dict[str, Any]] = []
         for points in results:
-            for rank, point in enumerate(points):
+            for point in points:
                 point_id = str(point.id)
-                payload = point.payload or {}
-
-                # RRF score: 1/(rank+1). Documents ranking well on multiple queries accumulate rank_score.
-                rank_score = 1 / (rank + 1)
-
-                if point_id not in docs_by_id:
-                    docs_by_id[point_id] = {
+                if point_id in seen_ids:
+                    continue
+                seen_ids.add(point_id)
+                final_docs.append(
+                    {
                         "id": point_id,
                         "score": point.score,
-                        "rank_score": rank_score,
-                        "payload": payload,
+                        "payload": point.payload or {},
                     }
-                else:
-                    docs_by_id[point_id]["score"] = max(
-                        docs_by_id[point_id]["score"],
-                        point.score,
-                    )
-                    docs_by_id[point_id]["rank_score"] += rank_score
+                )
 
-        docs = sorted(
-            docs_by_id.values(),
-            key=lambda doc: (doc["rank_score"], doc["score"]),
-            reverse=True,
-        )
-
-        final_docs = []
-        for i, doc in enumerate(docs[:limit]):
-            doc["rank"] = i + 1
-            del doc["rank_score"]
-            final_docs.append(doc)
+        for rank, doc in enumerate(final_docs, start=1):
+            doc["rank"] = rank
 
         return final_docs
 
