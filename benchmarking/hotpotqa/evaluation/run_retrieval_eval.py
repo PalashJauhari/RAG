@@ -1,3 +1,11 @@
+"""Run :class:`~retriever.retriever.Retriever` on HotpotQA questions (no LangGraph).
+
+Picks default strategy from ``USE_LATE_INTERACTION`` / ``USE_BM25`` flags. Writes
+``retrieval_results.json`` under ``data/results/{experiment}/``.
+
+Run: ``python -m benchmarking.hotpotqa.evaluation.run_retrieval_eval``
+"""
+
 import asyncio
 import json
 
@@ -6,12 +14,14 @@ from retriever.retriever import Retriever
 
 
 async def main() -> None:
+    """Retrieve once per question; record reference vs retrieved context ids and texts."""
     settings = HotpotQASettings()
     retriever = Retriever(settings)
     records = json.loads(settings.processed_dataset_path.read_text(encoding="utf-8"))
     if settings.hotpotqa_max_questions > 0:
         records = records[: settings.hotpotqa_max_questions]
 
+    # Strategy tier mirrors production defaults from env flags (not per-question complexity).
     if settings.use_late_interaction:
         default_strategy = "fast_bm25_late_interaction_retrieval"
     elif settings.use_bm25:

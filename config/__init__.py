@@ -1,1 +1,1 @@
-
+"""Application configuration (``config.settings``)."""

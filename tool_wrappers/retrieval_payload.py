@@ -1,4 +1,8 @@
-"""Compact retriever results for graph state payloads."""
+"""Compact retriever results for graph state and LLM prompts.
+
+Strips Qdrant payload metadata so evaluator/answer nodes see only ``score`` and ``text``.
+Source citation wiring is deferred; extend here when ``sources`` are populated.
+"""
 
 from __future__ import annotations
 

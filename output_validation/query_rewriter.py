@@ -1,3 +1,5 @@
+"""Structured output for ``query_rewriter_node`` (prompt: ``prompts/query_rewriter.py``)."""
+
 from pydantic import BaseModel, Field
 
 

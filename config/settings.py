@@ -1,9 +1,16 @@
+"""Application runtime settings loaded from ``.env`` and environment variables.
+
+Consumed by FastAPI, :class:`~graph.graph.RetrievalGraph`, :class:`~retriever.retriever.Retriever`,
+and middleware. HotpotQA benchmarks use a separate settings module under ``benchmarking/hotpotqa/``.
+"""
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Runtime configuration loaded from .env and process environment."""
+    """Pydantic settings for the production RAG pipeline (see ``.env.example``)."""
 
+    # --- OpenAI defaults ---
     openai_api_key: str = ""
     openai_llm_model: str = "gpt-4.1-mini"
     openai_embedding_model: str = "text-embedding-3-small"
@@ -11,6 +18,7 @@ class Settings(BaseSettings):
     openai_summary_model: str = "gpt-4.1-mini"
     openai_temperature: float = 0
 
+    # --- Per-graph-node LLM models ---
     query_normalisation_model: str = "gpt-4.1-mini"
     query_complexity_model: str = "gpt-4.1-mini"
     query_rewriter_model: str = "gpt-4.1-mini"
@@ -21,6 +29,7 @@ class Settings(BaseSettings):
     gap_fill_model: str = "gpt-4.1-mini"
     intent_correction_rewriter_model: str = "gpt-4.1-mini"
 
+    # --- Qdrant collection and vector names ---
     qdrant_url: str = ""
     qdrant_api_key: str = ""
     qdrant_collection_name: str = ""
@@ -29,6 +38,7 @@ class Settings(BaseSettings):
     qdrant_colbert_vector_name: str = "colbert"
     qdrant_bm25_model: str = "Qdrant/bm25"
 
+    # --- Retrieval feature flags (client setup; strategy picks branches per request) ---
     use_bm25: bool = True
     use_late_interaction: bool = True
     use_mmr: bool = True
@@ -37,29 +47,35 @@ class Settings(BaseSettings):
     retrieval_candidate_limit: int = 100
     retrieval_mmr_diversity: float = 0.5
 
+    # --- Jina ColBERT multi-vector API ---
     jina_api_key: str = ""
     jina_colbert_model: str = "jina-colbert-v2"
     jina_colbert_dimensions: int = 128
     jina_multi_vector_url: str = "https://api.jina.ai/v1/multi-vector"
 
+    # --- Langfuse observability ---
     langfuse_tracing_enabled: bool = False
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
     langfuse_host: str = "https://cloud.langfuse.com"
     langfuse_base_url: str = ""
 
+    # --- LangGraph checkpointing ---
     checkpointer_use_postgres: bool = False
     database_url: str = ""
 
+    # --- Graph execution limits ---
     graph_recursion_limit: int = 100
     graph_max_concurrency: int = 2
     insufficient_recall_max_retries: int = 3
     intent_mismatch_max_retries: int = 2
     strategy_upgrade_max_retries: int = 3
 
+    # --- Long-context summarization (optional; see middleware.context_editing) ---
     message_summary_token_threshold: int = 100000
     message_summary_keep_recent: int = 10
 
+    # --- OpenAI request rate limiting ---
     openai_rate_limit_enabled: bool = True
     openai_rate_limit_requests_per_second: float = 1.0
     openai_rate_limit_check_every_n_seconds: float = 0.1

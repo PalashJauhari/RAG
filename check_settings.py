@@ -1,3 +1,8 @@
+"""Development utility: list ``Settings`` fields with no ``settings.<field>`` usage in ``*.py``.
+
+Not used in production. Run from repo root: ``python check_settings.py``.
+"""
+
 import os
 import re
 

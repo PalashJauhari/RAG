@@ -1,3 +1,9 @@
+"""Structured output for ``intent_correction_rewriter_node`` (prompt: ``prompts/intent_correction_rewriter.py``).
+
+``corrected_queries`` replace ``active_retrieval_queries`` after intent_mismatch.
+Optional ``next_retrieval_strategy`` may bump tier when appropriate.
+"""
+
 from pydantic import BaseModel, Field
 
 from output_validation.retrieval_strategy import RetrievalStrategy

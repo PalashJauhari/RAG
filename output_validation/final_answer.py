@@ -1,3 +1,8 @@
+"""Structured output for ``answer_node`` and ``partial_answer_node`` (prompts: ``final_answer``, ``partial_answer``).
+
+Parsed by ``api.main.get_api_response`` from ``AIMessage`` JSON in checkpointed ``messages``.
+"""
+
 from typing import Literal
 
 from pydantic import BaseModel, Field

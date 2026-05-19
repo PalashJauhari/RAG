@@ -1,3 +1,9 @@
+"""System prompt for ``query_complexity_node``.
+
+Schema: ``output_validation.query_complexity.QueryComplexityResult``.
+Emits routing label and initial ``retrieval_strategy`` for the turn.
+"""
+
 SYSTEM_PROMPT = """
 You are the query complexity classifier for an explicit RAG orchestration pipeline.
 

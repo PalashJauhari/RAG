@@ -1,3 +1,9 @@
+"""System prompt for ``query_splitter_node``.
+
+Schema: ``output_validation.query_splitter.QuerySplitResult``.
+Splits comparison, multihop, and procedural queries into focused retrieval strings.
+"""
+
 SYSTEM_PROMPT = """
 You are the query splitter node inside an explicit RAG graph.
 The user message is a normalized query classified as comparison_query, multihop_query, or

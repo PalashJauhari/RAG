@@ -1,3 +1,9 @@
+"""System prompt for ``information_evaluator_node``.
+
+Schema: ``output_validation.information_evaluator.InformationEvaluation``.
+Judges sufficiency, recall gaps, intent mismatch, or need for strategy upgrade.
+"""
+
 SYSTEM_PROMPT = """
 You are the information evaluator for an explicit RAG orchestration pipeline.
 

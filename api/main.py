@@ -1,3 +1,11 @@
+"""FastAPI HTTP surface for the RAG retrieval orchestrator.
+
+Exposes ``POST /run`` (blocking invoke), ``POST /run/stream`` (SSE node progress for
+the Dash UI), and ``POST /resume`` (future clarification interrupts). Application lifespan
+constructs a :class:`~graph.graph.RetrievalGraph` with either in-memory or Postgres
+LangGraph checkpointing. ``session_id`` maps to LangGraph ``thread_id``.
+"""
+
 import json
 from contextlib import asynccontextmanager
 from typing import Any
@@ -18,18 +26,33 @@ from output_validation.final_answer import FinalAnswer
 observe = get_observe()
 
 
+# --- Request models ---
+
+
 class RunRequest(BaseModel):
+    """Body for ``POST /run`` and ``POST /run/stream``."""
+
     session_id: str = Field(description="Stable session id used as conversation thread id for checkpointing.")
     message: str = Field(description="User message to process.")
 
 
 class ResumeRequest(BaseModel):
+    """Body for ``POST /resume`` when the graph has interrupted for clarification."""
+
     session_id: str = Field(description="Session id from the interrupted run.")
     answer: str = Field(description="Human answer to the clarification question.")
 
 
+# --- Application lifespan ---
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Create the shared ``RetrievalGraph`` once per process and tear it down on shutdown.
+
+    Postgres mode opens ``AsyncPostgresSaver`` via an async context manager stored on
+    ``RetrievalGraph`` so ``close()`` can exit the connection cleanly.
+    """
     if settings.checkpointer_use_postgres:
         if not settings.database_url.strip():
             raise ValueError("CHECKPOINTER_USE_POSTGRES=true but DATABASE_URL is missing.")
@@ -49,6 +72,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="RAG Retrieval Orchestrator", lifespan=lifespan)
 
+# CORS: Dash on 8050 calls the API from the browser; allow loopback variants.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -66,14 +90,17 @@ app.add_middleware(
 )
 
 
+# --- SSE helpers ---
+
+
 def _sse(payload: dict[str, Any]) -> str:
-    """Encode one Server-Sent Event data frame."""
+    """Encode one Server-Sent Event ``data:`` frame (JSON payload)."""
 
     return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
 
 
 def _message_query_tail(entries: list[Any], max_entries: int = 5) -> list[Any]:
-    """Last ``max_entries`` audit rows for compact SSE."""
+    """Return the last ``max_entries`` ``message_query`` audit rows for compact SSE."""
 
     if not isinstance(entries, list) or not entries:
         return []
@@ -81,7 +108,18 @@ def _message_query_tail(entries: list[Any], max_entries: int = 5) -> list[Any]:
 
 
 def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
-    """Convert raw LangGraph node updates into stable, compact stream events."""
+    """Map a LangGraph ``stream_mode='updates'`` chunk to a stable SSE event dict.
+
+    The Dash clientside script keys off ``node``, ``type``, and node-specific fields
+    documented in the README. Keep field names backward-compatible when changing this.
+
+    Args:
+        session_id: Conversation thread id echoed on every frame.
+        update: Single-node partial state update from ``astream``.
+
+    Returns:
+        JSON-serializable event with ``type`` of ``node``, ``final``, or ``debug``.
+    """
 
     if not isinstance(update, dict) or not update:
         return {
@@ -98,6 +136,8 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
         "node": node_name,
         "status": "completed",
     }
+
+    # --- Per-node SSE field mapping (mirrors graph node outputs) ---
 
     if node_name == "query_normalisation":
         event.update(
@@ -200,6 +240,7 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
             }
         )
     elif node_name in {"answer", "partial_answer"}:
+        # Final answer lives in messages as JSON; parse for the ``final`` SSE frame.
         answer = FinalAnswer(answer="", sources=[], confidence="low")
         for message in payload.get("messages") or []:
             if not isinstance(message, AIMessage) or not message.content:
@@ -235,7 +276,19 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
-    """Build the stable API response from a completed graph invoke result."""
+    """Normalize a completed graph invoke into the stable ``/run`` JSON shape.
+
+    Prefer ``AIMessage`` payloads from ``answer_node`` or ``partial_answer_node`` (by
+    ``message.name``). Fall back to the last AI message if parsing fails. Interrupt
+    payloads surface ``interrupted`` and ``question`` for future ``/resume``.
+
+    Args:
+        session_id: Thread id echoed in the response.
+        result: Final state dict from ``RetrievalGraph.run`` or ``resume``.
+
+    Returns:
+        Dict with ``answer``, ``sources``, ``confidence``, and ``retrieved_docs``.
+    """
 
     interrupts = result.get("__interrupt__") or []
     if interrupts:
@@ -285,9 +338,13 @@ def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# --- HTTP routes ---
+
+
 @app.post("/run")
 @observe(name="api_run")
 async def run(request: RunRequest) -> dict[str, Any]:
+    """Run one user turn to completion and return the final answer payload."""
     result = await app.state.retrieval_graph.run(
         request.session_id,
         request.message,
@@ -298,9 +355,10 @@ async def run(request: RunRequest) -> dict[str, Any]:
 @app.post("/run/stream")
 @observe(name="api_run_stream")
 async def run_stream(request: RunRequest) -> StreamingResponse:
-    """Stream node-level graph progress without changing the stable /run endpoint."""
+    """Stream node-level graph progress as Server-Sent Events (``text/event-stream``)."""
 
     async def event_generator():
+        # Accumulated corpus across retry loops; retrieval node updates this field.
         last_retrieved_docs: list[Any] = []
         try:
             async for update in app.state.retrieval_graph.stream_run(
@@ -345,6 +403,7 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
 @app.post("/resume")
 @observe(name="api_resume")
 async def resume(request: ResumeRequest) -> dict[str, Any]:
+    """Resume a paused graph after a human clarification (when interrupts are enabled)."""
     result = await app.state.retrieval_graph.resume(
         request.session_id,
         request.answer,

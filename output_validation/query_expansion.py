@@ -1,3 +1,5 @@
+"""Structured output for ``query_expansion_node`` (prompt: ``prompts/query_expansion.py``)."""
+
 from pydantic import BaseModel, Field
 
 

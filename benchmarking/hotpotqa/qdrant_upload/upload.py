@@ -1,3 +1,12 @@
+"""Upload HotpotQA paragraph contexts to Qdrant for retrieval eval.
+
+Creates the collection if missing (does not delete existing collections). Point ids are
+stable ``uuid5`` hashes of ``context_id``. Embeds dense, optional BM25 document vectors,
+and optional ColBERT document vectors per batch.
+
+Run: ``python -m benchmarking.hotpotqa.qdrant_upload.upload``
+"""
+
 import asyncio
 import json
 import uuid
@@ -9,6 +18,7 @@ from retriever.retriever import Retriever
 
 
 async def ensure_collection(retriever: Retriever) -> None:
+    """Create Qdrant collection with dense, sparse, and multivector configs when absent."""
     settings = retriever.config
     if await retriever.qdrant.collection_exists(settings.qdrant_collection_name):
         return
@@ -45,6 +55,7 @@ async def ensure_collection(retriever: Retriever) -> None:
 
 
 async def main() -> None:
+    """Read processed JSON, embed batches, upsert points with benchmark payload metadata."""
     settings = HotpotQASettings()
     retriever = Retriever(settings)
     await ensure_collection(retriever)
@@ -74,6 +85,7 @@ async def main() -> None:
                     }
                 )
 
+    # --- Batched upsert: dense + optional BM25 document + optional ColBERT ---
     batch_size = settings.hotpotqa_upload_batch_size
     for start in range(0, len(docs), batch_size):
         batch = docs[start : start + batch_size]

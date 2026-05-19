@@ -1,3 +1,13 @@
+"""Render the compiled LangGraph to Mermaid source and PNG.
+
+Default outputs: ``artifacts/langgraph.mmd`` and ``artifacts/langgraph.png``.
+Uses in-memory checkpointing only (no Postgres required).
+
+Example::
+
+    python scripts/plot_langgraph.py --draw-method pyppeteer
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -16,6 +26,7 @@ from graph import RetrievalGraph
 
 
 async def main() -> None:
+    """Compile ``RetrievalGraph``, write Mermaid text, and render PNG via Mermaid.ink or Pyppeteer."""
     parser = argparse.ArgumentParser(
         description="Render the compiled LangGraph RAG flow to Mermaid and PNG files.",
     )

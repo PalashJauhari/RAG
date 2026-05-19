@@ -1,3 +1,9 @@
+"""System prompt for ``intent_correction_rewriter_node``.
+
+Schema: ``output_validation.intent_correction_rewriter.IntentCorrectionRewriteResult``.
+After intent_mismatch, replaces ``active_retrieval_queries`` with corrected intent.
+"""
+
 SYSTEM_PROMPT = """
 You are the intent-correction rewriter for an explicit RAG orchestration pipeline.
 

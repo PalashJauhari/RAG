@@ -1,3 +1,9 @@
+"""System prompt for ``query_expansion_node``.
+
+Schema: ``output_validation.query_expansion.QueryExpansionResult``.
+Generates multiple retrieval angles for exploratory queries.
+"""
+
 SYSTEM_PROMPT = """
 You are the exploratory query expansion node inside an explicit RAG graph.
 The user message is a normalized query classified as exploratory_query.

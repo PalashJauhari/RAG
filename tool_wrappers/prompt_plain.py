@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 
 
 def _content_plain(content: Any) -> str:
+    """Normalize LangChain message content to plain text (string or text blocks in lists)."""
     if content is None:
         return ""
     if isinstance(content, str):

@@ -1,3 +1,9 @@
+"""Module-level OpenAI rate limiter for LangChain ChatOpenAI invocations.
+
+Instantiated once at import time so all graph nodes share the same token bucket.
+Disable via ``OPENAI_RATE_LIMIT_ENABLED=false`` in settings.
+"""
+
 from __future__ import annotations
 
 from langchain_core.rate_limiters import InMemoryRateLimiter
@@ -12,4 +18,3 @@ if settings.openai_rate_limit_enabled:
         check_every_n_seconds=settings.openai_rate_limit_check_every_n_seconds,
         max_bucket_size=settings.openai_rate_limit_max_bucket_size,
     )
-

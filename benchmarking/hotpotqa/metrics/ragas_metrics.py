@@ -1,3 +1,11 @@
+"""Score retrieval results with RAGAS context precision and context recall.
+
+Reads ``retrieval_results.json``; writes ``ragas_results.json`` and optional type-level
+spreadsheet under the experiment results directory.
+
+Run: ``python -m benchmarking.hotpotqa.metrics.ragas_metrics``
+"""
+
 import asyncio
 import json
 from statistics import mean
@@ -10,6 +18,7 @@ from middleware.llm_client import get_embeddings_client
 
 
 async def main() -> None:
+    """LLM-judged precision/recall per question; aggregate means in summary block."""
     settings = HotpotQASettings()
     rows = json.loads(settings.retrieval_results_path.read_text(encoding="utf-8"))
     if settings.hotpotqa_max_questions > 0:

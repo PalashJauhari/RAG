@@ -1,2 +1,1 @@
-"""Graph middleware for LLM clients, rate limiting, and context editing."""
-
+"""LLM clients, rate limiting, and optional context summarization."""

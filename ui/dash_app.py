@@ -1,3 +1,11 @@
+"""Dash chat UI for the RAG orchestrator.
+
+Layout: left sidebar (session), center chat + composer, right Progress column.
+Streaming uses clientside JS (``assets/rag_ui.js``) calling ``POST /run/stream`` on the
+FastAPI service (``API_URL`` / ``dcc.Store`` ``api-base-url``). ``session-id`` maps to
+graph ``thread_id``; ``pending-interrupt`` supports future ``/resume`` clarification flows.
+"""
+
 import os
 import sys
 from pathlib import Path
@@ -18,6 +26,8 @@ app = Dash(
 )
 app.title = "GaussianBlurr RAG Chat"
 
+
+# --- Layout (stores + three-column shell) ---
 
 app.layout = lambda: html.Div(
     className="rag-shell",
@@ -120,14 +130,19 @@ app.layout = lambda: html.Div(
 )
 
 
+# --- Server-side callbacks ---
+
+
 @callback(Output("session-line", "children"), Input("session-id", "data"))
 def render_session_line(session_id: str | None):
+    """Show a truncated session id in the sidebar."""
     sid = session_id or ""
     return sid[:20] + "…" if len(sid) > 20 else sid
 
 
 @callback(Output("interrupt-banner", "children"), Input("pending-interrupt", "data"))
 def render_interrupt_banner(pending):
+    """Show banner when the API reports an interrupt awaiting ``/resume``."""
     if pending:
         return html.Div(
             className="rag-banner",
@@ -141,6 +156,7 @@ def render_interrupt_banner(pending):
 
 @callback(Output("chat-area", "children"), Input("chat-state", "data"))
 def render_chat(messages):
+    """Render ``chat-state`` as user/assistant bubbles (Markdown for assistant)."""
     msgs = messages or []
     if not msgs:
         return html.Div(
@@ -200,11 +216,14 @@ def render_chat(messages):
     prevent_initial_call=True,
 )
 def on_new_session(n_clicks, gen):
+    """Reset session id, chat history, interrupt flag, and bump ``session-gen`` for clientside cleanup."""
     if not n_clicks:
         raise PreventUpdate
     next_gen = int(gen or 0) + 1
     return str(uuid4()), [], False, next_gen, "", ""
 
+
+# --- Clientside callbacks (SSE stream + progress column in rag_ui.js) ---
 
 app.clientside_callback(
     ClientsideFunction(namespace="rag_ui", function_name="clear_progress"),

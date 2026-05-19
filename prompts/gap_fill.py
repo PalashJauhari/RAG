@@ -1,3 +1,9 @@
+"""System prompt for ``gap_fill_node``.
+
+Schema: ``output_validation.gap_fill.GapFillResult``.
+After insufficient_recall, replaces ``active_retrieval_queries`` with targeted missing-evidence queries.
+"""
+
 SYSTEM_PROMPT = """
 You are the gap-fill query generator for an explicit RAG orchestration pipeline.
 

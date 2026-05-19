@@ -1,3 +1,8 @@
+"""System prompt for ``middleware.context_editing.summarize_evicted``.
+
+Used when long threads are truncated; output is plain text (no structured schema).
+"""
+
 SUMMARY_SYSTEM_PROMPT = """
 You summarize conversation history for a retrieval agent.
 

@@ -1,3 +1,5 @@
+"""Structured output for ``query_normalisation_node`` (prompt: ``prompts/query_normalisation.py``)."""
+
 from pydantic import BaseModel, Field
 
 

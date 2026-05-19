@@ -1,3 +1,9 @@
+"""System prompt for ``query_normalisation_node``.
+
+Schema: ``output_validation.query_normalisation.QueryNormalisationResult``.
+Rewrites the latest user utterance into a standalone query using conversation context.
+"""
+
 SYSTEM_PROMPT = """
 You are the query normalisation node for an explicit RAG orchestration pipeline.
 

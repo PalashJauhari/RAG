@@ -1,3 +1,8 @@
+"""Synchronous HTTP client for the RAG FastAPI service.
+
+Used by tests and scripts; the Dash UI calls the API from browser JavaScript instead.
+"""
+
 from __future__ import annotations
 
 import json
@@ -12,28 +17,42 @@ AGENT_TIMEOUT = 600
 
 
 class RagApiClient:
-    """Small HTTP client for the RAG FastAPI service."""
+    """Small HTTP client for ``POST /run``, ``/run/stream``, and ``/resume``."""
 
     def __init__(self, base_url: str | None = None) -> None:
+        """Configure base URL and a persistent ``requests.Session``.
+
+        Args:
+            base_url: API origin; defaults to ``API_URL`` env or ``DEFAULT_API_URL``.
+        """
         self.base_url = (base_url or os.getenv("API_URL", DEFAULT_API_URL)).rstrip("/")
         self.session = requests.Session()
         self.session.headers.update({"Accept": "application/json"})
 
     def run(self, message: str, session_id: str) -> dict[str, Any]:
+        """Blocking invoke: ``POST /run``.
+
+        Returns:
+            Normalized response dict (answer, confidence, retrieved_docs, etc.).
+        """
         return self._post(
             "/run",
             {"message": message, "session_id": session_id},
         )
 
     def resume(self, answer: str, session_id: str) -> dict[str, Any]:
+        """Resume after clarification: ``POST /resume``."""
         return self._post(
             "/resume",
             {"answer": answer, "session_id": session_id},
         )
 
     def iter_run_stream(self, message: str, session_id: str) -> Iterator[dict[str, Any]]:
-        """Yield parsed JSON payloads from ``POST /run/stream`` (SSE ``data:`` frames)."""
+        """Yield parsed JSON payloads from ``POST /run/stream`` (SSE ``data:`` frames).
 
+        Buffers the byte stream until double-newline frame boundaries, then parses
+        each ``data: {...}`` line as JSON.
+        """
         url = f"{self.base_url}/run/stream"
         try:
             with self.session.post(
@@ -65,6 +84,7 @@ class RagApiClient:
             raise ConnectionError("Cannot reach API. Start uvicorn or set API_URL.") from exc
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST JSON to ``path`` and normalize errors into a dict with ``error`` key."""
         try:
             response = self.session.post(
                 f"{self.base_url}{path}",
@@ -91,4 +111,3 @@ class RagApiClient:
         data.setdefault("confidence", None)
         data.setdefault("retrieved_docs", [])
         return data
-

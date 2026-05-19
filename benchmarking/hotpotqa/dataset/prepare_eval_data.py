@@ -1,3 +1,12 @@
+"""Prepare normalized HotpotQA validation JSON for retrieval benchmarking.
+
+Downloads ``hotpotqa/hotpot_qa`` (fullwiki validation), optionally subsamples with
+deterministic stratified sampling (seed 42) by ``(type, level)``, and writes
+``data/processed/hotpotqa_eval.json``.
+
+Run: ``python -m benchmarking.hotpotqa.dataset.prepare_eval_data``
+"""
+
 import json
 import random
 from collections import defaultdict
@@ -8,12 +17,14 @@ from benchmarking.hotpotqa.settings import HotpotQASettings
 
 
 def main() -> None:
+    """Load HF dataset, build context records with supporting-fact flags, write JSON."""
     settings = HotpotQASettings()
     dataset = load_dataset(
         settings.hotpotqa_dataset_name,
         settings.hotpotqa_dataset_config,
         split=settings.hotpotqa_split,
     )
+    # --- Stratified subsample (equal type/level representation, seed 42) ---
     if settings.hotpotqa_max_questions > 0:
 
         groups = defaultdict(list)

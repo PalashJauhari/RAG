@@ -1,3 +1,9 @@
+"""System prompt for ``query_rewriter_node``.
+
+Schema: ``output_validation.query_rewriter.QueryRewriteResult``.
+Best-effort rewrite for ambiguous queries without human clarification.
+"""
+
 SYSTEM_PROMPT = """
 You are the ambiguous query rewriter node for an explicit RAG orchestration pipeline.
 

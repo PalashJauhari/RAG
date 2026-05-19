@@ -1,3 +1,11 @@
+"""Structured output for ``information_evaluator_node`` (prompt: ``prompts/information_evaluator.py``).
+
+Validation rules beyond Field text:
+- ``strategy_upgrade`` requires ``next_retrieval_strategy``; other statuses must omit it.
+- ``insufficient_recall`` requires non-empty ``missing_evidence_details``; other statuses must leave it empty.
+- :func:`resolve_strategy_upgrade` clamps invalid tier jumps and forces partial answer at max tier.
+"""
+
 from __future__ import annotations
 
 from typing import Literal
@@ -20,6 +28,7 @@ EvaluationStatus = Literal[
 
 
 def _non_empty_evidence_details(details: list[str]) -> list[str]:
+    """Strip and drop empty strings from evaluator missing-evidence lists."""
     return [item.strip() for item in details if item and item.strip()]
 
 
@@ -66,6 +75,7 @@ class InformationEvaluation(BaseModel):
 
     @model_validator(mode="after")
     def validate_evaluation_fields(self) -> "InformationEvaluation":
+        """Enforce cross-field rules that drive graph routing."""
         if self.evaluation_status == "strategy_upgrade" and self.next_retrieval_strategy is None:
             raise ValueError(
                 "next_retrieval_strategy is required when evaluation_status is strategy_upgrade"
@@ -88,6 +98,9 @@ class InformationEvaluation(BaseModel):
             )
 
         return self
+
+
+# --- Post-LLM tier normalization for strategy_upgrade ---
 
 
 def resolve_strategy_upgrade(

@@ -1,14 +1,19 @@
-"""Retrieval agent: normalize, classify, retrieve, evaluate, and answer.
+"""LangGraph retrieval agent: normalize, classify, retrieve, evaluate, and answer.
 
-Flow (high level):
-    query_normalisation -> query_complexity -> retrieval preparation -> retrieval ->
-    information_evaluator -> [gap fill / intent correction / strategy upgrade retry or] ->
-    answer/partial_answer -> clear_turn_trace -> END
+High-level flow (see repository README):
+    query_normalisation -> query_complexity -> (optional query prep) -> retrieval ->
+    information_evaluator -> [gap_fill | intent_correction | strategy_upgrade -> retrieval] ->
+    answer | partial_answer -> clear_turn_trace -> END
 
-State is checkpointed per ``thread_id`` (API ``session_id``). ``messages`` stays lean:
-it stores user turns and final/partial answer messages only. Intermediate node outputs live in
-node-specific state keys such as ``normalized_query``, ``active_retrieval_queries``,
-``retrieval_strategy``, ``message_query``, ``retrieved_documents``, and ``information_evaluation``.
+Checkpointing: compiled graph uses a LangGraph checkpointer keyed by ``thread_id`` (API
+``session_id``). Multi-turn threads persist ``messages`` and ``message_summary``; each
+``/run`` resets turn-local scratch (queries, docs, retry counters) while appending a new
+``HumanMessage``.
+
+State design: ``messages`` stays lean (user turns + final/partial ``AIMessage`` JSON only).
+Intermediate outputs use explicit keys: ``normalized_query``, ``active_retrieval_queries``,
+``retrieval_strategy``, ``message_query`` (append-only audit), ``retrieved_documents``, and
+``information_evaluation``.
 """
 
 from __future__ import annotations
@@ -61,43 +66,46 @@ observe = get_observe()
 
 
 class RetrievalState(TypedDict, total=False):
-    """Checkpointed conversation and scratch fields for one thread.
+    """Checkpointed conversation and per-turn scratch for one LangGraph thread."""
 
-    ``messages``: user turns and final answer ``AIMessage`` JSON. Intermediate graph outputs are
-        intentionally not appended here.
-    ``message_summary``: rolling summary of evicted turns when context is truncated.
-    ``normalized_query``: latest user query rewritten into standalone form.
-    ``query_complexity``: last ``QueryComplexityResult`` dict used for routing (includes retrieval_strategy).
-    ``retrieval_strategy``: scalar tier applied by ``retrieval_node`` (may change after evaluator/gap/intent).
-    ``active_retrieval_queries``: current retrieval query strings for this turn.
-    ``message_query``: append-only structured audit trace (``operator.add`` reducer).
-    ``retrieved_documents``: compact rows ``{score, text}``, appended across retry loops and
-        reset for each new user ``/run`` input.
-    ``new_retrieved_documents``: compact rows from the latest retrieval pass only (for SSE / UI).
-    ``information_evaluation``: last ``InformationEvaluation`` dict (includes missing_evidence_details when applicable).
-    ``insufficient_recall_retry_count``: count of recall-repair loops in the current turn.
-    ``intent_mismatch_retry_count``: count of intent-correction loops in the current turn.
-    ``strategy_upgrade_retry_count``: count of evaluator-driven retrieval tier upgrades this turn.
-    """
-
-    # LangGraph merges updates; add_messages appends new msgs and applies RemoveMessage ops.
+    # --- Conversation (persists across turns on the thread) ---
+    # add_messages appends HumanMessage / AIMessage and applies RemoveMessage ops.
     messages: Annotated[list, add_messages]
-    message_summary: str
+    message_summary: str  # Rolling summary when context_editing truncation is enabled.
+
+    # --- Turn scratch (reset at each /run invoke) ---
     normalized_query: str
-    query_complexity: dict[str, Any]
-    retrieval_strategy: str
+    query_complexity: dict[str, Any]  # Last QueryComplexityResult; drives route_after_complexity.
+    retrieval_strategy: str  # Tier for retrieval_node; may change after evaluator/gap/intent.
     active_retrieval_queries: list[str]
-    message_query: Annotated[list[dict[str, Any]], operator.add]
-    retrieved_documents: list[dict[str, Any]]
-    new_retrieved_documents: list[dict[str, Any]]
+    retrieved_documents: list[dict[str, Any]]  # {score, text}, deduped across retries.
+    new_retrieved_documents: list[dict[str, Any]]  # Latest pass only (SSE / UI).
     information_evaluation: dict[str, Any]
+
+    # --- Audit trace (append-only per turn; cleared by clear_turn_trace_node) ---
+    message_query: Annotated[list[dict[str, Any]], operator.add]
+
+    # --- Evaluator retry budgets (compared to settings.*_max_retries) ---
     insufficient_recall_retry_count: int
     intent_mismatch_retry_count: int
     strategy_upgrade_retry_count: int
 
 
+# --- Trace helpers ---
+
+
 def trace_row(node: str, kind: str, payload: dict[str, Any], notes: str | None = None) -> dict[str, Any]:
-    """Return a single ``message_query`` append fragment."""
+    """Build one ``message_query`` fragment for the operator.add reducer.
+
+    Args:
+        node: LangGraph node id (e.g. ``retrieval``).
+        kind: Trace category (e.g. ``evaluation``, ``query_prep``).
+        payload: JSON-safe detail; kept slim to avoid duplicating live state.
+        notes: Optional human-readable summary for logs/UI.
+
+    Returns:
+        Dict with a single-element ``message_query`` list to merge into state.
+    """
 
     entry = MessageQueryEntry(node=node, kind=kind, payload=payload, notes=notes)
     return {"message_query": [entry.model_dump()]}
@@ -128,22 +136,38 @@ def build_node_ai_message(
     )
 
 
-class RetrievalGraph:
-    """Compiles the pipeline with a graph checkpointer (memory or Postgres).
+# --- Graph builder and nodes ---
 
-    Pass a ready checkpointer from app startup (see ``api.main`` lifespan for Postgres vs memory).
+
+class RetrievalGraph:
+    """Compiles and runs the retrieval LangGraph with a shared :class:`~retriever.retriever.Retriever`.
+
+    Pass a checkpointer from ``api.main`` lifespan (``InMemorySaver`` or ``AsyncPostgresSaver``).
     """
 
     def __init__(self, checkpointer: Any, postgres_context: Any | None = None) -> None:
+        """Store checkpointer, build compiled graph, and construct retriever.
+
+        Args:
+            checkpointer: LangGraph saver for thread checkpoints.
+            postgres_context: Async context manager for Postgres saver teardown, if used.
+        """
         # postgres_context is only set when using AsyncPostgresSaver so close() can exit the conn ctx.
         self.checkpointer = checkpointer
         self._postgres_context = postgres_context
         self.retriever = Retriever(settings)
         self.graph = self.build_graph()
 
+    # --- Query preparation nodes ---
+
     @observe(name="query_normalisation_node")
     async def query_normalisation_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Rewrite the latest user message into a standalone query with conversation context."""
+        """Rewrite the latest user message into a standalone query using conversation context.
+
+        Reads: ``messages``, ``message_summary``.
+        Writes: ``normalized_query``, optional ``message_summary`` / ``messages`` RemoveMessage ops.
+        Routes to: ``query_complexity`` (fixed edge).
+        """
 
         messages = state.get("messages", [])
         summary = state.get("message_summary", "")
@@ -195,7 +219,12 @@ class RetrievalGraph:
 
     @observe(name="query_complexity_node")
     async def query_complexity_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Classify normalized query complexity and seed simple-query parsed queries."""
+        """Classify complexity, set initial ``retrieval_strategy``, seed queries for simple path.
+
+        Reads: ``normalized_query``.
+        Writes: ``query_complexity``, ``retrieval_strategy``, ``active_retrieval_queries``.
+        Routes via: ``route_after_complexity`` to retrieval or query prep nodes.
+        """
 
         normalized_query = str(state.get("normalized_query") or "").strip()
         llm = get_llm_client(
@@ -232,7 +261,10 @@ class RetrievalGraph:
 
     @observe(name="query_splitter_node")
     async def query_splitter_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Split comparison, multihop, and procedural queries into focused retrieval strings."""
+        """Split comparison, multihop, and procedural queries into focused retrieval strings.
+
+        Writes: ``active_retrieval_queries``. Then fixed edge to ``retrieval``.
+        """
 
         normalized_query = str(state.get("normalized_query") or "").strip()
         llm = get_llm_client(
@@ -258,7 +290,10 @@ class RetrievalGraph:
 
     @observe(name="query_expansion_node")
     async def query_expansion_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Create multiple retrieval angles for exploratory queries."""
+        """Expand exploratory queries into multiple retrieval angles.
+
+        Writes: ``active_retrieval_queries``. Then fixed edge to ``retrieval``.
+        """
 
         normalized_query = str(state.get("normalized_query") or "").strip()
         llm = get_llm_client(
@@ -284,7 +319,10 @@ class RetrievalGraph:
 
     @observe(name="query_rewriter_node")
     async def query_rewriter_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Rewrite ambiguous queries without interrupting for clarification yet."""
+        """Best-effort rewrite for ambiguous queries (no human interrupt in current graph).
+
+        Writes: ``active_retrieval_queries``. Then fixed edge to ``retrieval``.
+        """
 
         normalized_query = str(state.get("normalized_query") or "").strip()
         llm = get_llm_client(
@@ -307,9 +345,16 @@ class RetrievalGraph:
         merge.update(trace_row("query_rewriter", "query_prep", {"queries": queries}))
         return merge
 
+    # --- Retrieval and evaluation ---
+
     @observe(name="retrieval_node")
     async def retrieval_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Retrieve using ``active_retrieval_queries`` and ``retrieval_strategy``; append docs."""
+        """Retrieve using ``active_retrieval_queries`` and ``retrieval_strategy``; append docs.
+
+        Reads: ``active_retrieval_queries``, ``retrieval_strategy``, ``normalized_query`` (fallback).
+        Writes: ``retrieved_documents`` (accumulated), ``new_retrieved_documents``, trace row.
+        Routes to: ``information_evaluator`` (fixed edge).
+        """
 
         raw_strategy = str(state.get("retrieval_strategy") or "").strip()
         strategy: RetrievalStrategy = (
@@ -368,7 +413,12 @@ class RetrievalGraph:
 
     @observe(name="information_evaluator_node")
     async def information_evaluator_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Classify retrieval as sufficient, insufficient recall, or intent mismatch."""
+        """Judge whether retrieved evidence is sufficient; bump retry counters.
+
+        Reads: normalized query, strategy, queries, trace, ``retrieved_documents``.
+        Writes: ``information_evaluation``, retry counts; may set ``retrieval_strategy`` on upgrade.
+        Routes via: ``route_after_evaluator``.
+        """
 
         context = (
             "## Normalized query\n"
@@ -440,7 +490,11 @@ class RetrievalGraph:
 
     @observe(name="gap_fill_node")
     async def gap_fill_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Generate targeted missing-evidence queries after insufficient recall."""
+        """Generate targeted missing-evidence queries after ``insufficient_recall``.
+
+        Replaces ``active_retrieval_queries``; may bump ``retrieval_strategy``.
+        Routes to: ``retrieval`` (fixed edge).
+        """
 
         context = (
             "## Normalized query\n"
@@ -493,7 +547,11 @@ class RetrievalGraph:
 
     @observe(name="intent_correction_rewriter_node")
     async def intent_correction_rewriter_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Rewrite retrieval queries when the evaluator detects intent mismatch."""
+        """Rewrite retrieval queries after ``intent_mismatch``.
+
+        Replaces ``active_retrieval_queries``; may bump ``retrieval_strategy``.
+        Routes to: ``retrieval`` (fixed edge).
+        """
 
         normalized_query = str(state.get("normalized_query") or "").strip()
         context = (
@@ -547,9 +605,15 @@ class RetrievalGraph:
         )
         return merge
 
+    # --- Answer and cleanup ---
+
     @observe(name="answer_node")
     async def answer_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Emit final ``FinalAnswer`` JSON; API reads this node from ``messages``."""
+        """Emit grounded ``FinalAnswer`` JSON when evaluation is sufficient.
+
+        Writes: ``messages`` with ``name=answer_node``. API parses this in ``get_api_response``.
+        Routes to: ``clear_turn_trace``.
+        """
 
         context = (
             "## Normalized query\n"
@@ -585,7 +649,10 @@ class RetrievalGraph:
 
     @observe(name="partial_answer_node")
     async def partial_answer_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Emit a grounded partial answer after evaluator retry budgets are exhausted."""
+        """Emit grounded partial answer when retry budgets are exhausted.
+
+        Includes ``information_evaluation`` in the prompt context. Routes to ``clear_turn_trace``.
+        """
 
         context = (
             "## Normalized query\n"
@@ -622,12 +689,23 @@ class RetrievalGraph:
 
     @observe(name="clear_turn_trace_node")
     async def clear_turn_trace_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Clear append-only audit trace so the next user turn starts fresh on this thread."""
+        """Clear append-only audit trace so the next user turn does not leak prior diagnostics.
+
+        Uses ``Overwrite([])`` because ``message_query`` uses ``operator.add`` reducer.
+        """
 
         return {"message_query": Overwrite([])}
 
+    # --- Conditional routing ---
+
     def route_after_complexity(self, state: RetrievalState) -> str:
-        """Map exact complexity labels to the next graph node name."""
+        """Map ``query_complexity.complexity`` to the next graph node name.
+
+        comparison_query | multihop_query | procedural_query -> query_splitter
+        exploratory_query -> query_expansion
+        ambiguous_query -> query_rewriter
+        simple_query (and unknown) -> retrieval (uses seeded active_retrieval_queries)
+        """
 
         complexity = (state.get("query_complexity") or {}).get("complexity")
         # simple_query (and anything unexpected) falls through to retrieval using seeded active_retrieval_queries.
@@ -640,7 +718,14 @@ class RetrievalGraph:
         return "retrieval"
 
     def route_after_evaluator(self, state: RetrievalState) -> str:
-        """Route to answer, recall gap fill, or intent correction after evaluation."""
+        """Route after ``information_evaluator`` based on ``evaluation_status`` and retry counts.
+
+        sufficient -> answer
+        insufficient_recall -> gap_fill (if count < INSUFFICIENT_RECALL_MAX_RETRIES) else partial_answer
+        intent_mismatch -> intent_correction_rewriter (if count < INTENT_MISMATCH_MAX_RETRIES) else partial_answer
+        strategy_upgrade -> retrieval (same queries, heavier tier) (if count < STRATEGY_UPGRADE_MAX_RETRIES) else partial_answer
+        unknown -> answer (fail closed)
+        """
 
         evaluation = state.get("information_evaluation") or {}
         status = evaluation.get("evaluation_status")
@@ -652,7 +737,7 @@ class RetrievalGraph:
                 >= settings.insufficient_recall_max_retries
             ):
                 return "partial_answer"
-            # Loop: gap_fill sets insufficient_recall queries then retrieval runs again.
+            # Loop: gap_fill replaces queries, then retrieval runs again.
             return "gap_fill"
         if status == "intent_mismatch":
             if (
@@ -660,7 +745,7 @@ class RetrievalGraph:
                 >= settings.intent_mismatch_max_retries
             ):
                 return "partial_answer"
-            # Loop: intent_correction_rewriter sets intent-correction queries then retrieval runs again.
+            # Loop: intent_correction_rewriter replaces queries, then retrieval runs again.
             return "intent_correction_rewriter"
         if status == "strategy_upgrade":
             if (
@@ -668,14 +753,15 @@ class RetrievalGraph:
                 >= settings.strategy_upgrade_max_retries
             ):
                 return "partial_answer"
-            # Same queries; heavier retrieval_strategy merged by evaluator output before this routes.
+            # Same active_retrieval_queries; retrieval_strategy updated by evaluator merge.
             return "retrieval"
         # Unknown status: fail closed to answer rather than spinning retries forever.
         return "answer"
 
+    # --- Graph wiring ---
+
     def build_graph(self) -> Any:
-        # Linear spine: normalisation → complexity → (optional prep) → retrieval → evaluator → answer.
-        # Side loops: evaluator → gap_fill → retrieval; evaluator → intent_correction → retrieval.
+        """Compile StateGraph with conditional edges; keys must match router return values."""
         builder = StateGraph(RetrievalState)
         # Internal node ids match strings returned by route_after_* for conditional_edges.
         builder.add_node("query_normalisation", self.query_normalisation_node)
@@ -728,12 +814,25 @@ class RetrievalGraph:
         # Persists checkpoints keyed by thread_id (session_id from the API).
         return builder.compile(checkpointer=self.checkpointer)
 
+    # --- Public invoke API ---
+
     async def run(
         self,
         session_id: str,
         user_query: str,
     ) -> dict[str, Any]:
-        """Start or continue a thread: append user text; reset scratch fields for this turn."""
+        """Run one user turn: append HumanMessage and reset turn-local scratch.
+
+        ``message_query: Overwrite([])`` at invoke start clears prior-turn audit rows.
+        ``clear_turn_trace_node`` clears again after answer so the checkpoint stays clean.
+
+        Args:
+            session_id: LangGraph ``thread_id``.
+            user_query: New user message for this turn.
+
+        Returns:
+            Final graph state dict (includes ``messages``, ``retrieved_documents``, etc.).
+        """
 
         config: dict[str, Any] = {
             "configurable": {"thread_id": session_id},
@@ -768,7 +867,11 @@ class RetrievalGraph:
         session_id: str,
         user_query: str,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Start a thread turn and yield compact node updates as the graph progresses."""
+        """Same input contract as :meth:`run`; yields per-node updates for SSE streaming.
+
+        Yields:
+            Dicts keyed by node name (``stream_mode='updates'``).
+        """
 
         config: dict[str, Any] = {
             "configurable": {"thread_id": session_id},
@@ -805,9 +908,17 @@ class RetrievalGraph:
         session_id: str,
         value: Any,
     ) -> dict[str, Any]:
-        """Feed a future clarification string into a paused graph interrupt."""
+        """Resume a thread paused by ``interrupt()`` with a human clarification value.
 
-        # Resume path for graphs that call interrupt(); the shipped agent completes without pausing today.
+        The current graph completes without pausing; this path is kept for API compatibility.
+
+        Args:
+            session_id: LangGraph ``thread_id``.
+            value: Human answer passed as ``Command(resume=value)``.
+
+        Returns:
+            Final state after resume.
+        """
         config: dict[str, Any] = {
             "configurable": {"thread_id": session_id},
             "recursion_limit": settings.graph_recursion_limit,
@@ -824,13 +935,11 @@ class RetrievalGraph:
         )
 
     def get_state(self, session_id: str) -> Any:
-        """Inspect checkpointed graph state for debugging or tooling (optional)."""
-
-        # Latest checkpoint snapshot for thread_id without advancing the graph.
+        """Return the latest checkpoint snapshot for ``session_id`` without running the graph."""
         return self.graph.get_state({"configurable": {"thread_id": session_id}})
 
     async def close(self) -> None:
-        # Release HTTP resources (Qdrant) and async Postgres saver connection context if used.
+        """Close Qdrant client and Postgres checkpointer context if configured."""
         await self.retriever.qdrant.close()
         if self._postgres_context is not None:
             await self._postgres_context.__aexit__(None, None, None)

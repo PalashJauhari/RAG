@@ -1,3 +1,9 @@
+"""Structured output for ``gap_fill_node`` (prompt: ``prompts/gap_fill.py``).
+
+``missing_queries`` replace ``active_retrieval_queries`` on insufficient_recall retries.
+Optional ``next_retrieval_strategy`` may bump the retrieval tier when lexical recall is weak.
+"""
+
 from pydantic import BaseModel, Field
 
 from output_validation.retrieval_strategy import RetrievalStrategy

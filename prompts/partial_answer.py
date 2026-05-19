@@ -1,3 +1,9 @@
+"""System prompt for ``partial_answer_node``.
+
+Schema: ``output_validation.final_answer.FinalAnswer``.
+Grounded partial answer when evaluator retry budgets are exhausted.
+"""
+
 SYSTEM_PROMPT = """
 You are the partial answer node for an explicit RAG orchestration pipeline.
 

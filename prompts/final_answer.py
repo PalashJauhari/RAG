@@ -1,3 +1,9 @@
+"""System prompt for ``answer_node``.
+
+Schema: ``output_validation.final_answer.FinalAnswer``.
+Grounded answer from retrieved documents only when evaluation is sufficient.
+"""
+
 SYSTEM_PROMPT = """
 You are the final answer node for an explicit RAG orchestration pipeline.
 

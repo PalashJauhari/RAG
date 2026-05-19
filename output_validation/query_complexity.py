@@ -1,3 +1,9 @@
+"""Structured output for ``query_complexity_node`` (prompt: ``prompts/query_complexity.py``).
+
+The ``complexity`` label drives :meth:`~graph.graph.RetrievalGraph.route_after_complexity`.
+``retrieval_strategy`` seeds the first retrieval pass for the turn.
+"""
+
 from typing import Literal
 
 from pydantic import BaseModel, Field

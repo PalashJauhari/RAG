@@ -1,3 +1,11 @@
+"""Exact ID-based retrieval metrics (no LLM judge).
+
+Computes per-question exact precision/recall, hit rate, and MRR from
+``reference_context_ids`` vs ``retrieved_context_ids``. Writes ``exact_metrics.json``.
+
+Run: ``python -m benchmarking.hotpotqa.metrics.exact_metrics``
+"""
+
 import asyncio
 import json
 from statistics import mean
@@ -6,6 +14,7 @@ from benchmarking.hotpotqa.settings import HotpotQASettings
 
 
 async def main() -> None:
+    """Score each row by context_id overlap and rank of first relevant hit."""
     settings = HotpotQASettings()
     rows = json.loads(settings.retrieval_results_path.read_text(encoding="utf-8"))
 
