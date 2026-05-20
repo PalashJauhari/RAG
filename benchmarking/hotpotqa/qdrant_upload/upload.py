@@ -1,8 +1,8 @@
 """Upload HotpotQA paragraph contexts to Qdrant for retrieval eval.
 
-Creates the collection if missing (does not delete existing collections). Point ids are
-stable ``uuid5`` hashes of ``context_id``. Embeds dense, optional BM25 document vectors,
-and optional ColBERT document vectors per batch.
+If ``QDRANT_COLLECTION_NAME`` already exists, deletes it and creates a fresh collection.
+Point ids are stable ``uuid5`` hashes of ``context_id``. Embeds dense, optional BM25
+document vectors, and optional ColBERT document vectors per batch.
 
 Run: ``python -m benchmarking.hotpotqa.qdrant_upload.upload``
 """
@@ -17,11 +17,13 @@ from benchmarking.hotpotqa.settings import HotpotQASettings
 from retriever.retriever import Retriever
 
 
-async def ensure_collection(retriever: Retriever) -> None:
-    """Create Qdrant collection with dense, sparse, and multivector configs when absent."""
+async def recreate_collection(retriever: Retriever) -> None:
+    """Delete existing collection (if any), then create with current vector config."""
     settings = retriever.config
-    if await retriever.qdrant.collection_exists(settings.qdrant_collection_name):
-        return
+    name = settings.qdrant_collection_name
+    if await retriever.qdrant.collection_exists(name):
+        await retriever.qdrant.delete_collection(name)
+        print(f"Deleted existing collection {name!r}")
 
     vectors_config = {
         settings.qdrant_dense_vector_name: models.VectorParams(
@@ -48,17 +50,18 @@ async def ensure_collection(retriever: Retriever) -> None:
         }
 
     await retriever.qdrant.create_collection(
-        collection_name=settings.qdrant_collection_name,
+        collection_name=name,
         vectors_config=vectors_config,
         sparse_vectors_config=sparse_vectors_config,
     )
+    print(f"Created collection {name!r}")
 
 
 async def main() -> None:
     """Read processed JSON, embed batches, upsert points with benchmark payload metadata."""
     settings = HotpotQASettings()
     retriever = Retriever(settings)
-    await ensure_collection(retriever)
+    await recreate_collection(retriever)
 
     records = json.loads(settings.processed_dataset_path.read_text(encoding="utf-8"))
     docs = []
