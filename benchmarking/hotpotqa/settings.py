@@ -29,14 +29,29 @@ class HotpotQASettings(Settings):
     processed_dataset_path: Path = HOTPOTQA_ROOT / "data" / "processed" / "hotpotqa_eval.json"
 
     @property
+    def results_dir(self) -> Path:
+        """Per-experiment output directory."""
+        return HOTPOTQA_ROOT / "data" / "results" / self.hotpotqa_experiment_name
+
+    @property
     def retrieval_results_path(self) -> Path:
         """Per-experiment retrieval eval JSON from ``run_retrieval_eval``."""
-        return HOTPOTQA_ROOT / "data" / "results" / self.hotpotqa_experiment_name / "retrieval_results.json"
+        return self.results_dir / "retrieval_results.json"
+
+    @property
+    def run_metadata_path(self) -> Path:
+        """Run metadata JSON written alongside retrieval results."""
+        return self.results_dir / "run_metadata.json"
 
     @property
     def ragas_results_path(self) -> Path:
         """Per-experiment RAGAS scores JSON from ``ragas_metrics``."""
-        return HOTPOTQA_ROOT / "data" / "results" / self.hotpotqa_experiment_name / "ragas_results.json"
+        return self.results_dir / "ragas_results.json"
+
+    @property
+    def benchmark_report_path(self) -> Path:
+        """Human-readable Markdown report aggregating all metrics."""
+        return self.results_dir / "benchmark_report.md"
 
     model_config = SettingsConfigDict(
         env_file=HOTPOTQA_ROOT / ".env",

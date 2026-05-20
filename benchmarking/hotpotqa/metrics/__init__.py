@@ -1,1 +1,1 @@
-"""Retrieval quality metrics (RAGAS and exact ID match)."""
+"""Retrieval quality metrics: vanilla RAGAS context precision and recall."""
