@@ -1,8 +1,8 @@
 """Structured audit row appended into LangGraph ``message_query`` (operator.add reducer).
 
 Built by :func:`graph.graph.trace_row`. ``kind`` values used in production:
-``normalisation``, ``complexity``, ``query_prep``, ``retrieval``, ``evaluation``,
-``gap_fill``, ``intent_correction``.
+``normalisation``, ``complexity``, ``query_prep``, ``retrieval``, ``recall_check``,
+``intent_check``, ``fact_gap_retrieval``, ``gap_fill``, ``strategy_upgrade``, ``intent_correction``.
 """
 
 from typing import Any

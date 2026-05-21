@@ -22,7 +22,10 @@ class Settings(BaseSettings):
     query_normalisation_model: str = "gpt-4.1-mini"
     query_complexity_model: str = "gpt-4.1-mini"
     query_rewriter_model: str = "gpt-4.1-mini"
-    information_evaluator_model: str = "gpt-4.1-mini"
+    recall_check_model: str = "gpt-4.1-mini"
+    intent_check_model: str = "gpt-4.1-mini"
+    fact_gap_query_model: str = "gpt-4.1-mini"
+    strategy_upgrade_model: str = "gpt-4.1-mini"
     final_answer_model: str = "gpt-4.1-mini"
     query_decomposition_model: str = "gpt-4.1-mini"
     query_expansion_model: str = "gpt-4.1-mini"
@@ -67,9 +70,7 @@ class Settings(BaseSettings):
     # --- Graph execution limits ---
     graph_recursion_limit: int = 100
     graph_max_concurrency: int = 2
-    insufficient_recall_max_retries: int = 3
-    intent_mismatch_max_retries: int = 2
-    strategy_upgrade_max_retries: int = 3
+    retrieval_loop_max_retries: int = 3
 
     # --- Long-context summarization (optional; see middleware.context_editing) ---
     message_summary_token_threshold: int = 100000

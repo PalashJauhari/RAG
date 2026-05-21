@@ -61,7 +61,7 @@ Pick exactly one tier (these strings are literal values consumed by the retrieve
 ## Boundaries
 
 - You choose routing + strategy only. Downstream nodes handle query splitting, expansion, gap-fill,
-  intent correction, or evaluator-driven strategy upgrades.
+  intent correction, or strategy_upgrade-driven tier bumps.
 
 Return a valid JSON object with exactly these keys:
 - complexity: one of the exact routing literals above

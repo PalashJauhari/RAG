@@ -1,12 +1,10 @@
 """Structured output for ``gap_fill_node`` (prompt: ``prompts/gap_fill.py``).
 
-``missing_queries`` replace ``active_retrieval_queries`` on insufficient_recall retries.
-Optional ``next_retrieval_strategy`` may bump the retrieval tier when lexical recall is weak.
+``missing_queries`` replace ``active_retrieval_queries`` on insufficient recall retries.
+Tier selection is handled by ``strategy_upgrade_node``.
 """
 
 from pydantic import BaseModel, Field
-
-from output_validation.retrieval_strategy import RetrievalStrategy
 
 
 class GapFillResult(BaseModel):
@@ -21,12 +19,4 @@ class GapFillResult(BaseModel):
         examples=[
             "Generated one query for each missing tier-specific refund detail.",
         ],
-    )
-    next_retrieval_strategy: RetrievalStrategy | None = Field(
-        default=None,
-        description=(
-            "Optional escalation of retrieval tier after insufficient recall (e.g. add BM25). "
-            "Omit to keep the current retrieval_strategy and only refresh queries."
-        ),
-        examples=["fast_bm25_retrieval"],
     )

@@ -1,7 +1,8 @@
 """FastAPI HTTP surface for the RAG retrieval orchestrator.
 
 Exposes ``POST /run`` (blocking invoke), ``POST /run/stream`` (SSE node progress for
-the Dash UI), and ``POST /resume`` (future clarification interrupts). Application lifespan
+the Dash UI), and ``POST /resume`` (future clarification interrupts). After retrieval,
+``recall_check`` routes to answer, intent repair, or partial answer. Application lifespan
 constructs a :class:`~graph.graph.RetrievalGraph` with either in-memory or Postgres
 LangGraph checkpointing. ``session_id`` maps to LangGraph ``thread_id``.
 """
@@ -183,26 +184,39 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
         mq = payload.get("message_query")
         if mq:
             event["message_query_tail"] = _message_query_tail(mq)
-    elif node_name == "information_evaluator":
-        evaluation = payload.get("information_evaluation") or {}
+    elif node_name == "recall_check":
+        missing_facts = payload.get("missing_facts")
+        if isinstance(missing_facts, list):
+            missing_preview = missing_facts
+        else:
+            missing_preview = []
         event.update(
             {
-                "label": "Evaluating evidence",
-                "evaluation_status": evaluation.get("evaluation_status"),
-                "next_retrieval_strategy": evaluation.get("next_retrieval_strategy"),
-                "missing_evidence_details": evaluation.get("missing_evidence_details") or [],
-                "insufficient_recall_retry_count": payload.get(
-                    "insufficient_recall_retry_count",
-                    0,
-                ),
-                "intent_mismatch_retry_count": payload.get(
-                    "intent_mismatch_retry_count",
-                    0,
-                ),
-                "strategy_upgrade_retry_count": payload.get(
-                    "strategy_upgrade_retry_count",
-                    0,
-                ),
+                "label": "Checking recall",
+                "recall_sufficient": payload.get("recall_sufficient"),
+                "missing_facts": missing_preview,
+                "retrieval_retry_count": payload.get("retrieval_retry_count", 0),
+            }
+        )
+        mq = payload.get("message_query")
+        if mq:
+            event["message_query_tail"] = _message_query_tail(mq)
+    elif node_name == "intent_check":
+        event.update(
+            {
+                "label": "Checking intent alignment",
+                "intent_aligned": payload.get("intent_aligned"),
+            }
+        )
+        mq = payload.get("message_query")
+        if mq:
+            event["message_query_tail"] = _message_query_tail(mq)
+    elif node_name == "fact_gap_retrieval":
+        docs = payload.get("fact_gap_documents") or []
+        event.update(
+            {
+                "label": "Retrieving fact-gap evidence",
+                "fact_gap_doc_count": len(docs) if isinstance(docs, list) else 0,
             }
         )
         mq = payload.get("message_query")
@@ -213,7 +227,15 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
             {
                 "label": "Filling recall gaps",
                 "active_retrieval_queries": payload.get("active_retrieval_queries") or [],
+            }
+        )
+    elif node_name == "strategy_upgrade":
+        event.update(
+            {
+                "label": "Evaluating retrieval tier",
+                "apply_strategy_upgrade": payload.get("apply_strategy_upgrade"),
                 "retrieval_strategy": payload.get("retrieval_strategy"),
+                "retrieval_retry_count": payload.get("retrieval_retry_count", 0),
             }
         )
         mq = payload.get("message_query")

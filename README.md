@@ -4,8 +4,8 @@ This project implements a production-grade Retrieval-Augmented Generation (RAG) 
 on **LangGraph**, **Qdrant**, and **OpenAI**.
 
 The system uses an explicit LangGraph flow that normalizes the user's query, classifies query
-complexity, prepares retrieval queries, retrieves evidence, evaluates whether the evidence matches
-the intent, repairs recall or intent issues when needed, and only then produces a grounded answer.
+complexity, prepares retrieval queries, retrieves evidence, runs fact-based recall check and intent
+alignment, repairs gaps when needed, and only then produces a grounded answer.
 
 ## Key Features
 
@@ -20,13 +20,11 @@ the intent, repairs recall or intent issues when needed, and only then produces 
   - Exploratory queries are expanded into multiple retrieval angles.
   - Ambiguous queries are rewritten safely for now; the `/resume` endpoint remains available for
     future clarification support.
-- **Evidence Evaluation Loop**: The evaluator returns `sufficient`, `insufficient_recall`,
-  `intent_mismatch`, or **`strategy_upgrade`** (queries OK but retrieval tier too weak—rerun retrieval
-  with a heavier strategy without gap-fill or intent rewrite). Recall gaps route through gap-fill;
-  intent mismatches route through intent-correction. Gap-fill and intent nodes may optionally bump
-  **`retrieval_strategy`**. If retry budgets are exhausted, the graph routes to `partial_answer`.
-  Structured outputs are validated in `output_validation/` (see **Output validation** below).
-- **Per-request retrieval strategies** (chosen by complexity / evaluator / gap / intent):
+- **Recall and repair loop**: `recall_check` decomposes required facts and verifies them against
+  retrieved passages. If recall fails, `intent_check` routes to gap-fill (with `fact_gap_retrieval`
+  and `strategy_upgrade`) or intent-correction. A single **`retrieval_retry_count`** caps loops.
+  Structured outputs are validated in `output_validation/`.
+- **Per-request retrieval strategies** (chosen by complexity / strategy_upgrade / intent correction):
   - **`fast_retrieval`**: dense (+ optional MMR per deployment settings).
   - **`fast_bm25_retrieval`**: dense + BM25 + RRF fusion.
   - **`keyword`**: BM25-only (no dense embeddings for that pass).
@@ -36,15 +34,14 @@ the intent, repairs recall or intent issues when needed, and only then produces 
   so multi-turn threads do not leak prior-turn diagnostics into the next query.
 - **Lean Message State**: `messages` stores user turns and final answer node outputs only. Node
   scratch data lives in explicit keys such as `normalized_query`, `active_retrieval_queries`,
-  `retrieval_strategy`, `message_query`, `retrieved_documents`, and `information_evaluation`.
+  `retrieval_strategy`, `message_query`, `retrieved_documents`, `missing_facts`, and
+  `fact_gap_documents`.
 - **Strict Grounding**: The final answer node answers only from retrieved documents. Source citation
   wiring is intentionally deferred, so `sources` is currently returned as an empty array. The final
   answer prompt receives the normalized query, retrieval strategy, active retrieval queries, and
-  retrieved documents. Partial answer also receives `information_evaluation`. Mid-graph nodes
-  (evaluator, gap-fill, intent) still receive the slim `message_query` trace for retry history.
-- **Slim audit trace**: `message_query` rows avoid duplicating live state (e.g. no `prep` — use
-  `node`; evaluator rows carry `evaluation_status` only; retrieval rows carry `queries`, `strategy`,
-  `new_doc_count`). Gap details live in `information_evaluation`, not a separate state key.
+  retrieved documents. Partial answer also receives `missing_facts` and retry context.
+- **Slim audit trace**: `message_query` rows avoid duplicating live state; retrieval rows carry
+  `queries`, `strategy`, `new_doc_count`.
 
 ## Architecture
 
@@ -63,24 +60,17 @@ FastAPI /run
       ambiguous_query
         -> query_rewriter_node
         -> retrieval_node
-  -> information_evaluator_node
-      sufficient
-        -> answer_node -> clear_turn_trace_node -> END
-      insufficient_recall with retries left
-        -> gap_fill_node
-        -> retrieval_node
-      intent_mismatch with retries left
-        -> intent_correction_rewriter_node
-        -> retrieval_node
-      strategy_upgrade with retries left
-        -> retrieval_node  # same active_retrieval_queries; heavier retrieval_strategy
-      insufficient_recall / intent_mismatch / strategy_upgrade exhausted
-        -> partial_answer_node -> clear_turn_trace_node -> END
+  -> recall_check_node
+      recall sufficient -> answer_node -> clear_turn_trace_node -> END
+      retries exhausted -> partial_answer_node -> clear_turn_trace_node -> END
+      recall insufficient -> intent_check_node
+          intent ok -> fact_gap_retrieval_node -> gap_fill_node -> strategy_upgrade_node -> retrieval_node
+          intent wrong -> intent_correction_rewriter_node -> retrieval_node
 ```
 
 The graph appends retrieved documents across retry loops within the same user turn. Each `/run`
 input resets turn-local scratch such as `active_retrieval_queries`, `retrieval_strategy`,
-`retrieved_documents`, and evaluator retry counters. The append-only **`message_query`** trace is
+`retrieved_documents`, and `retrieval_retry_count`. The append-only **`message_query`** trace is
 cleared **after** `answer` / `partial_answer` by **`clear_turn_trace_node`** using LangGraph
 **`Overwrite([])`** (turn-local invokes still pass `message_query: []` with other scratch, but the
 authoritative reset for reducer-backed history is the terminal clear node).
@@ -133,15 +123,16 @@ MESSAGE_SUMMARY_TOKEN_THRESHOLD=100000
 MESSAGE_SUMMARY_KEEP_RECENT=10
 
 # Retry Loops
-INSUFFICIENT_RECALL_MAX_RETRIES=3
-INTENT_MISMATCH_MAX_RETRIES=2
-STRATEGY_UPGRADE_MAX_RETRIES=3
+RETRIEVAL_LOOP_MAX_RETRIES=3
 
 # Node Models
 QUERY_NORMALISATION_MODEL=gpt-4.1-mini
 QUERY_COMPLEXITY_MODEL=gpt-4.1-mini
 QUERY_REWRITER_MODEL=gpt-4.1-mini
-INFORMATION_EVALUATOR_MODEL=gpt-4.1-mini
+RECALL_CHECK_MODEL=gpt-4.1-mini
+INTENT_CHECK_MODEL=gpt-4.1-mini
+FACT_GAP_QUERY_MODEL=gpt-4.1-mini
+STRATEGY_UPGRADE_MODEL=gpt-4.1-mini
 FINAL_ANSWER_MODEL=gpt-4.1-mini
 QUERY_DECOMPOSITION_MODEL=gpt-4.1-mini
 QUERY_EXPANSION_MODEL=gpt-4.1-mini
@@ -202,9 +193,7 @@ data: {"type":"node","node":"query_splitter","status":"completed","label":"Prepa
 
 data: {"type":"node","node":"retrieval","status":"completed","label":"Retrieving documents","retrieval_strategy":"fast_bm25_retrieval","retrieval_queries":["Enterprise refund policy","Consumer refund policy"],"new_retrieved_documents":[{"score":0.42,"text":"..."}],"retrieved_doc_count":8}
 
-data: {"type":"node","node":"information_evaluator","status":"completed","label":"Evaluating evidence","evaluation_status":"sufficient","next_retrieval_strategy":null,"missing_evidence_details":[],"insufficient_recall_retry_count":0,"intent_mismatch_retry_count":0,"strategy_upgrade_retry_count":0}
-
-data: {"type":"node","node":"information_evaluator","status":"completed","label":"Evaluating evidence","evaluation_status":"insufficient_recall","next_retrieval_strategy":null,"missing_evidence_details":["Passages cover Enterprise refunds but not Consumer tier deadlines."],"insufficient_recall_retry_count":1,"intent_mismatch_retry_count":0,"strategy_upgrade_retry_count":0}
+data: {"type":"node","node":"recall_check","status":"completed","label":"Checking recall","recall_sufficient":true,"missing_facts":[],"retrieval_retry_count":0}
 
 data: {"type":"final","node":"answer","status":"completed","label":"Answer ready","answer":"...","sources":[],"confidence":"high"}
 
@@ -224,36 +213,23 @@ global top-k. The terminal `done` frame carries all compact docs accumulated acr
 
 ## Output validation
 
-Evaluator and retrieval-tier rules are enforced in code and at parse time:
+Recall, intent, and tier rules are enforced in `output_validation/`:
+
+- `RecallCheckResult`: `missing_facts` non-empty when `recall_sufficient` is false.
+- `StrategyUpgradeResult`: `next_retrieval_strategy` required when `apply_strategy_upgrade` is true;
+  `resolve_strategy_upgrade()` in `output_validation/strategy_upgrade.py` clamps tier jumps.
 
 ### Retrieval tier order
-
-Canonical low → high order (`RETRIEVAL_STRATEGY_ORDER` in `output_validation/retrieval_strategy.py`):
 
 ```text
 fast_retrieval → keyword → fast_bm25_retrieval → fast_bm25_late_interaction_retrieval
 ```
 
-`strategy_upgrade` must request a tier **strictly above** the current `retrieval_strategy`. After the
-LLM responds, `resolve_strategy_upgrade()` in `output_validation/information_evaluator.py` clamps
-invalid or equal/lighter choices to the minimum heavier tier when one exists.
-
-### `insufficient_recall`
-
-When `evaluation_status` is `insufficient_recall`, `missing_evidence_details` must contain at least
-one non-empty string (Pydantic on `InformationEvaluation`). Other statuses must leave this array empty.
-
-### `strategy_upgrade` at max tier
-
-If the current tier is already `fast_bm25_late_interaction_retrieval` and the evaluator still requests
-`strategy_upgrade`, the graph sets `strategy_upgrade_retry_count` to the configured maximum so the
-same turn routes to **`partial_answer`** without another retrieval pass.
-
 ## Development Notes
 
 - **Prompts**: Centralized in `prompts/`, one system prompt per graph node.
 - **Output Validation**: Structured node outputs live in `output_validation/` and use Pydantic
-  models with descriptive fields (evaluator rules above).
+  models with descriptive fields (recall / intent / tier rules above).
 - **LLM Client**: Unified client construction in `middleware/llm_client.py` handles model
   configuration, structured output wrappers, and rate limiting.
 - **Metadata Handling**: Final answer messages preserve provider metadata in `messages`. Prompt
@@ -264,6 +240,9 @@ same turn routes to **`partial_answer`** without another retrieval pass.
   (input token count), **output** (output token count), and automatic latency. No LangChain
   `CallbackHandler`. When `false`, tracing is fully off. See `observability/langfuse_handler.py` and
   retrieval logging in `graph/graph.py` (`retrieval_node`).
+
+  **Recall / intent spans** (minimal): `recall_check`, `intent_check`, `fact_gap_retrieval`,
+  `strategy_upgrade` — flags and counts only (no full passage text).
 
   **Retrieval span** (`name="retrieval"`): `output` includes:
 

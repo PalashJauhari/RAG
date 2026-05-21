@@ -10,7 +10,7 @@ from output_validation.retrieval_strategy import RetrievalStrategy
 
 
 class IntentCorrectionRewriteResult(BaseModel):
-    """Corrected retrieval queries after the evaluator detects intent mismatch."""
+    """Corrected retrieval queries after intent_check detects misalignment."""
 
     corrected_queries: list[str] = Field(
         description="Retrieval queries rewritten to better match the intended user request.",

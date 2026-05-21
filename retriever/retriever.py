@@ -129,7 +129,7 @@ class Retriever:
 
         Args:
             queries: One or more retrieval query strings.
-            strategy: Per-request tier from complexity or evaluator.
+            strategy: Per-request tier from complexity or strategy_upgrade.
             top_k: Per sub-query limit; overrides ``retrieval_top_k`` when set.
 
         Returns:
@@ -140,14 +140,16 @@ class Retriever:
             return []
 
         limit = top_k or self.config.retrieval_top_k
-        results = await asyncio.gather(
-            *(self._retrieve_one(query, limit, strategy) for query in clean_queries)
-        )
+        # Sequential sub-queries (no asyncio.gather).
+        query_results: list[list[Any]] = []
+        for query in clean_queries:
+            points = await self._retrieve_one(query, limit, strategy)
+            query_results.append(points)
 
         # --- Merge per-query top-k: query order, dedupe by point id (no cross-query RRF) ---
         seen_ids: set[str] = set()
         final_docs: list[dict[str, Any]] = []
-        for points in results:
+        for points in query_results:
             for point in points:
                 point_id = str(point.id)
                 if point_id in seen_ids:
