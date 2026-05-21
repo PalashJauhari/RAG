@@ -13,33 +13,36 @@ alignment, repairs gaps when needed, and only then produces a grounded answer.
   conversation context while preserving ambiguity instead of guessing.
 - **Typed Complexity Routing**: Query complexity is emitted as validated JSON with one exact label:
   `simple_query`, `comparison_query`, `multihop_query`, `procedural_query`, `ambiguous_query`, or
-  `exploratory_query`, plus an initial **`retrieval_strategy`** tier for the retriever.
+  `exploratory_query`. Retrieval tier selection is deterministic and not predicted by this node.
 - **Specialized Query Preparation**:
   - Simple queries go directly to retrieval.
   - Comparison, multihop, and procedural queries are split into focused retrieval queries.
   - Exploratory queries are expanded into multiple retrieval angles.
   - Ambiguous queries are rewritten safely for now; the `/resume` endpoint remains available for
     future clarification support.
-- **Recall and repair loop**: `recall_check` decomposes required facts and verifies them against
-  retrieved passages. If recall fails, `intent_check` routes to gap-fill (with `fact_gap_retrieval`
-  and `strategy_upgrade`) or intent-correction. A single **`retrieval_retry_count`** caps loops.
-  Structured outputs are validated in `output_validation/`.
-- **Per-request retrieval strategies** (chosen by complexity / strategy_upgrade / intent correction):
+- **Recall and repair loop**: `recall_check` decomposes the normalized query into `fact1`, `fact2`,
+  ... information needs, then verifies each fact against retrieved passages with evidence excerpts.
+  If any fact is unsupported, `intent_check` routes per fact to gap-fill or intent-correction.
+  A single **`retrieval_retry_count`** caps loops. Structured outputs are validated in
+  `output_validation/`.
+- **Per-request retrieval strategies** (chosen deterministically by retry count):
   - **`fast_retrieval`**: dense (+ optional MMR per deployment settings).
   - **`fast_bm25_retrieval`**: dense + BM25 + RRF fusion.
   - **`keyword`**: BM25-only (no dense embeddings for that pass).
   - **`fast_bm25_late_interaction_retrieval`**: hybrid fusion then ColBERT-style late interaction when Jina is configured.
+  The graph uses `fast_bm25_retrieval` by default and switches to
+  `fast_bm25_late_interaction_retrieval` when `retrieval_retry_count >= max(0, RETRIEVAL_LOOP_MAX_RETRIES - 2)`.
 - **Structured turn trace**: Append-only **`message_query`** audit rows across nodes; a terminal
   **`clear_turn_trace`** node resets the trace after each answer using LangGraph **`Overwrite([])`**
   so multi-turn threads do not leak prior-turn diagnostics into the next query.
 - **Lean Message State**: `messages` stores user turns and final answer node outputs only. Node
   scratch data lives in explicit keys such as `normalized_query`, `active_retrieval_queries`,
-  `retrieval_strategy`, `message_query`, `retrieved_documents`, `missing_facts`, and
-  `fact_gap_documents`.
+  `retrieval_strategy`, `message_query`, `retrieved_documents`, `required_facts`,
+  `fact_verifications`, and `unsupported_fact_keys`.
 - **Strict Grounding**: The final answer node answers only from retrieved documents. Source citation
   wiring is intentionally deferred, so `sources` is currently returned as an empty array. The final
   answer prompt receives the normalized query, retrieval strategy, active retrieval queries, and
-  retrieved documents. Partial answer also receives `missing_facts` and retry context.
+  retrieved documents. Partial answer also receives `fact_verifications` and retry context.
 - **Slim audit trace**: `message_query` rows avoid duplicating live state; retrieval rows carry
   `queries`, `strategy`, `new_doc_count`.
 
@@ -64,13 +67,14 @@ FastAPI /run
       recall sufficient -> answer_node -> clear_turn_trace_node -> END
       retries exhausted -> partial_answer_node -> clear_turn_trace_node -> END
       recall insufficient -> intent_check_node
-          intent ok -> fact_gap_retrieval_node -> gap_fill_node -> strategy_upgrade_node -> retrieval_node
-          intent wrong -> intent_correction_rewriter_node -> retrieval_node
+          intent ok -> gap_fill_node -> strategy_upgrade_node -> retrieval_node
+          intent wrong -> intent_correction_rewriter_node -> strategy_upgrade_node -> retrieval_node
 ```
 
 The graph appends retrieved documents across retry loops within the same user turn. Each `/run`
 input resets turn-local scratch such as `active_retrieval_queries`, `retrieval_strategy`,
-`retrieved_documents`, and `retrieval_retry_count`. The append-only **`message_query`** trace is
+`retrieved_documents`, `required_facts`, `fact_verifications`, `unsupported_fact_keys`, and
+`retrieval_retry_count`. The append-only **`message_query`** trace is
 cleared **after** `answer` / `partial_answer` by **`clear_turn_trace_node`** using LangGraph
 **`Overwrite([])`** (turn-local invokes still pass `message_query: []` with other scratch, but the
 authoritative reset for reducer-backed history is the terminal clear node).
@@ -92,7 +96,9 @@ The `Retriever.retrieve(queries, strategy)` branch selects behavior **per reques
 
 Environment flags **`USE_BM25`**, **`USE_LATE_INTERACTION`**, and **`USE_MMR`** still configure the
 Qdrant client (e.g. cloud inference), embedding/MMR parameters, and Jina availability; the
-**`strategy`** argument chooses which branches run inside `_retrieve_one`.
+**`strategy`** argument chooses which branches run inside `_retrieve_one`. The graph starts with
+`fast_bm25_retrieval`; retry loops deterministically keep that tier until the late-interaction
+threshold, then use `fast_bm25_late_interaction_retrieval`.
 
 For multiple active retrieval queries (e.g. from `query_splitter` or `query_expansion`), the retriever runs
 each query concurrently with the same per-request strategy. Each sub-query returns up to
@@ -131,8 +137,6 @@ QUERY_COMPLEXITY_MODEL=gpt-4.1-mini
 QUERY_REWRITER_MODEL=gpt-4.1-mini
 RECALL_CHECK_MODEL=gpt-4.1-mini
 INTENT_CHECK_MODEL=gpt-4.1-mini
-FACT_GAP_QUERY_MODEL=gpt-4.1-mini
-STRATEGY_UPGRADE_MODEL=gpt-4.1-mini
 FINAL_ANSWER_MODEL=gpt-4.1-mini
 QUERY_DECOMPOSITION_MODEL=gpt-4.1-mini
 QUERY_EXPANSION_MODEL=gpt-4.1-mini
@@ -187,13 +191,13 @@ Example events:
 ```text
 data: {"type":"node","node":"query_normalisation","status":"completed","label":"Normalizing query","normalized_query":"Compare the Enterprise refund policy with the Consumer refund policy."}
 
-data: {"type":"node","node":"query_complexity","status":"completed","label":"Classifying query complexity","complexity":"comparison_query","retrieval_strategy":"fast_bm25_retrieval","explanation":"..."}
+data: {"type":"node","node":"query_complexity","status":"completed","label":"Classifying query complexity","complexity":"comparison_query","explanation":"..."}
 
 data: {"type":"node","node":"query_splitter","status":"completed","label":"Preparing retrieval queries","active_retrieval_queries":["Enterprise refund policy","Consumer refund policy"]}
 
 data: {"type":"node","node":"retrieval","status":"completed","label":"Retrieving documents","retrieval_strategy":"fast_bm25_retrieval","retrieval_queries":["Enterprise refund policy","Consumer refund policy"],"new_retrieved_documents":[{"score":0.42,"text":"..."}],"retrieved_doc_count":8}
 
-data: {"type":"node","node":"recall_check","status":"completed","label":"Checking recall","recall_sufficient":true,"missing_facts":[],"retrieval_retry_count":0}
+data: {"type":"node","node":"recall_check","status":"completed","label":"Checking recall","recall_sufficient":true,"required_facts":{"fact1":"Enterprise refund policy terms","fact2":"Consumer refund policy terms"},"fact_verifications":{"fact1":{"fact":"Enterprise refund policy terms","evidence_available":true,"evidence_documents":["..."]},"fact2":{"fact":"Consumer refund policy terms","evidence_available":true,"evidence_documents":["..."]}},"unsupported_fact_keys":[],"retrieval_retry_count":0}
 
 data: {"type":"final","node":"answer","status":"completed","label":"Answer ready","answer":"...","sources":[],"confidence":"high"}
 
@@ -213,16 +217,19 @@ global top-k. The terminal `done` frame carries all compact docs accumulated acr
 
 ## Output validation
 
-Recall, intent, and tier rules are enforced in `output_validation/`:
+Recall and intent rules are enforced in `output_validation/`:
 
-- `RecallCheckResult`: `missing_facts` non-empty when `recall_sufficient` is false.
-- `StrategyUpgradeResult`: `next_retrieval_strategy` required when `apply_strategy_upgrade` is true;
-  `resolve_strategy_upgrade()` in `output_validation/strategy_upgrade.py` clamps tier jumps.
+- `RequiredFactsResult`: `facts` must be keyed as contiguous `fact1`, `fact2`, ...
+- `RecallVerifyResult`: every fact must echo exactly; `evidence_documents` is non-empty when
+  `evidence_available` is true and empty when false.
+- `IntentCheckResult`: per-fact `intent_mismatch_details` is required only when
+  `intent_aligned` is false.
+- `GapFillResult` / `IntentCorrectionRewriteResult`: exactly three retrieval queries per fact.
 
-### Retrieval tier order
+### Retrieval retry tiers
 
 ```text
-fast_retrieval → keyword → fast_bm25_retrieval → fast_bm25_late_interaction_retrieval
+fast_bm25_retrieval → fast_bm25_late_interaction_retrieval
 ```
 
 ## Development Notes
@@ -241,8 +248,8 @@ fast_retrieval → keyword → fast_bm25_retrieval → fast_bm25_late_interactio
   `CallbackHandler`. When `false`, tracing is fully off. See `observability/langfuse_handler.py` and
   retrieval logging in `graph/graph.py` (`retrieval_node`).
 
-  **Recall / intent spans** (minimal): `recall_check`, `intent_check`, `fact_gap_retrieval`,
-  `strategy_upgrade` — flags and counts only (no full passage text).
+  **Recall / intent spans** (minimal): `recall_check`, `intent_check`, `gap_fill`,
+  `intent_correction_rewriter`, `strategy_upgrade` — flags and counts only (no full passage text).
 
   **Retrieval span** (`name="retrieval"`): `output` includes:
 

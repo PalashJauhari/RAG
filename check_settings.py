@@ -10,7 +10,7 @@ fields = [
     "openai_api_key", "openai_llm_model", "openai_embedding_model", "openai_embedding_dimensions",
     "openai_summary_model", "openai_temperature", "qdrant_url", "qdrant_api_key", "qdrant_collection_name",
     "query_normalisation_model", "query_complexity_model", "query_rewriter_model",
-    "recall_check_model", "intent_check_model", "fact_gap_query_model", "strategy_upgrade_model",
+    "recall_check_model", "intent_check_model",
     "final_answer_model", "query_decomposition_model",
     "query_expansion_model", "gap_fill_model", "intent_correction_rewriter_model",
     "qdrant_dense_vector_name", "qdrant_bm25_vector_name", "qdrant_colbert_vector_name", "qdrant_bm25_model",

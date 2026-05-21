@@ -5,9 +5,9 @@ One root span per ``run`` / ``stream_run`` / ``resume``; inline node spans and n
 ``LANGFUSE_TRACING_ENABLED`` in :mod:`config.settings`. No ``CallbackHandler`` or ``@observe``.
 
 **Recall / intent spans** (minimal): ``recall_check`` — ``recall_sufficient``, fact counts,
-``missing_facts`` (atomic strings, empty when sufficient);
-``intent_check`` — ``intent_aligned``; ``fact_gap_retrieval`` — ``query_count``, ``new_doc_count``;
-``strategy_upgrade`` — ``apply_strategy_upgrade``, ``next_retrieval_strategy``.
+``unsupported_fact_keys``; ``intent_check`` — ``intent_aligned`` and misaligned fact count;
+``gap_fill`` / ``intent_correction_rewriter`` — fact query counts; ``strategy_upgrade`` —
+deterministic ``retrieval_strategy`` and ``retrieval_retry_count``.
 
 **Retrieval span** (``retrieval_node`` in :mod:`graph.graph`): ``output`` includes
 ``strategy``, ``queries``, ``new_doc_count``, ``rows_to_add`` (unique docs appended this pass),

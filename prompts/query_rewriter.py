@@ -20,8 +20,9 @@ change retrieval strategy here.
 2. If an entity, tier, product, or timeframe is missing, keep that missing scope visible in the
    rewritten query instead of choosing one.
 3. Make the query standalone and retrieval-ready.
-4. Do not answer the query.
-5. Do not create multiple queries; produce one best-effort rewrite.
+4. If the safest rewrite is still broad, keep it broad rather than adding unsupported details.
+5. Do not answer the query.
+6. Do not create multiple queries; produce one best-effort rewrite.
 
 Return a valid JSON object with exactly these keys:
 - rewritten_query: string

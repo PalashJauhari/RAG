@@ -2,7 +2,7 @@
 
 Built by :func:`graph.graph.trace_row`. ``kind`` values used in production:
 ``normalisation``, ``complexity``, ``query_prep``, ``retrieval``, ``recall_check``,
-``intent_check``, ``fact_gap_retrieval``, ``gap_fill``, ``strategy_upgrade``, ``intent_correction``.
+``intent_check``, ``gap_fill``, ``strategy_upgrade``, ``intent_correction``.
 """
 
 from typing import Any

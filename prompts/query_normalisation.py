@@ -15,12 +15,13 @@ classified and retrieved against. Do not answer the query.
 The next user message contains three blocks:
 
 1) **## Conversation Summary**
-   - A concise summary of older turns that were removed from the active context.
+   - A concise summary of older turns when summarization is enabled; otherwise it may be "(none)".
    - Use it only to recover references, constraints, and entities needed by the latest query.
 
 2) **## Recent Messages**
-   - Recent user messages and final assistant answers only.
-   - Prefer the most recent user message for the actual ask.
+   - Recent conversation turns available in the checkpoint.
+   - Prefer the most recent user message for the actual ask; use earlier turns only to resolve
+     explicit references.
 
 3) **## Latest User Query**
    - The exact latest message from the user.
@@ -35,7 +36,9 @@ The next user message contains three blocks:
    the conversation.
 4. If the latest query is ambiguous, keep the ambiguity visible in the normalized wording instead
    of choosing a hidden assumption. Ambiguity classification happens in the next node.
-5. Do not split, expand, retrieve, or answer.
+5. If a safe rewrite is not possible, preserve the latest query's wording broadly instead of
+   manufacturing missing context.
+6. Do not split, expand, retrieve, or answer.
 
 Return a valid JSON object with exactly these keys:
 - normalized_query: string

@@ -153,7 +153,6 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
             {
                 "label": "Classifying query complexity",
                 "complexity": query_complexity.get("complexity"),
-                "retrieval_strategy": query_complexity.get("retrieval_strategy"),
                 "explanation": query_complexity.get("explanation"),
             }
         )
@@ -185,16 +184,13 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
         if mq:
             event["message_query_tail"] = _message_query_tail(mq)
     elif node_name == "recall_check":
-        missing_facts = payload.get("missing_facts")
-        if isinstance(missing_facts, list):
-            missing_preview = missing_facts
-        else:
-            missing_preview = []
         event.update(
             {
                 "label": "Checking recall",
                 "recall_sufficient": payload.get("recall_sufficient"),
-                "missing_facts": missing_preview,
+                "required_facts": payload.get("required_facts") or {},
+                "fact_verifications": payload.get("fact_verifications") or {},
+                "unsupported_fact_keys": payload.get("unsupported_fact_keys") or [],
                 "retrieval_retry_count": payload.get("retrieval_retry_count", 0),
             }
         )
@@ -206,17 +202,8 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
             {
                 "label": "Checking intent alignment",
                 "intent_aligned": payload.get("intent_aligned"),
-            }
-        )
-        mq = payload.get("message_query")
-        if mq:
-            event["message_query_tail"] = _message_query_tail(mq)
-    elif node_name == "fact_gap_retrieval":
-        docs = payload.get("fact_gap_documents") or []
-        event.update(
-            {
-                "label": "Retrieving fact-gap evidence",
-                "fact_gap_doc_count": len(docs) if isinstance(docs, list) else 0,
+                "fact_intents": payload.get("fact_intents") or {},
+                "intent_mismatch_details": payload.get("intent_mismatch_details") or {},
             }
         )
         mq = payload.get("message_query")
@@ -233,7 +220,6 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
         event.update(
             {
                 "label": "Evaluating retrieval tier",
-                "apply_strategy_upgrade": payload.get("apply_strategy_upgrade"),
                 "retrieval_strategy": payload.get("retrieval_strategy"),
                 "retrieval_retry_count": payload.get("retrieval_retry_count", 0),
             }
@@ -246,7 +232,6 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
             {
                 "label": "Correcting retrieval intent",
                 "active_retrieval_queries": payload.get("active_retrieval_queries") or [],
-                "retrieval_strategy": payload.get("retrieval_strategy"),
             }
         )
         mq = payload.get("message_query")

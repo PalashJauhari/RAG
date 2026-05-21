@@ -19,18 +19,16 @@ class Settings(BaseSettings):
     openai_temperature: float = 0
 
     # --- Per-graph-node LLM models ---
-    query_normalisation_model: str = "gpt-4.1-mini"
+    query_normalisation_model: str = "gpt-5-mini"
     query_complexity_model: str = "gpt-4.1-mini"
-    query_rewriter_model: str = "gpt-4.1-mini"
-    recall_check_model: str = "gpt-4.1-mini"
-    intent_check_model: str = "gpt-4.1-mini"
-    fact_gap_query_model: str = "gpt-4.1-mini"
-    strategy_upgrade_model: str = "gpt-4.1-mini"
-    final_answer_model: str = "gpt-4.1-mini"
-    query_decomposition_model: str = "gpt-4.1-mini"
-    query_expansion_model: str = "gpt-4.1-mini"
-    gap_fill_model: str = "gpt-4.1-mini"
-    intent_correction_rewriter_model: str = "gpt-4.1-mini"
+    query_rewriter_model: str = "gpt-5-mini"
+    recall_check_model: str = "gpt-5.1"
+    intent_check_model: str = "gpt-5-mini"
+    final_answer_model: str = "gpt-5.1"
+    query_decomposition_model: str = "gpt-5-mini"
+    query_expansion_model: str = "gpt-5-mini"
+    gap_fill_model: str = "gpt-5-mini"
+    intent_correction_rewriter_model: str = "gpt-5-mini"
 
     # --- Qdrant collection and vector names ---
     qdrant_url: str = ""

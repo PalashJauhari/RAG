@@ -41,9 +41,8 @@ function progressBoldRest(ev) {
   }
   if (node === "query_complexity") {
     const c = ev.complexity || "";
-    const rs = ev.retrieval_strategy ? " · " + ev.retrieval_strategy : "";
     const ex = ev.explanation ? " — " + truncate(ev.explanation, 120) : "";
-    return { bold: boldName, rest: (c ? ": " + c : "") + rs + ex };
+    return { bold: boldName, rest: (c ? ": " + c : "") + ex };
   }
   if (node === "retrieval") {
     const strat = ev.retrieval_strategy ? " · " + ev.retrieval_strategy : "";
@@ -58,23 +57,19 @@ function progressBoldRest(ev) {
   }
   if (node === "recall_check") {
     const ok = ev.recall_sufficient ? "sufficient" : "insufficient";
-    const mf = (ev.missing_facts || []).length;
+    const unsupported = (ev.unsupported_fact_keys || []).length;
     const rc = ev.retrieval_retry_count != null ? " · retry " + ev.retrieval_retry_count : "";
-    return { bold: boldName, rest: ": " + ok + (mf ? " · " + mf + " missing" : "") + rc };
+    return { bold: boldName, rest: ": " + ok + (unsupported ? " · " + unsupported + " unsupported" : "") + rc };
   }
   if (node === "intent_check") {
     const ia = ev.intent_aligned ? "aligned" : "misaligned";
-    return { bold: boldName, rest: ": " + ia };
-  }
-  if (node === "fact_gap_retrieval") {
-    const n = ev.fact_gap_doc_count != null ? ev.fact_gap_doc_count + " docs" : "";
-    return { bold: boldName, rest: n ? " — " + n : "" };
+    const n = ev.fact_intents ? Object.keys(ev.fact_intents).length : 0;
+    return { bold: boldName, rest: ": " + ia + (n ? " · " + n + " facts" : "") };
   }
   if (node === "strategy_upgrade") {
-    const up = ev.apply_strategy_upgrade === true ? "upgrade" : ev.apply_strategy_upgrade === false ? "keep tier" : "";
     const rs = ev.retrieval_strategy ? " · " + ev.retrieval_strategy : "";
     const rc = ev.retrieval_retry_count != null ? " · retry " + ev.retrieval_retry_count : "";
-    return { bold: boldName, rest: (up ? up : "") + rs + rc };
+    return { bold: boldName, rest: "deterministic" + rs + rc };
   }
   if (["query_splitter", "query_expansion", "query_rewriter"].indexOf(node) !== -1) {
     const pq = (ev.active_retrieval_queries || []).join(" · ");
