@@ -7,14 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-QueryComplexity = Literal[
-    "simple_query",
-    "comparison_query",
-    "multihop_query",
-    "procedural_query",
-    "ambiguous_query",
-    "exploratory_query",
-]
+QueryComplexity = Literal["simple_query", "needs_split"]
 
 
 class QueryComplexityResult(BaseModel):
@@ -22,9 +15,9 @@ class QueryComplexityResult(BaseModel):
 
     complexity: QueryComplexity = Field(
         description="Exact query complexity label used for graph routing.",
-        examples=["comparison_query"],
+        examples=["needs_split"],
     )
     explanation: str = Field(
         description="Brief observable explanation covering only the routing label.",
-        examples=["The user asks to compare two policy tiers, so route to query_splitter."],
+        examples=["The required facts cover multiple entities, so route to query_splitter."],
     )

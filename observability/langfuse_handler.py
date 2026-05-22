@@ -4,14 +4,15 @@ One root span per ``run`` / ``stream_run`` / ``resume``; inline node spans and n
 ``{node}-llm`` generation spans: ``model`` plus input/output token counts on ``update``. Gated by
 ``LANGFUSE_TRACING_ENABLED`` in :mod:`config.settings`. No ``CallbackHandler`` or ``@observe``.
 
-**Recall / intent spans** (minimal): ``recall_check`` — ``recall_sufficient``, fact counts,
-``unsupported_fact_keys``; ``intent_check`` — ``intent_aligned`` and misaligned fact count;
-``gap_fill`` / ``intent_correction_rewriter`` — fact query counts; ``strategy_upgrade`` —
+**Fact / recall / intent spans**: ``fact_decomposition`` logs the normalized query and stable
+``required_facts`` before retrieval. ``recall_check`` verifies those facts only and logs
+``verified_facts``, derived unsupported facts, and the full accumulated ``retrieved_documents`` used
+for the decision. Repair spans log their full parsed per-fact outputs. ``strategy_upgrade`` logs
 deterministic ``retrieval_strategy`` and ``retrieval_retry_count``.
 
 **Retrieval span** (``retrieval_node`` in :mod:`graph.graph`): ``output`` includes
-``strategy``, ``queries``, ``new_doc_count``, ``rows_to_add`` (unique docs appended this pass),
-and ``retrieved_documents`` (full accumulated corpus after merge). Passage text can be large.
+``strategy``, ``queries``, candidate count, ``rows_to_add`` (unique docs appended this pass),
+and before/after accumulated corpus sizes. Passage text can be large.
 """
 
 from __future__ import annotations

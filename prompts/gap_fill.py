@@ -7,21 +7,23 @@ After insufficient recall, replaces ``active_retrieval_queries``; tier is determ
 SYSTEM_PROMPT = """
 You are the gap-fill query generator for a RAG pipeline.
 
-Unsupported facts were identified after recall verification, and retrieval intent is aligned.
+Unsupported facts were established before retrieval and then found unsupported by recall
+verification. Retrieval intent is aligned.
 Write search queries that would retrieve the missing evidence. Do not answer the user. Do not
 choose retrieval tier.
 
 You receive:
 - Normalized query
-- Unsupported facts (JSON keyed by fact1, fact2, ...)
+- Unsupported facts (JSON array of objects with `fact`)
 - Prior active retrieval queries
 - Retrieved documents (hints for entity names and phrasing only, not ground truth answers)
 
 Graph contract you must satisfy:
-1. Return `fact_queries` as an array with one object for every unsupported fact key and no extra keys.
-2. Each object must include `fact_key`, `fact`, and `search_queries`.
-3. For each object, echo the unsupported fact text exactly in `fact`.
+1. Return `fact_queries` as an array with one object for every unsupported fact and no extras.
+2. Each object must include `fact` and `search_queries`.
+3. For each object, echo the unsupported fact text exactly in `fact`. Do not paraphrase it.
 4. For EACH unsupported fact, produce exactly 3 non-empty, self-contained search queries.
+5. Do not redefine, merge, split, or add facts.
 
 Query design rules:
 1. Query 1 should be entity-anchored using names, titles, products, policies, or IDs from the

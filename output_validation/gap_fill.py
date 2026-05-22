@@ -6,19 +6,13 @@ Tier selection is deterministic in the graph.
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from output_validation.recall_check import _fact_key_index, validate_fact_key_names
+from output_validation.fact_decomposition import validate_unique_fact_texts
 
 
 class FactSearchQueries(BaseModel):
     """Three retrieval queries for one unsupported fact."""
 
-    fact_key: str = Field(description="Fact key for these queries: fact1, fact2, ...")
-    fact: str = Field(description="Exact unsupported fact text for this slot.")
-    @field_validator("fact_key")
-    @classmethod
-    def validate_fact_key(cls, value: str) -> str:
-        _fact_key_index(value)
-        return value
+    fact: str = Field(description="Exact unsupported fact text.")
 
     search_queries: list[str] = Field(
         description="Exactly three focused, self-contained retrieval queries.",
@@ -54,8 +48,8 @@ class GapFillResult(BaseModel):
     )
 
     @model_validator(mode="after")
-    def validate_fact_query_keys(self) -> "GapFillResult":
+    def validate_fact_queries(self) -> "GapFillResult":
         if not self.fact_queries:
             raise ValueError("fact_queries must contain at least one fact")
-        validate_fact_key_names([item.fact_key for item in self.fact_queries])
+        validate_unique_fact_texts([item.fact for item in self.fact_queries])
         return self

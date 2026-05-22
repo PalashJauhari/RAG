@@ -105,7 +105,13 @@ def _message_query_tail(entries: list[Any], max_entries: int = 5) -> list[Any]:
     return entries[-max_entries:]
 
 
-def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
+def get_stream_event(
+    session_id: str,
+    update: dict[str, Any],
+    *,
+    retrieved_doc_count: int | None = None,
+    new_doc_count: int | None = None,
+) -> dict[str, Any]:
     """Map a LangGraph ``stream_mode='updates'`` chunk to a stable SSE event dict.
 
     The Dash clientside script keys off ``node``, ``type``, and node-specific fields
@@ -147,6 +153,18 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
         mq = payload.get("message_query")
         if mq:
             event["message_query_tail"] = _message_query_tail(mq)
+    elif node_name == "fact_decomposition":
+        required_facts = payload.get("required_facts") or []
+        event.update(
+            {
+                "label": "Decomposing required facts",
+                "required_facts": required_facts,
+                "required_fact_count": len(required_facts),
+            }
+        )
+        mq = payload.get("message_query")
+        if mq:
+            event["message_query_tail"] = _message_query_tail(mq)
     elif node_name == "query_complexity":
         query_complexity = payload.get("query_complexity") or {}
         event.update(
@@ -159,7 +177,7 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
         mq = payload.get("message_query")
         if mq:
             event["message_query_tail"] = _message_query_tail(mq)
-    elif node_name in {"query_splitter", "query_expansion", "query_rewriter"}:
+    elif node_name == "query_splitter":
         event.update(
             {
                 "label": "Preparing retrieval queries",
@@ -170,27 +188,32 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
         if mq:
             event["message_query_tail"] = _message_query_tail(mq)
     elif node_name == "retrieval":
-        new_retrieved_documents = payload.get("new_retrieved_documents") or []
         event.update(
             {
                 "label": "Retrieving documents",
                 "retrieval_strategy": payload.get("retrieval_strategy"),
                 "retrieval_queries": payload.get("active_retrieval_queries") or [],
-                "new_retrieved_documents": new_retrieved_documents,
-                "retrieved_doc_count": len(new_retrieved_documents),
+                "new_doc_count": new_doc_count or 0,
+                "retrieved_doc_count": retrieved_doc_count or 0,
             }
         )
         mq = payload.get("message_query")
         if mq:
             event["message_query_tail"] = _message_query_tail(mq)
     elif node_name == "recall_check":
+        verified_facts = payload.get("verified_facts") or []
+        unsupported_facts = [
+            row for row in verified_facts if isinstance(row, dict) and not row.get("verification_status")
+        ]
         event.update(
             {
                 "label": "Checking recall",
                 "recall_sufficient": payload.get("recall_sufficient"),
-                "required_facts": payload.get("required_facts") or {},
-                "fact_verifications": payload.get("fact_verifications") or {},
-                "unsupported_fact_keys": payload.get("unsupported_fact_keys") or [],
+                "required_facts": payload.get("required_facts") or [],
+                "verified_facts": verified_facts,
+                "unsupported_facts": unsupported_facts,
+                "unsupported_fact_count": len(unsupported_facts),
+                "retrieved_doc_count": retrieved_doc_count or 0,
                 "retrieval_retry_count": payload.get("retrieval_retry_count", 0),
             }
         )
@@ -202,8 +225,8 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
             {
                 "label": "Checking intent alignment",
                 "intent_aligned": payload.get("intent_aligned"),
-                "fact_intents": payload.get("fact_intents") or {},
-                "intent_mismatch_details": payload.get("intent_mismatch_details") or {},
+                "fact_intents": payload.get("fact_intents") or [],
+                "intent_mismatch_details": payload.get("intent_mismatch_details") or [],
             }
         )
         mq = payload.get("message_query")
@@ -267,6 +290,7 @@ def get_stream_event(session_id: str, update: dict[str, Any]) -> dict[str, Any]:
                 "answer": answer.answer,
                 "sources": answer.sources,
                 "confidence": answer.confidence,
+                "retrieved_doc_count": retrieved_doc_count or 0,
             }
         )
     else:
@@ -360,26 +384,34 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
     """Stream node-level graph progress as Server-Sent Events (``text/event-stream``)."""
 
     async def event_generator():
-        # Map each LangGraph stream chunk to SSE; track final retrieved_documents for the done frame.
-        last_retrieved_docs: list[Any] = []
+        # Map each LangGraph stream chunk to SSE; expose counts only to keep UI payloads light.
+        retrieved_doc_count = 0
         try:
             async for update in app.state.retrieval_graph.stream_run(
                 request.session_id,
                 request.message,
             ):
+                new_doc_count = 0
                 if isinstance(update, dict) and update:
                     node_name = next(iter(update))
                     payload = update.get(node_name) or {}
                     if node_name == "retrieval":
-                        docs = payload.get("retrieved_documents")
-                        if docs is not None:
-                            last_retrieved_docs = list(docs)
-                yield _sse(get_stream_event(request.session_id, update))
+                        docs = payload.get("retrieved_documents") or []
+                        new_doc_count = len(docs) if isinstance(docs, list) else 0
+                        retrieved_doc_count += new_doc_count
+                yield _sse(
+                    get_stream_event(
+                        request.session_id,
+                        update,
+                        retrieved_doc_count=retrieved_doc_count,
+                        new_doc_count=new_doc_count,
+                    )
+                )
             yield _sse(
                 {
                     "type": "done",
                     "session_id": request.session_id,
-                    "retrieved_docs": last_retrieved_docs,
+                    "retrieved_doc_count": retrieved_doc_count,
                 }
             )
         except Exception as exc:

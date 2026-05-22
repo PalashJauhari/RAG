@@ -12,16 +12,15 @@ alignment, repairs gaps when needed, and only then produces a grounded answer.
 - **Query Normalisation First**: The latest user message is rewritten into a standalone query using
   conversation context while preserving ambiguity instead of guessing.
 - **Typed Complexity Routing**: Query complexity is emitted as validated JSON with one exact label:
-  `simple_query`, `comparison_query`, `multihop_query`, `procedural_query`, `ambiguous_query`, or
-  `exploratory_query`. Retrieval tier selection is deterministic and not predicted by this node.
+  `simple_query` or `needs_split`. Retrieval tier selection is deterministic and not predicted by
+  this node.
 - **Specialized Query Preparation**:
   - Simple queries go directly to retrieval.
-  - Comparison, multihop, and procedural queries are split into focused retrieval queries.
-  - Exploratory queries are expanded into multiple retrieval angles.
-  - Ambiguous queries are rewritten safely for now; the `/resume` endpoint remains available for
-    future clarification support.
-- **Recall and repair loop**: `recall_check` decomposes the normalized query into `fact1`, `fact2`,
-  ... information needs, then verifies each fact against retrieved passages with evidence excerpts.
+  - Queries requiring multiple fact targets route to `query_splitter`, which turns stable
+    `required_facts` into focused retrieval queries.
+- **Fact-first recall and repair loop**: `fact_decomposition` decomposes the normalized query once
+  into an ordered `[{fact: "..."}]` list before retrieval. `recall_check` only verifies those fixed
+  facts with `verification_status`, `verification_report`, and verbatim evidence excerpts.
   If any fact is unsupported, `intent_check` routes per fact to gap-fill or intent-correction.
   A single **`retrieval_retry_count`** caps loops. Structured outputs are validated in
   `output_validation/`.
@@ -38,30 +37,25 @@ alignment, repairs gaps when needed, and only then produces a grounded answer.
 - **Lean Message State**: `messages` stores user turns and final answer node outputs only. Node
   scratch data lives in explicit keys such as `normalized_query`, `active_retrieval_queries`,
   `retrieval_strategy`, `message_query`, `retrieved_documents`, `required_facts`,
-  `fact_verifications`, and `unsupported_fact_keys`.
+  `verified_facts`, and `fact_intents`.
 - **Strict Grounding**: The final answer node answers only from retrieved documents. Source citation
   wiring is intentionally deferred, so `sources` is currently returned as an empty array. The final
   answer prompt receives the normalized query, retrieval strategy, active retrieval queries, and
-  retrieved documents. Partial answer also receives `fact_verifications` and retry context.
+  retrieved documents. Partial answer also receives `verified_facts` and retry context.
 - **Slim audit trace**: `message_query` rows avoid duplicating live state; retrieval rows carry
-  `queries`, `strategy`, `new_doc_count`.
+  `queries`, `strategy`, `rows_to_add_count`, and accumulated corpus size.
 
 ## Architecture
 
 ```text
 FastAPI /run
   -> query_normalisation_node
+  -> fact_decomposition_node
   -> query_complexity_node
       simple_query
         -> retrieval_node
-      comparison_query / multihop_query / procedural_query
+      needs_split
         -> query_splitter_node
-        -> retrieval_node
-      exploratory_query
-        -> query_expansion_node
-        -> retrieval_node
-      ambiguous_query
-        -> query_rewriter_node
         -> retrieval_node
   -> recall_check_node
       recall sufficient -> answer_node -> clear_turn_trace_node -> END
@@ -73,15 +67,15 @@ FastAPI /run
 
 The graph appends retrieved documents across retry loops within the same user turn. Each `/run`
 input resets turn-local scratch such as `active_retrieval_queries`, `retrieval_strategy`,
-`retrieved_documents`, `required_facts`, `fact_verifications`, `unsupported_fact_keys`, and
+`retrieved_documents`, `required_facts`, `verified_facts`, `fact_intents`, and
 `retrieval_retry_count`. The append-only **`message_query`** trace is
-cleared **after** `answer` / `partial_answer` by **`clear_turn_trace_node`** using LangGraph
+cleared **after** `answer` / `partial_answer` along with `retrieved_documents` by
+**`clear_turn_trace_node`** using LangGraph
 **`Overwrite([])`** (turn-local invokes still pass `message_query: []` with other scratch, but the
 authoritative reset for reducer-backed history is the terminal clear node).
 
 `/resume` is still exposed by the API so clarification can be reintroduced later without changing
-the client contract. The current graph does not interrupt for ambiguous queries; it rewrites them
-best-effort and continues to retrieval.
+the client contract. The current graph does not interrupt for ambiguous queries.
 
 ## Advanced Retrieval Flow
 
@@ -100,7 +94,7 @@ Qdrant client (e.g. cloud inference), embedding/MMR parameters, and Jina availab
 `fast_bm25_retrieval`; retry loops deterministically keep that tier until the late-interaction
 threshold, then use `fast_bm25_late_interaction_retrieval`.
 
-For multiple active retrieval queries (e.g. from `query_splitter` or `query_expansion`), the retriever runs
+For multiple active retrieval queries from `query_splitter`, the retriever runs
 each query concurrently with the same per-request strategy. Each sub-query returns up to
 `RETRIEVAL_TOP_K` hits from Qdrant. Results are merged in query order: deduplicate by Qdrant point id
 (first occurrence wins), then return the combined list. There is no cross-query RRF and no global
@@ -134,12 +128,10 @@ RETRIEVAL_LOOP_MAX_RETRIES=3
 # Node Models
 QUERY_NORMALISATION_MODEL=gpt-4.1-mini
 QUERY_COMPLEXITY_MODEL=gpt-4.1-mini
-QUERY_REWRITER_MODEL=gpt-4.1-mini
 RECALL_CHECK_MODEL=gpt-4.1-mini
 INTENT_CHECK_MODEL=gpt-4.1-mini
 FINAL_ANSWER_MODEL=gpt-4.1-mini
 QUERY_DECOMPOSITION_MODEL=gpt-4.1-mini
-QUERY_EXPANSION_MODEL=gpt-4.1-mini
 GAP_FILL_MODEL=gpt-4.1-mini
 INTENT_CORRECTION_REWRITER_MODEL=gpt-4.1-mini
 
@@ -170,7 +162,7 @@ The system returns a structured JSON response:
 - `answer`: Grounded response based strictly on retrieved documents.
 - `sources`: Empty for now; source extraction will be wired later.
 - `confidence`: `high`, `medium`, or `low`.
-- `retrieved_docs`: Last turn's compact retrieved documents, currently `score` and `text`.
+- `retrieved_docs`: Empty after terminal cleanup; use Langfuse for full decision-context documents.
 
 ### Stream Graph Progress
 
@@ -191,37 +183,39 @@ Example events:
 ```text
 data: {"type":"node","node":"query_normalisation","status":"completed","label":"Normalizing query","normalized_query":"Compare the Enterprise refund policy with the Consumer refund policy."}
 
-data: {"type":"node","node":"query_complexity","status":"completed","label":"Classifying query complexity","complexity":"comparison_query","explanation":"..."}
+data: {"type":"node","node":"fact_decomposition","status":"completed","label":"Decomposing required facts","required_fact_count":2,"required_facts":[{"fact":"Enterprise refund policy terms"},{"fact":"Consumer refund policy terms"}]}
+
+data: {"type":"node","node":"query_complexity","status":"completed","label":"Classifying query complexity","complexity":"needs_split","explanation":"..."}
 
 data: {"type":"node","node":"query_splitter","status":"completed","label":"Preparing retrieval queries","active_retrieval_queries":["Enterprise refund policy","Consumer refund policy"]}
 
-data: {"type":"node","node":"retrieval","status":"completed","label":"Retrieving documents","retrieval_strategy":"fast_bm25_retrieval","retrieval_queries":["Enterprise refund policy","Consumer refund policy"],"new_retrieved_documents":[{"score":0.42,"text":"..."}],"retrieved_doc_count":8}
+data: {"type":"node","node":"retrieval","status":"completed","label":"Retrieving documents","retrieval_strategy":"fast_bm25_retrieval","retrieval_queries":["Enterprise refund policy","Consumer refund policy"],"new_doc_count":8,"retrieved_doc_count":8}
 
-data: {"type":"node","node":"recall_check","status":"completed","label":"Checking recall","recall_sufficient":true,"required_facts":{"fact1":"Enterprise refund policy terms","fact2":"Consumer refund policy terms"},"fact_verifications":{"fact1":{"fact":"Enterprise refund policy terms","evidence_available":true,"evidence_documents":["..."]},"fact2":{"fact":"Consumer refund policy terms","evidence_available":true,"evidence_documents":["..."]}},"unsupported_fact_keys":[],"retrieval_retry_count":0}
+data: {"type":"node","node":"recall_check","status":"completed","label":"Checking recall","recall_sufficient":true,"required_facts":[{"fact":"Enterprise refund policy terms"},{"fact":"Consumer refund policy terms"}],"verified_facts":[{"fact":"Enterprise refund policy terms","verification_status":true,"verification_report":"Retrieved passages state the relevant terms.","evidence_documents":["..."]},{"fact":"Consumer refund policy terms","verification_status":true,"verification_report":"Retrieved passages state the relevant terms.","evidence_documents":["..."]}],"unsupported_facts":[],"unsupported_fact_count":0,"retrieved_doc_count":8,"retrieval_retry_count":0}
 
 data: {"type":"final","node":"answer","status":"completed","label":"Answer ready","answer":"...","sources":[],"confidence":"high"}
 
 data: {"type":"node","node":"clear_turn_trace","status":"completed","label":"Clearing turn trace"}
 
-data: {"type":"done","session_id":"demo-stream","retrieved_docs":[{"score":0.42,"text":"..."}]}
+data: {"type":"done","session_id":"demo-stream","retrieved_doc_count":8}
 ```
 
-The closing `done` frame includes `retrieved_docs` (compact `score` / `text` rows, matching `/run`)
-so streaming clients can show passage counts or tooling without a second `/run` invoke.
+The closing `done` frame includes `retrieved_doc_count` only; document bodies are not sent over SSE.
 
 If retry budgets are exhausted, the final event comes from `partial_answer` instead of `answer`.
-Retrieval `node` frames include `new_retrieved_documents` and `retrieved_doc_count` for **this
-retrieval pass only** (not the full accumulated corpus). With multiple `active_retrieval_queries`,
-those counts reflect the per-query top-k merge (up to `RETRIEVAL_TOP_K` per query), not a single
-global top-k. The terminal `done` frame carries all compact docs accumulated across retry loops in the turn.
+Retrieval `node` frames include `new_doc_count` for rows added this pass and
+`retrieved_doc_count` for the accumulated per-turn corpus. With multiple
+`active_retrieval_queries`, retrieval still fetches up to `RETRIEVAL_TOP_K` per query before
+deduplication.
 
 ## Output validation
 
-Recall and intent rules are enforced in `output_validation/`:
+Fact decomposition, recall, and intent rules are enforced in `output_validation/`:
 
-- `RequiredFactsResult`: `facts` must be keyed as contiguous `fact1`, `fact2`, ...
-- `RecallVerifyResult`: every fact must echo exactly; `evidence_documents` is non-empty when
-  `evidence_available` is true and empty when false.
+- `RequiredFactsResult` (`fact_decomposition`): `facts` is an ordered list of unique
+  `{"fact": "..."}` objects.
+- `RecallVerifyResult`: every fact must echo exactly; `verification_report` is non-empty;
+  `evidence_documents` is non-empty when `verification_status` is true and empty when false.
 - `IntentCheckResult`: per-fact `intent_mismatch_details` is required only when
   `intent_aligned` is false.
 - `GapFillResult` / `IntentCorrectionRewriteResult`: exactly three retrieval queries per fact.
@@ -248,8 +242,10 @@ fast_bm25_retrieval → fast_bm25_late_interaction_retrieval
   `CallbackHandler`. When `false`, tracing is fully off. See `observability/langfuse_handler.py` and
   retrieval logging in `graph/graph.py` (`retrieval_node`).
 
-  **Recall / intent spans** (minimal): `recall_check`, `intent_check`, `gap_fill`,
-  `intent_correction_rewriter`, `strategy_upgrade` — flags and counts only (no full passage text).
+  **Fact / recall / intent spans**: `fact_decomposition` logs the normalized query and stable
+  `required_facts`. `recall_check` logs `required_facts`, `verified_facts`,
+  derived unsupported facts, `recall_sufficient`, and the full accumulated `retrieved_documents`
+  used for the decision. Repair nodes log their full parsed per-fact outputs.
 
   **Retrieval span** (`name="retrieval"`): `output` includes:
 
@@ -257,13 +253,14 @@ fast_bm25_retrieval → fast_bm25_late_interaction_retrieval
   |--------|---------|
   | `strategy` | Active `retrieval_strategy` tier for this pass |
   | `queries` | `active_retrieval_queries` used (or fallback from `normalized_query`) |
-  | `new_doc_count` | Count of compact docs returned this pass (before cross-turn text dedup) |
+  | `candidate_doc_count` | Count of compact docs returned this pass before text dedup |
   | `rows_to_add` | Unique `{score, text}` rows appended this pass (after dedup vs prior corpus) |
-  | `retrieved_documents` | Full accumulated corpus after merge (`prior + rows_to_add`) |
+  | `rows_to_add_count` | Count of rows appended this pass |
+  | `corpus_size_before` | Accumulated corpus size before this pass |
+  | `corpus_size_after` | Accumulated corpus size after this pass |
 
-  Full passage text in traces can be **large** on retry loops or long chunks; Langfuse UI may be slower.
-  SSE `/run/stream` events are **unchanged** (still expose `new_retrieved_documents` and counts for the
-  Dash UI, not the Langfuse-only accumulated payload).
+  Full accumulated passage text is logged on `recall_check`, `answer`, and `partial_answer` spans
+  because those nodes make decisions from that corpus. SSE `/run/stream` events expose counts only.
 - **Code comments**: Python modules use module docstrings, `# --- section ---` headers, and inline notes
   for non-obvious routing, dedup, retries, and Langfuse branches. Prompt bodies in `prompts/` stay
   uncommented inside `SYSTEM_PROMPT` strings; each prompt file’s module docstring links prompt → graph

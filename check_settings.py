@@ -9,10 +9,10 @@ import re
 fields = [
     "openai_api_key", "openai_llm_model", "openai_embedding_model", "openai_embedding_dimensions",
     "openai_summary_model", "openai_temperature", "qdrant_url", "qdrant_api_key", "qdrant_collection_name",
-    "query_normalisation_model", "query_complexity_model", "query_rewriter_model",
+    "query_normalisation_model", "query_complexity_model",
     "recall_check_model", "intent_check_model",
     "final_answer_model", "query_decomposition_model",
-    "query_expansion_model", "gap_fill_model", "intent_correction_rewriter_model",
+    "gap_fill_model", "intent_correction_rewriter_model",
     "qdrant_dense_vector_name", "qdrant_bm25_vector_name", "qdrant_colbert_vector_name", "qdrant_bm25_model",
     "use_bm25", "use_late_interaction", "use_mmr", "retrieval_top_k", "retrieval_candidate_limit",
     "retrieval_mmr_diversity", "jina_api_key", "jina_colbert_model", "jina_colbert_dimensions",

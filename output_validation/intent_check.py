@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from output_validation.recall_check import _fact_key_index, validate_fact_key_names
+from output_validation.fact_decomposition import validate_unique_fact_texts
 
 
 class FactIntentCheck(BaseModel):
     """Intent alignment for one unsupported fact."""
 
-    fact_key: str = Field(description="Unsupported fact key: fact1, fact2, ...")
-    fact: str = Field(description="Exact unsupported fact text for this slot.")
+    fact: str = Field(description="Exact unsupported fact text.")
     intent_aligned: bool = Field(
         description="True when active_retrieval_queries target this fact's intent.",
     )
@@ -19,12 +18,6 @@ class FactIntentCheck(BaseModel):
         default="",
         description="Required when intent_aligned is false; empty when aligned.",
     )
-
-    @field_validator("fact_key")
-    @classmethod
-    def validate_fact_key(cls, value: str) -> str:
-        _fact_key_index(value)
-        return value
 
     @model_validator(mode="after")
     def validate_intent_fields(self) -> "FactIntentCheck":
@@ -49,8 +42,8 @@ class IntentCheckResult(BaseModel):
     )
 
     @model_validator(mode="after")
-    def validate_fact_intent_keys(self) -> "IntentCheckResult":
+    def validate_fact_intents(self) -> "IntentCheckResult":
         if not self.fact_intents:
             raise ValueError("fact_intents must contain at least one fact")
-        validate_fact_key_names([item.fact_key for item in self.fact_intents])
+        validate_unique_fact_texts([item.fact for item in self.fact_intents])
         return self
