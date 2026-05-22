@@ -5,14 +5,17 @@ One root span per ``run`` / ``stream_run`` / ``resume``; inline node spans and n
 ``LANGFUSE_TRACING_ENABLED`` in :mod:`config.settings`. No ``CallbackHandler`` or ``@observe``.
 
 **Fact / recall / intent spans**: ``fact_decomposition`` logs the normalized query and stable
-``required_facts`` before retrieval. ``recall_check`` verifies those facts only and logs
-``verified_facts``, derived unsupported facts, and the full accumulated ``retrieved_documents`` used
-for the decision. Repair spans log their full parsed per-fact outputs. ``strategy_upgrade`` logs
-deterministic ``retrieval_strategy`` and ``retrieval_retry_count``.
+``required_facts`` before retrieval. ``query_complexity`` is deterministic (fact-count routing; no
+LLM span). ``recall_check`` verifies those facts only and logs ``verified_facts``, derived
+unsupported facts, and the full accumulated ``retrieved_documents`` used for the decision. Repair
+spans log their full parsed per-fact outputs. ``strategy_upgrade`` logs deterministic
+``retrieval_strategy``, ``retrieval_retry_count``, and the next pass effective limits
+(``effective_top_k``, ``effective_dense_mmr``, ``effective_bm25``, ``effective_late_interaction``).
 
-**Retrieval span** (``retrieval_node`` in :mod:`graph.graph`): ``output`` includes
-``strategy``, ``queries``, candidate count, ``rows_to_add`` (unique docs appended this pass),
-and before/after accumulated corpus sizes. Passage text can be large.
+**Retrieval span** (``retrieval_node`` in :mod:`graph.graph`): ``output`` includes ``strategy``,
+``queries``, ``retrieval_retry_count``, ``late_interaction_enabled``, the four effective limit fields,
+candidate count, ``rows_to_add`` (unique docs appended this pass), full accumulated
+``retrieved_documents`` after the pass (untruncated passage text), and before/after corpus sizes.
 """
 
 from __future__ import annotations

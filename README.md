@@ -3,17 +3,17 @@
 This project implements a production-grade Retrieval-Augmented Generation (RAG) pipeline built
 on **LangGraph**, **Qdrant**, and **OpenAI**.
 
-The system uses an explicit LangGraph flow that normalizes the user's query, classifies query
-complexity, prepares retrieval queries, retrieves evidence, runs fact-based recall check and intent
+The system uses an explicit LangGraph flow that normalizes the user's query, decomposes required
+facts, routes retrieval by fact count, retrieves evidence, runs fact-based recall check and intent
 alignment, repairs gaps when needed, and only then produces a grounded answer.
 
 ## Key Features
 
 - **Query Normalisation First**: The latest user message is rewritten into a standalone query using
   conversation context while preserving ambiguity instead of guessing.
-- **Typed Complexity Routing**: Query complexity is emitted as validated JSON with one exact label:
-  `simple_query` or `needs_split`. Retrieval tier selection is deterministic and not predicted by
-  this node.
+- **Deterministic fact-count routing**: After fact decomposition, `query_complexity` routes by fact
+  count only — `len(required_facts) > 1` → `needs_split` (query_splitter); otherwise `simple_query`
+  (direct retrieval with the normalized query). No LLM call for this step.
 - **Specialized Query Preparation**:
   - Simple queries go directly to retrieval.
   - Queries requiring multiple fact targets route to `query_splitter`, which turns stable
@@ -31,6 +31,9 @@ alignment, repairs gaps when needed, and only then produces a grounded answer.
   - **`fast_bm25_late_interaction_retrieval`**: hybrid fusion then ColBERT-style late interaction when Jina is configured.
   The graph uses `fast_bm25_retrieval` by default and switches to
   `fast_bm25_late_interaction_retrieval` when `retrieval_retry_count >= max(0, RETRIEVAL_LOOP_MAX_RETRIES - 2)`.
+  On each repair pass, all four limits scale by multiplier `m = 1 + retrieval_retry_count`, each
+  capped by its `_MAX`: `RETRIEVAL_TOP_K`, `RETRIEVAL_CANDIDATE_DENSE_MMR`,
+  `RETRIEVAL_CANDIDATE_BM25`, and `RETRIEVAL_CANDIDATE_FOR_LATE_INTERACTION`.
 - **Structured turn trace**: Append-only **`message_query`** audit rows across nodes; a terminal
   **`clear_turn_trace`** node resets the trace after each answer using LangGraph **`Overwrite([])`**
   so multi-turn threads do not leak prior-turn diagnostics into the next query.
@@ -81,29 +84,39 @@ the client contract. The current graph does not interrupt for ambiguous queries.
 
 The `Retriever.retrieve(queries, strategy)` branch selects behavior **per request**:
 
-| Strategy | Dense (+MMR if enabled in settings) | BM25 | RRF fusion | Late interaction |
-|----------|-------------------------------------|------|------------|------------------|
-| `fast_retrieval` | yes | no | no | no |
-| `fast_bm25_retrieval` | yes | yes | yes | no |
-| `keyword` | no | yes | no | no |
-| `fast_bm25_late_interaction_retrieval` | yes | yes | yes | yes |
+| Strategy | Dense prefetch | BM25 prefetch | RRF output | ColBERT output |
+|----------|----------------|---------------|------------|----------------|
+| `keyword` | — | — | — | `RETRIEVAL_TOP_K` |
+| `fast_retrieval` | MMR pool `DENSE_MMR×3` if MMR | — | — | `RETRIEVAL_TOP_K` |
+| `fast_bm25_retrieval` | `RETRIEVAL_CANDIDATE_DENSE_MMR` | `RETRIEVAL_CANDIDATE_BM25` | `RETRIEVAL_TOP_K` | — |
+| `fast_bm25_late_interaction_retrieval` | same prefetches | same | `RETRIEVAL_CANDIDATE_FOR_LATE_INTERACTION` | `RETRIEVAL_TOP_K` |
+
+When `USE_MMR=true`, dense retrieval uses an internal MMR candidate pool of
+`RETRIEVAL_CANDIDATE_DENSE_MMR × 3` and returns up to `RETRIEVAL_CANDIDATE_DENSE_MMR` dense hits
+(hybrid path) or `RETRIEVAL_TOP_K` (`fast_retrieval` / `keyword`).
 
 Environment flags **`USE_BM25`**, **`USE_LATE_INTERACTION`**, and **`USE_MMR`** still configure the
 Qdrant client (e.g. cloud inference), embedding/MMR parameters, and Jina availability; the
 **`strategy`** argument chooses which branches run inside `_retrieve_one`. The graph starts with
-`fast_bm25_retrieval`; retry loops deterministically keep that tier until the late-interaction
-threshold, then use `fast_bm25_late_interaction_retrieval`.
+`fast_bm25_retrieval`; retry loops keep that tier until the late-interaction threshold, then upgrade
+to `fast_bm25_late_interaction_retrieval` only when **`USE_LATE_INTERACTION=true`** and **`JINA_API_KEY`**
+is set. Otherwise repair loops stay on hybrid retrieval (limits still scale; ColBERT never runs).
+
+On repair loops, effective limits use multiplier `m = 1 + retrieval_retry_count` on each base limit,
+capped by the matching `_MAX` env var.
 
 For multiple active retrieval queries from `query_splitter`, the retriever runs
-each query concurrently with the same per-request strategy. Each sub-query returns up to
-`RETRIEVAL_TOP_K` hits from Qdrant. Results are merged in query order: deduplicate by Qdrant point id
+each sub-query sequentially with the same per-request strategy. Each sub-query returns up to
+`effective_top_k` hits from Qdrant (base `RETRIEVAL_TOP_K` on the first pass; widens on repair
+loops). Results are merged in query order: deduplicate by Qdrant point id
 (first occurrence wins), then return the combined list. There is no cross-query RRF and no global
 `[:top_k]` cap on the merged result.
 
 Example: `RETRIEVAL_TOP_K=8` with three active queries yields up to 24 documents per retrieval pass
-(fewer if the same point id appears in more than one sub-query list). The graph's `retrieval_node`
-then deduplicates by passage text and appends new rows to `retrieved_documents` (including across
-retry loops in the same user turn).
+on the first try (fewer if the same point id appears in more than one sub-query list). After one
+repair loop (`retrieval_retry_count=1`), each sub-query returns up to 16 hits. The graph's
+`retrieval_node` then deduplicates by passage text and appends new rows to `retrieved_documents`
+(including across retry loops in the same user turn).
 
 ## Environment Configuration
 
@@ -114,9 +127,15 @@ Copy `.env.example` to `.env`. Key flags:
 USE_BM25=true
 USE_LATE_INTERACTION=true
 USE_MMR=true
-RETRIEVAL_CANDIDATE_LIMIT=100
-# Per sub-query; multi-query passes return up to RETRIEVAL_TOP_K × num(active_retrieval_queries) (before id dedup)
+# Final docs per sub-query; repair loops scale all limits × (1 + retry_count)
 RETRIEVAL_TOP_K=8
+RETRIEVAL_TOP_K_MAX=64
+RETRIEVAL_CANDIDATE_DENSE_MMR=100
+RETRIEVAL_CANDIDATE_DENSE_MMR_MAX=500
+RETRIEVAL_CANDIDATE_BM25=100
+RETRIEVAL_CANDIDATE_BM25_MAX=500
+RETRIEVAL_CANDIDATE_FOR_LATE_INTERACTION=100
+RETRIEVAL_CANDIDATE_FOR_LATE_INTERACTION_MAX=500
 
 # Context Management
 MESSAGE_SUMMARY_TOKEN_THRESHOLD=100000
@@ -125,15 +144,14 @@ MESSAGE_SUMMARY_KEEP_RECENT=10
 # Retry Loops
 RETRIEVAL_LOOP_MAX_RETRIES=3
 
-# Node Models
-QUERY_NORMALISATION_MODEL=gpt-4.1-mini
-QUERY_COMPLEXITY_MODEL=gpt-4.1-mini
-RECALL_CHECK_MODEL=gpt-4.1-mini
-INTENT_CHECK_MODEL=gpt-4.1-mini
-FINAL_ANSWER_MODEL=gpt-4.1-mini
-QUERY_DECOMPOSITION_MODEL=gpt-4.1-mini
-GAP_FILL_MODEL=gpt-4.1-mini
-INTENT_CORRECTION_REWRITER_MODEL=gpt-4.1-mini
+# Node Models (one env var per LLM node; query_complexity is deterministic — no model)
+QUERY_NORMALISATION_MODEL=gpt-5-mini          # query_normalisation
+QUERY_DECOMPOSITION_MODEL=gpt-5-mini          # fact_decomposition + query_splitter
+RECALL_CHECK_MODEL=gpt-5.1                    # recall_check
+INTENT_CHECK_MODEL=gpt-5-mini                 # intent_check
+GAP_FILL_MODEL=gpt-5-mini                     # gap_fill
+INTENT_CORRECTION_REWRITER_MODEL=gpt-5-mini   # intent_correction_rewriter
+FINAL_ANSWER_MODEL=gpt-5.1                    # answer + partial_answer
 
 # Observability (when false: no Langfuse spans or network traffic)
 LANGFUSE_TRACING_ENABLED=false
@@ -176,31 +194,40 @@ curl -N -X POST http://127.0.0.1:8000/run/stream \
 
 `/run/stream` returns Server-Sent Events (`text/event-stream`). Each event is a JSON object in a
 `data:` frame. The stream reports graph progress after each node completes; it does not stream final
-answer tokens word by word.
+answer tokens word by word. **Langfuse traces keep full facts and passage text; SSE/UI expose counts
+only** (no `required_facts`, `verified_facts`, or document bodies on the wire).
 
 Example events:
 
 ```text
 data: {"type":"node","node":"query_normalisation","status":"completed","label":"Normalizing query","normalized_query":"Compare the Enterprise refund policy with the Consumer refund policy."}
 
-data: {"type":"node","node":"fact_decomposition","status":"completed","label":"Decomposing required facts","required_fact_count":2,"required_facts":[{"fact":"Enterprise refund policy terms"},{"fact":"Consumer refund policy terms"}]}
+data: {"type":"node","node":"fact_decomposition","status":"completed","label":"Decomposing required facts","required_fact_count":2}
 
-data: {"type":"node","node":"query_complexity","status":"completed","label":"Classifying query complexity","complexity":"needs_split","explanation":"..."}
+data: {"type":"node","node":"query_complexity","status":"completed","label":"Routing by fact count","complexity":"needs_split","explanation":"3 required facts → split retrieval per fact."}
 
 data: {"type":"node","node":"query_splitter","status":"completed","label":"Preparing retrieval queries","active_retrieval_queries":["Enterprise refund policy","Consumer refund policy"]}
 
-data: {"type":"node","node":"retrieval","status":"completed","label":"Retrieving documents","retrieval_strategy":"fast_bm25_retrieval","retrieval_queries":["Enterprise refund policy","Consumer refund policy"],"new_doc_count":8,"retrieved_doc_count":8}
+data: {"type":"node","node":"retrieval","status":"completed","label":"Retrieving documents","retrieval_strategy":"fast_bm25_retrieval","retrieval_queries":["Enterprise refund policy","Consumer refund policy"],"new_doc_count":8,"retrieved_doc_count":8,"retrieval_loop_count":0}
 
-data: {"type":"node","node":"recall_check","status":"completed","label":"Checking recall","recall_sufficient":true,"required_facts":[{"fact":"Enterprise refund policy terms"},{"fact":"Consumer refund policy terms"}],"verified_facts":[{"fact":"Enterprise refund policy terms","verification_status":true,"verification_report":"Retrieved passages state the relevant terms.","evidence_documents":["..."]},{"fact":"Consumer refund policy terms","verification_status":true,"verification_report":"Retrieved passages state the relevant terms.","evidence_documents":["..."]}],"unsupported_facts":[],"unsupported_fact_count":0,"retrieved_doc_count":8,"retrieval_retry_count":0}
+data: {"type":"node","node":"recall_check","status":"completed","label":"Checking recall","recall_sufficient":true,"unsupported_fact_count":0,"retrieved_doc_count":8,"retrieval_loop_count":0}
 
-data: {"type":"final","node":"answer","status":"completed","label":"Answer ready","answer":"...","sources":[],"confidence":"high"}
+data: {"type":"node","node":"retrieval","status":"completed","label":"Retrieving documents","retrieval_strategy":"fast_bm25_retrieval","retrieval_queries":["Enterprise refund policy terms"],"new_doc_count":30,"retrieved_doc_count":41,"retrieval_loop_count":1}
+
+data: {"type":"node","node":"recall_check","status":"completed","label":"Checking recall","recall_sufficient":false,"unsupported_fact_count":3,"retrieved_doc_count":41,"retrieval_loop_count":1}
+
+data: {"type":"node","node":"strategy_upgrade","status":"completed","label":"Evaluating retrieval tier","retrieval_strategy":"fast_bm25_retrieval","retrieval_loop_count":1}
+
+data: {"type":"final","node":"answer","status":"completed","label":"Answer ready","answer":"...","sources":[],"confidence":"high","retrieved_doc_count":41}
 
 data: {"type":"node","node":"clear_turn_trace","status":"completed","label":"Clearing turn trace"}
 
-data: {"type":"done","session_id":"demo-stream","retrieved_doc_count":8}
+data: {"type":"done","session_id":"demo-stream","retrieved_doc_count":41}
 ```
 
 The closing `done` frame includes `retrieved_doc_count` only; document bodies are not sent over SSE.
+`retrieval_loop_count` tracks repair passes (0 on first retrieval/recall; increments after each
+`strategy_upgrade`).
 
 If retry budgets are exhausted, the final event comes from `partial_answer` instead of `answer`.
 Retrieval `node` frames include `new_doc_count` for rows added this pass and
@@ -253,6 +280,11 @@ fast_bm25_retrieval → fast_bm25_late_interaction_retrieval
   |--------|---------|
   | `strategy` | Active `retrieval_strategy` tier for this pass |
   | `queries` | `active_retrieval_queries` used (or fallback from `normalized_query`) |
+  | `retrieval_retry_count` | Repair-loop counter for this pass |
+  | `effective_top_k` | Scaled final per-sub-query limit |
+  | `effective_dense_mmr` | Scaled dense prefetch / MMR target |
+  | `effective_bm25` | Scaled BM25 prefetch limit |
+  | `effective_late_interaction` | Scaled RRF pool before ColBERT |
   | `candidate_doc_count` | Count of compact docs returned this pass before text dedup |
   | `rows_to_add` | Unique `{score, text}` rows appended this pass (after dedup vs prior corpus) |
   | `rows_to_add_count` | Count of rows appended this pass |

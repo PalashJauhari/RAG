@@ -151,7 +151,7 @@ See [`.env.example`](.env.example) for the full template. Groups:
 - **OpenAI**: `OPENAI_API_KEY`, `OPENAI_EMBEDDING_*`, `HOTPOTQA_RAGAS_MODEL`
 - **Qdrant**: `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION_NAME`, vector names
 - **Retrieval flags**: `USE_BM25`, `USE_LATE_INTERACTION`, `USE_MMR` (see table above)
-- **Retrieval tuning**: `RETRIEVAL_TOP_K`, `RETRIEVAL_CANDIDATE_LIMIT`, `RETRIEVAL_MMR_DIVERSITY`, `REQUEST_TIMEOUT_SECONDS`
+- **Retrieval tuning**: `RETRIEVAL_TOP_K`, `RETRIEVAL_CANDIDATE_DENSE_MMR`, `RETRIEVAL_CANDIDATE_BM25`, `RETRIEVAL_CANDIDATE_FOR_LATE_INTERACTION`, `RETRIEVAL_MMR_DIVERSITY`, `REQUEST_TIMEOUT_SECONDS`
 - **Jina**: required for `fast_bm25_late_interaction_retrieval` at upload and retrieval
 - **Dataset**: `HOTPOTQA_MAX_QUESTIONS`, `HOTPOTQA_UPLOAD_BATCH_SIZE`, `HOTPOTQA_DATASET_*`, `HOTPOTQA_SPLIT`
 - **Experiment**: `HOTPOTQA_EXPERIMENT_NAME` → `data/results/{name}/`

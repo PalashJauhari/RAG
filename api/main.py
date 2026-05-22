@@ -111,6 +111,7 @@ def get_stream_event(
     *,
     retrieved_doc_count: int | None = None,
     new_doc_count: int | None = None,
+    retrieval_loop_count: int = 0,
 ) -> dict[str, Any]:
     """Map a LangGraph ``stream_mode='updates'`` chunk to a stable SSE event dict.
 
@@ -158,7 +159,6 @@ def get_stream_event(
         event.update(
             {
                 "label": "Decomposing required facts",
-                "required_facts": required_facts,
                 "required_fact_count": len(required_facts),
             }
         )
@@ -169,7 +169,7 @@ def get_stream_event(
         query_complexity = payload.get("query_complexity") or {}
         event.update(
             {
-                "label": "Classifying query complexity",
+                "label": "Routing by fact count",
                 "complexity": query_complexity.get("complexity"),
                 "explanation": query_complexity.get("explanation"),
             }
@@ -195,6 +195,7 @@ def get_stream_event(
                 "retrieval_queries": payload.get("active_retrieval_queries") or [],
                 "new_doc_count": new_doc_count or 0,
                 "retrieved_doc_count": retrieved_doc_count or 0,
+                "retrieval_loop_count": retrieval_loop_count,
             }
         )
         mq = payload.get("message_query")
@@ -209,24 +210,21 @@ def get_stream_event(
             {
                 "label": "Checking recall",
                 "recall_sufficient": payload.get("recall_sufficient"),
-                "required_facts": payload.get("required_facts") or [],
-                "verified_facts": verified_facts,
-                "unsupported_facts": unsupported_facts,
                 "unsupported_fact_count": len(unsupported_facts),
                 "retrieved_doc_count": retrieved_doc_count or 0,
-                "retrieval_retry_count": payload.get("retrieval_retry_count", 0),
+                "retrieval_loop_count": retrieval_loop_count,
             }
         )
         mq = payload.get("message_query")
         if mq:
             event["message_query_tail"] = _message_query_tail(mq)
     elif node_name == "intent_check":
+        fact_intents = payload.get("fact_intents") or []
         event.update(
             {
                 "label": "Checking intent alignment",
                 "intent_aligned": payload.get("intent_aligned"),
-                "fact_intents": payload.get("fact_intents") or [],
-                "intent_mismatch_details": payload.get("intent_mismatch_details") or [],
+                "fact_intent_count": len(fact_intents),
             }
         )
         mq = payload.get("message_query")
@@ -244,7 +242,7 @@ def get_stream_event(
             {
                 "label": "Evaluating retrieval tier",
                 "retrieval_strategy": payload.get("retrieval_strategy"),
-                "retrieval_retry_count": payload.get("retrieval_retry_count", 0),
+                "retrieval_loop_count": retrieval_loop_count,
             }
         )
         mq = payload.get("message_query")
@@ -386,6 +384,7 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
     async def event_generator():
         # Map each LangGraph stream chunk to SSE; expose counts only to keep UI payloads light.
         retrieved_doc_count = 0
+        retrieval_loop_count = 0
         try:
             async for update in app.state.retrieval_graph.stream_run(
                 request.session_id,
@@ -395,6 +394,10 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
                 if isinstance(update, dict) and update:
                     node_name = next(iter(update))
                     payload = update.get(node_name) or {}
+                    if node_name == "strategy_upgrade":
+                        retrieval_loop_count = int(
+                            payload.get("retrieval_retry_count", retrieval_loop_count)
+                        )
                     if node_name == "retrieval":
                         docs = payload.get("retrieved_documents") or []
                         new_doc_count = len(docs) if isinstance(docs, list) else 0
@@ -405,6 +408,7 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
                         update,
                         retrieved_doc_count=retrieved_doc_count,
                         new_doc_count=new_doc_count,
+                        retrieval_loop_count=retrieval_loop_count,
                     )
                 )
             yield _sse(

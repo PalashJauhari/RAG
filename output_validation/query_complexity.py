@@ -1,4 +1,4 @@
-"""Structured output for ``query_complexity_node`` (prompt: ``prompts/query_complexity.py``).
+"""Routing labels for ``query_complexity_node`` (deterministic fact-count routing).
 
 The ``complexity`` label drives :meth:`~graph.graph.RetrievalGraph.route_after_complexity`.
 """

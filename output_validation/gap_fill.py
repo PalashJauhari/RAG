@@ -4,9 +4,51 @@
 Tier selection is deterministic in the graph.
 """
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from output_validation.fact_decomposition import validate_unique_fact_texts
+
+
+def ensure_three_search_queries(fact: str, queries: list[str]) -> list[str]:
+    """Return exactly three unique non-empty queries, padding from ``fact`` when the LLM under-fills."""
+
+    fact = fact.strip()
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for query in queries:
+        cleaned = query.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        normalized.append(cleaned)
+        seen.add(cleaned)
+
+    if len(normalized) >= 3:
+        return normalized[:3]
+
+    fallbacks = [
+        fact,
+        f"{fact} documents passages" if fact else "",
+        f"{fact} keyword search" if fact else "",
+    ]
+    for candidate in fallbacks:
+        if len(normalized) >= 3:
+            break
+        candidate = candidate.strip()
+        if candidate and candidate not in seen:
+            normalized.append(candidate)
+            seen.add(candidate)
+
+    suffix = 1
+    while len(normalized) < 3:
+        base = normalized[0] if normalized else fact or "retrieval query"
+        candidate = f"{base} alternate phrasing {suffix}"
+        suffix += 1
+        if candidate in seen:
+            continue
+        normalized.append(candidate)
+        seen.add(candidate)
+
+    return normalized[:3]
 
 
 class FactSearchQueries(BaseModel):
@@ -18,20 +60,14 @@ class FactSearchQueries(BaseModel):
         description="Exactly three focused, self-contained retrieval queries.",
     )
 
-    @field_validator("search_queries")
-    @classmethod
-    def validate_three_queries(cls, value: list[str]) -> list[str]:
-        queries = [query.strip() for query in value if query and query.strip()]
-        if len(queries) != 3:
-            raise ValueError("search_queries must contain exactly three non-empty queries")
-        return queries
-
     @model_validator(mode="after")
-    def validate_fact(self) -> "FactSearchQueries":
+    def validate_fact_and_queries(self) -> "FactSearchQueries":
         fact = self.fact.strip()
         if not fact:
             raise ValueError("fact must be a non-empty string")
-        return self.model_copy(update={"fact": fact})
+        self.fact = fact
+        self.search_queries = ensure_three_search_queries(fact, self.search_queries)
+        return self
 
 
 class GapFillResult(BaseModel):

@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import operator
 import re
-from typing import Annotated, Any, AsyncIterator, TypedDict
+from typing import Annotated, Any, AsyncIterator, NamedTuple, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph, add_messages
@@ -46,7 +46,6 @@ from output_validation.intent_check import IntentCheckResult
 from output_validation.intent_correction_rewriter import IntentCorrectionRewriteResult
 from output_validation.recall_check import RecallVerifyResult
 from output_validation.message_query_entry import MessageQueryEntry
-from output_validation.query_complexity import QueryComplexityResult
 from output_validation.query_normalisation import QueryNormalisationResult
 from output_validation.query_splitter import QuerySplitResult
 from output_validation.retrieval_strategy import RetrievalStrategy
@@ -59,7 +58,6 @@ from prompts.intent_correction_rewriter import (
 from prompts.fact_decomposition import SYSTEM_PROMPT as FACT_DECOMPOSITION_PROMPT
 from prompts.recall_check import VERIFY_SYSTEM_PROMPT
 from prompts.partial_answer import SYSTEM_PROMPT as PARTIAL_ANSWER_PROMPT
-from prompts.query_complexity import SYSTEM_PROMPT as QUERY_COMPLEXITY_PROMPT
 from prompts.query_normalisation import SYSTEM_PROMPT as QUERY_NORMALISATION_PROMPT
 from prompts.query_splitter import SYSTEM_PROMPT as QUERY_SPLITTER_PROMPT
 from retriever.retriever import Retriever
@@ -127,6 +125,65 @@ def fact_texts(rows: list[dict[str, Any]]) -> list[str]:
     """Extract non-empty fact strings from list-shaped fact payloads."""
 
     return [str(row.get("fact") or "").strip() for row in rows if str(row.get("fact") or "").strip()]
+
+
+def complexity_from_required_facts(required_facts: list[dict[str, Any]]) -> dict[str, str]:
+    """Deterministic routing label from stable fact count."""
+
+    fact_count = len(required_facts)
+    if fact_count > 1:
+        return {
+            "complexity": "needs_split",
+            "explanation": f"{fact_count} required facts → split retrieval per fact.",
+        }
+    return {
+        "complexity": "simple_query",
+        "explanation": "Single required fact (or none) → retrieve with normalized query.",
+    }
+
+
+class RetrievalLimits(NamedTuple):
+    """Per-pass retrieval limits after repair-loop scaling."""
+
+    top_k: int
+    dense_mmr: int
+    bm25: int
+    late_interaction: int
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "effective_top_k": self.top_k,
+            "effective_dense_mmr": self.dense_mmr,
+            "effective_bm25": self.bm25,
+            "effective_late_interaction": self.late_interaction,
+        }
+
+
+def effective_retrieval_limits(retry_count: int) -> RetrievalLimits:
+    """Scale all retrieval limits by ``1 + retry_count``, each capped by its max setting."""
+
+    multiplier = 1 + max(0, retry_count)
+    return RetrievalLimits(
+        top_k=min(settings.retrieval_top_k * multiplier, settings.retrieval_top_k_max),
+        dense_mmr=min(
+            settings.retrieval_candidate_dense_mmr * multiplier,
+            settings.retrieval_candidate_dense_mmr_max,
+        ),
+        bm25=min(
+            settings.retrieval_candidate_bm25 * multiplier,
+            settings.retrieval_candidate_bm25_max,
+        ),
+        late_interaction=min(
+            settings.retrieval_candidate_for_late_interaction * multiplier,
+            settings.retrieval_candidate_for_late_interaction_max,
+        ),
+    )
+
+
+def late_interaction_enabled() -> bool:
+    """True when ColBERT late-interaction retrieval is configured and allowed."""
+
+    return settings.use_late_interaction and bool(settings.jina_api_key.strip())
 
 
 def build_node_ai_message(
@@ -288,7 +345,7 @@ class RetrievalGraph:
         return merge
 
     async def query_complexity_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Classify complexity and seed queries for the simple path.
+        """Route by fact count and seed queries for the simple path.
 
         Reads: ``normalized_query`` and stable ``required_facts``.
         Writes: ``query_complexity``, ``active_retrieval_queries``.
@@ -297,41 +354,21 @@ class RetrievalGraph:
 
         normalized_query = str(state.get("normalized_query") or "").strip()
         required_facts = state.get("required_facts") or []
-        llm = get_llm_client(
-            model=settings.query_complexity_model,
-            output_schema=QueryComplexityResult,
-            include_raw=True,
-        )
-        context = (
-            f"## Normalized query\n{normalized_query}\n\n"
-            "## Required facts\n"
-            f"{json.dumps(required_facts, ensure_ascii=False)}"
-        )
-        messages_for_llm = [
-            SystemMessage(content=QUERY_COMPLEXITY_PROMPT),
-            HumanMessage(content=context),
-        ]
-        model = settings.query_complexity_model
+        output = complexity_from_required_facts(required_facts)
+        fact_count = len(required_facts)
+
         if settings.langfuse_tracing_enabled:
             langfuse = get_langfuse_client()
             with langfuse.start_as_current_observation(as_type="span", name="query_complexity") as node_span:
-                with langfuse.start_as_current_observation(as_type="generation", name="query_complexity-llm", model=model) as gen:
-                    result = await llm.ainvoke(messages_for_llm)
-                    update_llm_generation(gen, model=model, raw=result.get("raw"))
-                response = result["parsed"]
-                output = response.model_dump()
                 node_span.update(
                     output={
                         "complexity": output["complexity"],
+                        "explanation": output["explanation"],
                         "required_facts": required_facts,
+                        "fact_count": fact_count,
                     }
                 )
-        else:
-            result = await llm.ainvoke(messages_for_llm)
-            response = result["parsed"]
-            output = response.model_dump()
 
-        # Seed retrieval state for the simple path (complexity → retrieval with no splitter).
         merge = {
             "query_complexity": output,
             "retrieval_strategy": "fast_bm25_retrieval",
@@ -341,8 +378,8 @@ class RetrievalGraph:
             trace_row(
                 "query_complexity",
                 "complexity",
-                {"complexity": output["complexity"]},
-                notes=output.get("explanation"),
+                {"complexity": output["complexity"], "fact_count": fact_count},
+                notes=output["explanation"],
             )
         )
         return merge
@@ -412,6 +449,8 @@ class RetrievalGraph:
         raw_strategy = str(state.get("retrieval_strategy") or "").strip()
         # Unknown or empty tier → safe hybrid default for this pass.
         strategy: RetrievalStrategy = raw_strategy if raw_strategy in {"fast_retrieval", "fast_bm25_retrieval", "keyword", "fast_bm25_late_interaction_retrieval"} else "fast_bm25_retrieval"
+        if strategy == "fast_bm25_late_interaction_retrieval" and not late_interaction_enabled():
+            strategy = "fast_bm25_retrieval"
 
         search_queries = [
             query.strip()
@@ -422,10 +461,20 @@ class RetrievalGraph:
             fallback = str(state.get("normalized_query") or "").strip()
             search_queries = [fallback] if fallback else []
 
+        retry_count = state.get("retrieval_retry_count", 0)
+        limits = effective_retrieval_limits(retry_count)
+
         if settings.langfuse_tracing_enabled:
             langfuse = get_langfuse_client()
             with langfuse.start_as_current_observation(as_type="span", name="retrieval") as node_span:
-                ranked_hits = await self.retriever.retrieve(search_queries, strategy=strategy)
+                ranked_hits = await self.retriever.retrieve(
+                    search_queries,
+                    strategy=strategy,
+                    top_k=limits.top_k,
+                    dense_mmr_limit=limits.dense_mmr,
+                    bm25_limit=limits.bm25,
+                    late_interaction_limit=limits.late_interaction,
+                )
                 compact_document_rows = compact_hotqa_documents_for_llm(ranked_hits)
                 accumulated = list(state.get("retrieved_documents") or [])
                 # Dedup by passage text so retries and multi-query fusion do not duplicate corpus rows.
@@ -437,19 +486,31 @@ class RetrievalGraph:
                         continue
                     rows_to_add.append(row)
                     seen_texts.add(text)
+                corpus_after = accumulated + rows_to_add
                 node_span.update(
                     output={
                         "strategy": strategy,
                         "queries": search_queries,
+                        "retrieval_retry_count": retry_count,
+                        "late_interaction_enabled": late_interaction_enabled(),
+                        **limits.as_dict(),
                         "candidate_doc_count": len(compact_document_rows),
                         "rows_to_add": rows_to_add,
                         "rows_to_add_count": len(rows_to_add),
                         "corpus_size_before": len(accumulated),
-                        "corpus_size_after": len(accumulated) + len(rows_to_add),
+                        "corpus_size_after": len(corpus_after),
+                        "retrieved_documents": corpus_after,
                     }
                 )
         else:
-            ranked_hits = await self.retriever.retrieve(search_queries, strategy=strategy)
+            ranked_hits = await self.retriever.retrieve(
+                search_queries,
+                strategy=strategy,
+                top_k=limits.top_k,
+                dense_mmr_limit=limits.dense_mmr,
+                bm25_limit=limits.bm25,
+                late_interaction_limit=limits.late_interaction,
+            )
             compact_document_rows = compact_hotqa_documents_for_llm(ranked_hits)
             accumulated = list(state.get("retrieved_documents") or [])
             seen_texts = {doc.get("text") for doc in accumulated if doc.get("text") is not None}
@@ -473,6 +534,8 @@ class RetrievalGraph:
                 {
                     "queries": search_queries,
                     "strategy": strategy,
+                    "retrieval_retry_count": retry_count,
+                    **limits.as_dict(),
                     "rows_to_add_count": len(rows_to_add),
                     "corpus_size_after": len(accumulated) + len(rows_to_add),
                 },
@@ -834,11 +897,13 @@ class RetrievalGraph:
 
         retry_count = state.get("retrieval_retry_count", 0) + 1
         late_threshold = max(0, settings.retrieval_loop_max_retries - 2)
+        late_enabled = late_interaction_enabled()
         strategy: RetrievalStrategy = (
             "fast_bm25_late_interaction_retrieval"
-            if retry_count >= late_threshold
+            if late_enabled and retry_count >= late_threshold
             else "fast_bm25_retrieval"
         )
+        limits = effective_retrieval_limits(retry_count)
 
         if settings.langfuse_tracing_enabled:
             langfuse = get_langfuse_client()
@@ -848,6 +913,8 @@ class RetrievalGraph:
                         "retrieval_strategy": strategy,
                         "retrieval_retry_count": retry_count,
                         "late_threshold": late_threshold,
+                        "late_interaction_enabled": late_enabled,
+                        **limits.as_dict(),
                     }
                 )
 
@@ -863,8 +930,14 @@ class RetrievalGraph:
                     "retrieval_strategy": strategy,
                     "retrieval_retry_count": retry_count,
                     "late_threshold": late_threshold,
+                    "late_interaction_enabled": late_enabled,
+                    **limits.as_dict(),
                 },
-                notes="Deterministic retrieval tier selected from retry count.",
+                notes=(
+                    f"Retry {retry_count}: {strategy}; "
+                    f"top_k={limits.top_k}, dense_mmr={limits.dense_mmr}, "
+                    f"bm25={limits.bm25}, late={limits.late_interaction}."
+                ),
             )
         )
         return merge

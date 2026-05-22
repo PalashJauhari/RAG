@@ -20,6 +20,11 @@ function truncate(s, maxLen) {
   return s.slice(0, maxLen - 1) + "…";
 }
 
+function loopSuffix(ev) {
+  const n = ev.retrieval_loop_count ?? ev.retrieval_retry_count;
+  return n != null ? " · loop " + n : "";
+}
+
 /** Bold segment is the LangGraph node id (``ev.node``); rest is detail text. */
 function progressBoldRest(ev) {
   if (!ev || typeof ev !== "object") return { bold: "event", rest: " — " + String(ev) };
@@ -52,25 +57,22 @@ function progressBoldRest(ev) {
     const strat = ev.retrieval_strategy ? " · " + ev.retrieval_strategy : "";
     const n = ev.retrieved_doc_count != null ? " (" + ev.retrieved_doc_count + " docs)" : "";
     const add = ev.new_doc_count > 0 ? " +" + ev.new_doc_count : "";
-    const q = (ev.retrieval_queries || []).join(" · ");
-    return { bold: boldName, rest: strat + n + add + (q ? " — " + truncate(q, 160) : "") };
+    return { bold: boldName, rest: strat + n + add + loopSuffix(ev) };
   }
   if (node === "recall_check") {
     const ok = ev.recall_sufficient ? "sufficient" : "insufficient";
     const unsupported = ev.unsupported_fact_count || 0;
     const docs = ev.retrieved_doc_count != null ? " · " + ev.retrieved_doc_count + " docs" : "";
-    const rc = ev.retrieval_retry_count != null ? " · retry " + ev.retrieval_retry_count : "";
-    return { bold: boldName, rest: ": " + ok + docs + (unsupported ? " · " + unsupported + " unsupported" : "") + rc };
+    return { bold: boldName, rest: ": " + ok + docs + (unsupported ? " · " + unsupported + " unsupported" : "") + loopSuffix(ev) };
   }
   if (node === "intent_check") {
     const ia = ev.intent_aligned ? "aligned" : "misaligned";
-    const n = ev.fact_intents ? ev.fact_intents.length : 0;
+    const n = ev.fact_intent_count != null ? ev.fact_intent_count : (ev.fact_intents ? ev.fact_intents.length : 0);
     return { bold: boldName, rest: ": " + ia + (n ? " · " + n + " facts" : "") };
   }
   if (node === "strategy_upgrade") {
     const rs = ev.retrieval_strategy ? " · " + ev.retrieval_strategy : "";
-    const rc = ev.retrieval_retry_count != null ? " · retry " + ev.retrieval_retry_count : "";
-    return { bold: boldName, rest: "deterministic" + rs + rc };
+    return { bold: boldName, rest: "deterministic" + rs + loopSuffix(ev) };
   }
   if (node === "query_splitter") {
     const pq = (ev.active_retrieval_queries || []).join(" · ");
