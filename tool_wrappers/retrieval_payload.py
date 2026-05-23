@@ -1,6 +1,6 @@
 """Compact retriever results for graph state and LLM prompts.
 
-Strips Qdrant payload metadata so evaluator/answer nodes see only ``score`` and ``text``.
+Strips Qdrant payload metadata so recall/answer nodes see only ``score`` and ``text``.
 Source citation wiring is deferred; extend here when ``sources`` are populated.
 """
 
@@ -11,7 +11,7 @@ from typing import Any
 
 def compact_hotqa_documents_for_llm(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
-    Reduce retriever docs to the fields currently consumed by evaluator/answer prompts.
+    Reduce retriever docs to the fields currently consumed by recall/answer prompts.
 
     Source metadata is intentionally left out for now; only score and text are exposed.
     """

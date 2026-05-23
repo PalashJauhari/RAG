@@ -65,7 +65,9 @@ flowchart TB
     JSON["hotpotqa_eval.json"]
     Upload["qdrant_upload.upload"]
     Qdrant[(Qdrant collection)]
-    HF --> Prep --> JSON --> Upload --> Qdrant
+    HF --> Prep
+    Prep -->|"parallel LLM enrichment"| JSON
+    JSON --> Upload --> Qdrant
   end
   subgraph run [Per experiment]
     Bench["run_benchmark --strategy"]
@@ -114,8 +116,8 @@ python -m benchmarking.hotpotqa.run_benchmark --strategy fast_retrieval --skip-r
 
 | Step | Command | What it does | Output |
 |------|---------|--------------|--------|
-| 1 | `python -m benchmarking.hotpotqa.dataset.prepare_eval_data` | Loads full HF validation split, optionally subsamples, normalizes contexts | `data/processed/hotpotqa_eval.json` |
-| 2 | `python -m benchmarking.hotpotqa.qdrant_upload.upload` | **Deletes** `QDRANT_COLLECTION_NAME` if it exists, recreates it, embeds every paragraph in the JSON, upserts | Fresh points in `QDRANT_COLLECTION_NAME` |
+| 1 | `python -m benchmarking.hotpotqa.dataset.prepare_eval_data` | Loads HF validation, subsamples, joins sentences into `text`, **LLM-enriches each context** | `data/processed/hotpotqa_eval.json` |
+| 2 | `python -m benchmarking.hotpotqa.qdrant_upload.upload` | **Deletes** `QDRANT_COLLECTION_NAME` if it exists, recreates it, embeds prefixed text, upserts | Fresh points in `QDRANT_COLLECTION_NAME` |
 | 3 | `python -m benchmarking.hotpotqa.run_benchmark --strategy <literal>` | Retrieve → RAGAS → report | `data/results/{experiment}/` |
 
 ### `HOTPOTQA_MAX_QUESTIONS` (where it applies)
@@ -127,6 +129,49 @@ python -m benchmarking.hotpotqa.run_benchmark --strategy fast_retrieval --skip-r
 | `run_retrieval_eval` / `ragas_metrics` | **Yes** — caps rows to first N in JSON (safety if JSON is larger than intended) |
 
 After changing `HOTPOTQA_MAX_QUESTIONS`, re-run **prepare**, then **upload** (upload always rebuilds the collection from the current JSON).
+
+### Context enrichment (prepare step)
+
+For each context, `text` is all non-empty `sentences` joined with spaces. Prepare then calls the LLM once per context (~5k calls for 500 questions × ~10 contexts) using `HOTPOTQA_CONTEXT_ENRICHMENT_MODEL` (default `gpt-4o-mini`), parallelized with `HOTPOTQA_ENRICHMENT_CONCURRENCY`.
+
+**Enrichment JSON** (stored on each context):
+
+```json
+{
+  "predicted_title": "...",
+  "summary": "two lines",
+  "keywords": ["entities", "dates", "other terms"],
+  "facts": [{ "fact": "checkable need", "fact_question": "searchable query" }]
+}
+```
+
+- `predicted_title` is for analysis only — **not** used in embedding prefix.
+- `keywords`: named entities plus other high-signal retrieval terms.
+- On failure after `HOTPOTQA_ENRICHMENT_MAX_RETRIES`, `enrichment` is `null`; upload embeds raw `text` only.
+
+**Upload embedding prefix** (`build_embedding_text`) — same string for dense, BM25, and ColBERT:
+
+```text
+Title:
+{gold HotpotQA title}
+
+Summary:
+{summary}
+
+Present Facts:
+- {fact}
+
+Sample Query Questions:
+- {fact_question}
+
+Keywords:
+{comma-separated keywords}
+
+Passage:
+{text}
+```
+
+Re-running prepare always re-enriches; re-run upload after prepare to refresh vectors.
 
 ### Step 3 breakdown (debugging)
 
@@ -146,15 +191,19 @@ python -m benchmarking.hotpotqa.metrics.build_report
 
 ## Environment variables
 
-See [`.env.example`](.env.example) for the full template. Groups:
+See [`.env.example`](.env.example) for the **standalone** template (copy to `benchmarking/hotpotqa/.env` only — do not use repo root `.env`). Groups:
 
-- **OpenAI**: `OPENAI_API_KEY`, `OPENAI_EMBEDDING_*`, `HOTPOTQA_RAGAS_MODEL`
+- **OpenAI**: `OPENAI_API_KEY`, `OPENAI_EMBEDDING_*`, `OPENAI_TEMPERATURE`
+- **Context enrichment**: `HOTPOTQA_CONTEXT_ENRICHMENT_MODEL`, `HOTPOTQA_ENRICHMENT_CONCURRENCY`, `HOTPOTQA_ENRICHMENT_MAX_RETRIES`
+- **RAGAS**: `HOTPOTQA_RAGAS_MODEL`
 - **Qdrant**: `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION_NAME`, vector names
 - **Retrieval flags**: `USE_BM25`, `USE_LATE_INTERACTION`, `USE_MMR` (see table above)
-- **Retrieval tuning**: `RETRIEVAL_TOP_K`, `RETRIEVAL_CANDIDATE_LIMIT`, `RETRIEVAL_MMR_DIVERSITY`, `REQUEST_TIMEOUT_SECONDS`
+- **Retrieval tuning**: `RETRIEVAL_TOP_K`, `RETRIEVAL_CANDIDATE_DENSE_MMR`, `RETRIEVAL_CANDIDATE_BM25`, `RETRIEVAL_CANDIDATE_FOR_LATE_INTERACTION`, `RETRIEVAL_MMR_DIVERSITY`, `REQUEST_TIMEOUT_SECONDS` (no repair-loop `_MAX` vars)
 - **Jina**: required for `fast_bm25_late_interaction_retrieval` at upload and retrieval
 - **Dataset**: `HOTPOTQA_MAX_QUESTIONS`, `HOTPOTQA_UPLOAD_BATCH_SIZE`, `HOTPOTQA_DATASET_*`, `HOTPOTQA_SPLIT`
 - **Experiment**: `HOTPOTQA_EXPERIMENT_NAME` → `data/results/{name}/`
+- **Rate limiting**: `OPENAI_RATE_LIMIT_*`
+- **Langfuse** (optional): `LANGFUSE_TRACING_ENABLED`, keys, host
 
 CLI overrides: `--experiment-name` on `run_benchmark`; `--skip-ragas` to skip RAGAS only.
 

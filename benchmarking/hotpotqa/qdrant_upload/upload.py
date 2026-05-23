@@ -2,7 +2,8 @@
 
 If ``QDRANT_COLLECTION_NAME`` already exists, deletes it and creates a fresh collection.
 Point ids are stable ``uuid5`` hashes of ``context_id``. Embeds dense, optional BM25
-document vectors, and optional ColBERT document vectors per batch.
+document vectors, and optional ColBERT document vectors per batch using prefixed
+embedding text when ``enrichment`` is present.
 
 Run: ``python -m benchmarking.hotpotqa.qdrant_upload.upload``
 """
@@ -13,12 +14,14 @@ import uuid
 
 from qdrant_client import models
 
+from benchmarking.hotpotqa.embed_text import build_embedding_text
 from benchmarking.hotpotqa.settings import HotpotQASettings
 from retriever.retriever import Retriever
 
 
 async def recreate_collection(retriever: Retriever) -> None:
-    """Delete existing collection (if any), then create with current vector config."""
+    """Delete existing collection with the same name, then create a fresh one."""
+
     settings = retriever.config
     name = settings.qdrant_collection_name
     if await retriever.qdrant.collection_exists(name):
@@ -68,12 +71,13 @@ async def main() -> None:
     for record in records:
         for context in record["contexts"]:
             if context["text"]:
+                embedding_text = build_embedding_text(context)
                 docs.append(
                     {
                         "point_id": str(
                             uuid.uuid5(uuid.NAMESPACE_URL, context["context_id"])
                         ),
-                        "text": context["text"],
+                        "embedding_text": embedding_text,
                         "payload": {
                             "benchmark": "hotpotqa",
                             "question_id": record["id"],
@@ -82,17 +86,18 @@ async def main() -> None:
                             "context_id": context["context_id"],
                             "title": context["title"],
                             "text": context["text"],
+                            "enrichment": context.get("enrichment"),
+                            "embedding_text": embedding_text,
                             "is_supporting": context["is_supporting"],
                             "supporting_sentence_ids": context["supporting_sentence_ids"],
                         },
                     }
                 )
 
-    # --- Batched upsert: dense + optional BM25 document + optional ColBERT ---
     batch_size = settings.hotpotqa_upload_batch_size
     for start in range(0, len(docs), batch_size):
         batch = docs[start : start + batch_size]
-        texts = [doc["text"] for doc in batch]
+        texts = [doc["embedding_text"] for doc in batch]
         dense_vectors = await retriever.create_dense_embeddings(texts)
         colbert_vectors = None
         if settings.use_late_interaction:
@@ -103,10 +108,11 @@ async def main() -> None:
 
         points = []
         for index, doc in enumerate(batch):
+            embed_input = doc["embedding_text"]
             vector = {settings.qdrant_dense_vector_name: dense_vectors[index]}
             if settings.use_bm25:
                 vector[settings.qdrant_bm25_vector_name] = models.Document(
-                    text=doc["text"],
+                    text=embed_input,
                     model=settings.qdrant_bm25_model,
                 )
             if settings.use_late_interaction and colbert_vectors:
@@ -126,6 +132,8 @@ async def main() -> None:
             wait=True,
         )
         print(f"Uploaded {min(start + batch_size, len(docs))}/{len(docs)} points")
+
+    await retriever.qdrant.close()
 
 
 if __name__ == "__main__":

@@ -20,6 +20,11 @@ function truncate(s, maxLen) {
   return s.slice(0, maxLen - 1) + "…";
 }
 
+function loopSuffix(ev) {
+  const n = ev.retrieval_loop_count ?? ev.retrieval_retry_count;
+  return n != null ? " · loop " + n : "";
+}
+
 /** Bold segment is the LangGraph node id (``ev.node``); rest is detail text. */
 function progressBoldRest(ev) {
   if (!ev || typeof ev !== "object") return { bold: "event", rest: " — " + String(ev) };
@@ -41,31 +46,35 @@ function progressBoldRest(ev) {
   }
   if (node === "query_complexity") {
     const c = ev.complexity || "";
-    const rs = ev.retrieval_strategy ? " · " + ev.retrieval_strategy : "";
     const ex = ev.explanation ? " — " + truncate(ev.explanation, 120) : "";
-    return { bold: boldName, rest: (c ? ": " + c : "") + rs + ex };
+    return { bold: boldName, rest: (c ? ": " + c : "") + ex };
+  }
+  if (node === "fact_decomposition") {
+    const n = ev.required_fact_count || 0;
+    return { bold: boldName, rest: n ? " (" + n + " facts)" : "" };
   }
   if (node === "retrieval") {
     const strat = ev.retrieval_strategy ? " · " + ev.retrieval_strategy : "";
     const n = ev.retrieved_doc_count != null ? " (" + ev.retrieved_doc_count + " docs)" : "";
-    const q = (ev.retrieval_queries || []).join(" · ");
-    const newDocs = ev.new_retrieved_documents || [];
-    const preview =
-      newDocs.length > 0 && newDocs[0].text
-        ? " — " + truncate(newDocs[0].text, 120)
-        : "";
-    return { bold: boldName, rest: strat + n + (q ? " — " + truncate(q, 160) : "") + preview };
+    const add = ev.new_doc_count > 0 ? " +" + ev.new_doc_count : "";
+    return { bold: boldName, rest: strat + n + add + loopSuffix(ev) };
   }
-  if (node === "information_evaluator") {
-    const st = ev.evaluation_status || "";
-    const nu = ev.next_retrieval_strategy ? " → " + ev.next_retrieval_strategy : "";
-    const su =
-      ev.strategy_upgrade_retry_count != null
-        ? " · upg " + ev.strategy_upgrade_retry_count
-        : "";
-    return { bold: boldName, rest: (st ? ": " + st : "") + nu + su };
+  if (node === "recall_check") {
+    const ok = ev.recall_sufficient ? "sufficient" : "insufficient";
+    const unsupported = ev.unsupported_fact_count || 0;
+    const docs = ev.retrieved_doc_count != null ? " · " + ev.retrieved_doc_count + " docs" : "";
+    return { bold: boldName, rest: ": " + ok + docs + (unsupported ? " · " + unsupported + " unsupported" : "") + loopSuffix(ev) };
   }
-  if (["query_splitter", "query_expansion", "query_rewriter"].indexOf(node) !== -1) {
+  if (node === "intent_check") {
+    const ia = ev.intent_aligned ? "aligned" : "misaligned";
+    const n = ev.fact_intent_count != null ? ev.fact_intent_count : (ev.fact_intents ? ev.fact_intents.length : 0);
+    return { bold: boldName, rest: ": " + ia + (n ? " · " + n + " facts" : "") };
+  }
+  if (node === "strategy_upgrade") {
+    const rs = ev.retrieval_strategy ? " · " + ev.retrieval_strategy : "";
+    return { bold: boldName, rest: "deterministic" + rs + loopSuffix(ev) };
+  }
+  if (node === "query_splitter") {
     const pq = (ev.active_retrieval_queries || []).join(" · ");
     return { bold: boldName, rest: pq ? " — " + truncate(pq, 180) : "" };
   }
@@ -106,7 +115,7 @@ async function parseSSEStream(response, progressEl) {
   const decoder = new TextDecoder();
   let buffer = "";
   let finalPayload = null;
-  let retrievedDocs = [];
+  let retrievedDocCount = 0;
   while (true) {
     const chunk = await reader.read();
     if (chunk.done) break;
@@ -129,8 +138,8 @@ async function parseSSEStream(response, progressEl) {
           continue;
         }
         if (payload.type === "final") finalPayload = payload;
-        if (payload.type === "done" && payload.retrieved_docs)
-          retrievedDocs = payload.retrieved_docs;
+        if (payload.type === "done" && payload.retrieved_doc_count != null)
+          retrievedDocCount = payload.retrieved_doc_count;
         if (payload.type === "error") {
           const pr = progressBoldRest(payload);
           appendProgressBold(progressEl, pr.bold, pr.rest);
@@ -145,7 +154,7 @@ async function parseSSEStream(response, progressEl) {
       }
     }
   }
-  return { finalPayload: finalPayload, retrievedDocs: retrievedDocs };
+  return { finalPayload: finalPayload, retrievedDocCount: retrievedDocCount };
 }
 
 function clockNowMs() {
@@ -261,7 +270,7 @@ window.dash_clientside.rag_ui.submit_message = async function (
       throw new Error(errText || r.statusText);
     }
 
-    const { finalPayload, retrievedDocs } = await parseSSEStream(r, progressEl);
+    const { finalPayload, retrievedDocCount } = await parseSSEStream(r, progressEl);
     var elapsedStream = clockNowMs() - startStream;
 
     if (!finalPayload) {
@@ -279,8 +288,9 @@ window.dash_clientside.rag_ui.submit_message = async function (
     const sources = finalPayload.sources || [];
     if (sources.length)
       content += "\n\nSources: " + sources.map(String).join(", ");
-    if (retrievedDocs.length)
-      content += "\n\nRetrieved " + retrievedDocs.length + " passages.";
+    const finalDocCount =
+      retrievedDocCount || finalPayload.retrieved_doc_count || 0;
+    if (finalDocCount) content += "\n\nRetrieved " + finalDocCount + " passages.";
     content = appendTimeTakenFooter(content, elapsedStream);
     chat.push({ role: "assistant", content: content });
     return [chat, false, "", ""];

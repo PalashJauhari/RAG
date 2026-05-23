@@ -46,7 +46,9 @@ def _env_snapshot(settings: HotpotQASettings) -> dict[str, Any]:
         "use_late_interaction": settings.use_late_interaction,
         "use_mmr": settings.use_mmr,
         "retrieval_top_k": settings.retrieval_top_k,
-        "retrieval_candidate_limit": settings.retrieval_candidate_limit,
+        "retrieval_candidate_dense_mmr": settings.retrieval_candidate_dense_mmr,
+        "retrieval_candidate_bm25": settings.retrieval_candidate_bm25,
+        "retrieval_candidate_for_late_interaction": settings.retrieval_candidate_for_late_interaction,
         "qdrant_collection_name": settings.qdrant_collection_name,
     }
 

@@ -1,12 +1,21 @@
 """Langfuse tracing for the RAG graph.
 
 One root span per ``run`` / ``stream_run`` / ``resume``; inline node spans and nested
-``{node}-llm`` generation spans (token counts + model only on generations). Gated by
+``{node}-llm`` generation spans: ``model`` plus input/output token counts on ``update``. Gated by
 ``LANGFUSE_TRACING_ENABLED`` in :mod:`config.settings`. No ``CallbackHandler`` or ``@observe``.
 
-**Retrieval span** (``retrieval_node`` in :mod:`graph.graph`): ``output`` includes
-``strategy``, ``queries``, ``new_doc_count``, ``rows_to_add`` (unique docs appended this pass),
-and ``retrieved_documents`` (full accumulated corpus after merge). Passage text can be large.
+**Fact / recall / intent spans**: ``fact_decomposition`` logs the normalized query and stable
+``required_facts`` before retrieval. ``query_complexity`` is deterministic (fact-count routing; no
+LLM span). ``recall_check`` verifies those facts only and logs ``verified_facts``, derived
+unsupported facts, and the full accumulated ``retrieved_documents`` used for the decision. Repair
+spans log their full parsed per-fact outputs. ``strategy_upgrade`` logs deterministic
+``retrieval_strategy``, ``retrieval_retry_count``, and the next pass effective limits
+(``effective_top_k``, ``effective_dense_mmr``, ``effective_bm25``, ``effective_late_interaction``).
+
+**Retrieval span** (``retrieval_node`` in :mod:`graph.graph`): ``output`` includes ``strategy``,
+``queries``, ``retrieval_retry_count``, ``late_interaction_enabled``, the four effective limit fields,
+candidate count, ``rows_to_add`` (unique docs appended this pass), full accumulated
+``retrieved_documents`` after the pass (untruncated passage text), and before/after corpus sizes.
 """
 
 from __future__ import annotations
@@ -58,10 +67,7 @@ def flush_langfuse() -> None:
 
 
 def llm_token_counts(raw: AIMessage | None) -> tuple[int | None, int | None]:
-    """Return ``(input_tokens, output_tokens)`` from LangChain ``usage_metadata``.
-
-    Used for generation-span ``update(input=..., output=...)`` (token counts only).
-    """
+    """Return ``(input_tokens, output_tokens)`` from LangChain ``usage_metadata``."""
     if raw is None:
         return None, None
     usage = getattr(raw, "usage_metadata", None) or {}
@@ -72,3 +78,15 @@ def llm_token_counts(raw: AIMessage | None) -> tuple[int | None, int | None]:
     in_val = int(input_tokens) if input_tokens is not None else None
     out_val = int(output_tokens) if output_tokens is not None else None
     return in_val, out_val
+
+
+def update_llm_generation(observation: Any, *, model: str, raw: AIMessage | None) -> None:
+    """Finish a Langfuse generation span with model id and token counts.
+
+    Args:
+        observation: Open ``generation`` context from ``start_as_current_observation``.
+        model: Settings model id for this node (also passed at span creation).
+        raw: LangChain ``AIMessage`` from structured ``ainvoke`` (``include_raw=True``).
+    """
+    in_tok, out_tok = llm_token_counts(raw)
+    observation.update(model=model, input=in_tok, output=out_tok)

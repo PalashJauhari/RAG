@@ -19,15 +19,13 @@ class Settings(BaseSettings):
     openai_temperature: float = 0
 
     # --- Per-graph-node LLM models ---
-    query_normalisation_model: str = "gpt-4.1-mini"
-    query_complexity_model: str = "gpt-4.1-mini"
-    query_rewriter_model: str = "gpt-4.1-mini"
-    information_evaluator_model: str = "gpt-4.1-mini"
-    final_answer_model: str = "gpt-4.1-mini"
-    query_decomposition_model: str = "gpt-4.1-mini"
-    query_expansion_model: str = "gpt-4.1-mini"
-    gap_fill_model: str = "gpt-4.1-mini"
-    intent_correction_rewriter_model: str = "gpt-4.1-mini"
+    query_normalisation_model: str = "gpt-5-mini"
+    recall_check_model: str = "gpt-5.1"
+    intent_check_model: str = "gpt-5-mini"
+    final_answer_model: str = "gpt-5.1"
+    query_decomposition_model: str = "gpt-5-mini"
+    gap_fill_model: str = "gpt-5-mini"
+    intent_correction_rewriter_model: str = "gpt-5-mini"
 
     # --- Qdrant collection and vector names ---
     qdrant_url: str = ""
@@ -44,7 +42,13 @@ class Settings(BaseSettings):
     use_mmr: bool = True
 
     retrieval_top_k: int = 8
-    retrieval_candidate_limit: int = 100
+    retrieval_top_k_max: int = 64
+    retrieval_candidate_dense_mmr: int = 100
+    retrieval_candidate_dense_mmr_max: int = 500
+    retrieval_candidate_bm25: int = 100
+    retrieval_candidate_bm25_max: int = 500
+    retrieval_candidate_for_late_interaction: int = 100
+    retrieval_candidate_for_late_interaction_max: int = 500
     retrieval_mmr_diversity: float = 0.5
 
     # --- Jina ColBERT multi-vector API ---
@@ -67,9 +71,7 @@ class Settings(BaseSettings):
     # --- Graph execution limits ---
     graph_recursion_limit: int = 100
     graph_max_concurrency: int = 2
-    insufficient_recall_max_retries: int = 3
-    intent_mismatch_max_retries: int = 2
-    strategy_upgrade_max_retries: int = 3
+    retrieval_loop_max_retries: int = 3
 
     # --- Long-context summarization (optional; see middleware.context_editing) ---
     message_summary_token_threshold: int = 100000
