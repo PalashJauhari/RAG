@@ -25,6 +25,10 @@ class HotpotQASettings(Settings):
     hotpotqa_ragas_model: str = "gpt-4o-mini"
     hotpotqa_experiment_name: str = "default_experiment"
 
+    hotpotqa_context_enrichment_model: str = "gpt-4o-mini"
+    hotpotqa_enrichment_concurrency: int = 10
+    hotpotqa_enrichment_max_retries: int = 3
+
     # --- Artifact paths (under benchmarking/hotpotqa/data/) ---
     processed_dataset_path: Path = HOTPOTQA_ROOT / "data" / "processed" / "hotpotqa_eval.json"
 
