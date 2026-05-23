@@ -1,12 +1,15 @@
 #!/bin/bash
 
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+
+if [ "${1:-}" = "stop" ]; then
+  exec "$ROOT/stop.sh"
+fi
+
 # Kill both processes when Ctrl+C is pressed
 trap 'kill 0; exit' SIGINT SIGTERM
 
-# Kill any existing processes on ports 8000 and 8050
-echo "Cleaning up existing processes..."
-lsof -ti:8000 | xargs kill -9 2>/dev/null
-lsof -ti:8050 | xargs kill -9 2>/dev/null
+"$ROOT/stop.sh"
 sleep 1
 
 # Activate the new Python 3.12 environment
