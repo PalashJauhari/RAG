@@ -105,12 +105,14 @@ is set. Otherwise repair loops stay on hybrid retrieval (limits still scale; Col
 On repair loops, effective limits use multiplier `m = 1 + retrieval_retry_count` on each base limit,
 capped by the matching `_MAX` env var.
 
-For multiple active retrieval queries from `query_splitter`, the retriever runs
-each sub-query sequentially with the same per-request strategy. Each sub-query returns up to
-`effective_top_k` hits from Qdrant (base `RETRIEVAL_TOP_K` on the first pass; widens on repair
-loops). Results are merged in query order: deduplicate by Qdrant point id
-(first occurrence wins), then return the combined list. There is no cross-query RRF and no global
-`[:top_k]` cap on the merged result.
+For multiple active retrieval queries from `query_splitter` or repair nodes, the retriever
+batches OpenAI dense embeddings (and Jina ColBERT when on the late-interaction tier) once per
+`retrieve()` call, then runs Qdrant sub-queries **in parallel** up to
+`RETRIEVAL_SUBQUERY_MAX_CONCURRENCY` (default `8`). Set `RETRIEVAL_SUBQUERY_PARALLEL=false` to
+revert to sequential sub-query execution. Each sub-query still returns up to `effective_top_k` hits
+from Qdrant (base `RETRIEVAL_TOP_K` on the first pass; widens on repair loops). Results are merged
+in query order: deduplicate by Qdrant point id (first occurrence wins), then return the combined
+list. There is no cross-query RRF and no global `[:top_k]` cap on the merged result.
 
 Example: `RETRIEVAL_TOP_K=8` with three active queries yields up to 24 documents per retrieval pass
 on the first try (fewer if the same point id appears in more than one sub-query list). After one
@@ -136,6 +138,10 @@ RETRIEVAL_CANDIDATE_BM25=100
 RETRIEVAL_CANDIDATE_BM25_MAX=500
 RETRIEVAL_CANDIDATE_FOR_LATE_INTERACTION=100
 RETRIEVAL_CANDIDATE_FOR_LATE_INTERACTION_MAX=500
+
+# Multi-query: batch embeds; parallel Qdrant (set PARALLEL=false for sequential debug)
+RETRIEVAL_SUBQUERY_PARALLEL=true
+RETRIEVAL_SUBQUERY_MAX_CONCURRENCY=8
 
 # Context Management
 MESSAGE_SUMMARY_TOKEN_THRESHOLD=100000

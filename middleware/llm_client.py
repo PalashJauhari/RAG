@@ -31,7 +31,7 @@ def get_embeddings_client(api_key: str | None = None) -> AsyncOpenAI:
 
 def get_llm_client(
     *,
-    model: str | None = None,
+    model: str,
     temperature: float | None = None,
     output_schema: Any | None = None,
     include_raw: bool = False,
@@ -42,7 +42,7 @@ def get_llm_client(
     nodes receive ``{"parsed": Model, "raw": AIMessage}`` when ``include_raw=True``.
 
     Args:
-        model: Override ``settings.openai_llm_model``.
+        model: OpenAI chat model id for this call.
         temperature: Override ``settings.openai_temperature``.
         output_schema: Pydantic model class for structured parsing.
         include_raw: Pass through to ``with_structured_output`` for metadata preservation.
@@ -51,7 +51,7 @@ def get_llm_client(
         ChatOpenAI or Runnable with structured output wrapper.
     """
     kwargs: dict[str, Any] = {
-        "model": model or settings.openai_llm_model,
+        "model": model,
         "api_key": settings.openai_api_key,
         "temperature": settings.openai_temperature if temperature is None else temperature,
     }

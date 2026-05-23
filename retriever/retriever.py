@@ -3,8 +3,9 @@
 Used by :class:`~graph.graph.RetrievalGraph` and HotpotQA benchmarks. Strategy matrix
 (see README): ``fast_retrieval`` (dense + optional MMR), ``keyword`` (BM25 only),
 ``fast_bm25_retrieval`` (dense + BM25 + RRF), ``fast_bm25_late_interaction_retrieval``
-(hybrid candidates + ColBERT re-rank via Jina). Multi-query calls keep up to ``top_k`` hits
-per sub-query, merge in query order, and deduplicate by point id inside :meth:`Retriever.retrieve`.
+(hybrid candidates + ColBERT re-rank via Jina). Multi-query calls batch OpenAI dense and
+Jina ColBERT embeddings once per ``retrieve()``, run Qdrant sub-queries concurrently up to
+``retrieval_subquery_max_concurrency``, merge in query order, and deduplicate by point id.
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ class Retriever:
             cloud_inference=config.use_bm25,
             timeout=config.request_timeout_seconds,
         )
-        # Serialized access reduces Jina 429 bursts when multiple sub-queries retrieve in parallel.
+        # Limits concurrent Jina HTTP calls across retrieve() invocations.
         self._jina_request_sem = asyncio.Semaphore(2)
 
     async def create_dense_embeddings(self, queries: list[str]) -> list[list[float]]:
@@ -87,7 +88,6 @@ class Retriever:
         max_attempts = 6
         base_delay_seconds = 1.0
 
-        # Semaphore + 429 backoff: multihop queries fan out parallel sub-queries that share Jina quota.
         async with self._jina_request_sem:
             async with httpx.AsyncClient(timeout=self.config.request_timeout_seconds) as client:
                 for attempt in range(max_attempts):
@@ -122,9 +122,11 @@ class Retriever:
     ) -> list[dict[str, Any]]:
         """Run retrieval for each query, then merge per-query top-k lists.
 
-        Each sub-query returns up to ``top_k`` (or ``retrieval_top_k``) Qdrant hits. Results are
-        concatenated in query order with point-id deduplication (first occurrence wins). There is no
-        cross-query RRF and no global ``[:top_k]`` cap on the merged list.
+        When ``retrieval_subquery_parallel`` is true (default), dense and ColBERT embeddings
+        are batched once per call and Qdrant sub-queries run concurrently up to
+        ``retrieval_subquery_max_concurrency``. Each sub-query returns up to ``top_k`` hits.
+        Results are concatenated in query order with point-id deduplication (first occurrence
+        wins). There is no cross-query RRF and no global ``[:top_k]`` cap on the merged list.
 
         Args:
             queries: One or more retrieval query strings.
@@ -146,17 +148,36 @@ class Retriever:
         bm25 = bm25_limit or self.config.retrieval_candidate_bm25
         late_limit = late_interaction_limit or self.config.retrieval_candidate_for_late_interaction
 
-        query_results: list[list[Any]] = []
-        for query in clean_queries:
-            points = await self._retrieve_one(
-                query,
-                limit,
-                strategy,
-                dense_limit,
-                bm25,
-                late_limit,
+        dense_vectors: list[list[float]] | None = None
+        if strategy != "keyword":
+            dense_vectors = await self.create_dense_embeddings(clean_queries)
+
+        colbert_vectors: list[list[list[float]]] | None = None
+        if strategy == "fast_bm25_late_interaction_retrieval":
+            colbert_vectors = await self.create_late_interaction_embeddings(clean_queries)
+
+        if self.config.retrieval_subquery_parallel:
+            query_results = await self._retrieve_all_parallel(
+                clean_queries,
+                strategy=strategy,
+                top_k=limit,
+                dense_mmr_limit=dense_limit,
+                bm25_limit=bm25,
+                late_interaction_limit=late_limit,
+                dense_vectors=dense_vectors,
+                colbert_vectors=colbert_vectors,
             )
-            query_results.append(points)
+        else:
+            query_results = await self._retrieve_all_sequential(
+                clean_queries,
+                strategy=strategy,
+                top_k=limit,
+                dense_mmr_limit=dense_limit,
+                bm25_limit=bm25,
+                late_interaction_limit=late_limit,
+                dense_vectors=dense_vectors,
+                colbert_vectors=colbert_vectors,
+            )
 
         seen_ids: set[str] = set()
         final_docs: list[dict[str, Any]] = []
@@ -179,6 +200,64 @@ class Retriever:
 
         return final_docs
 
+    async def _retrieve_all_sequential(
+        self,
+        clean_queries: list[str],
+        *,
+        strategy: RetrievalStrategy,
+        top_k: int,
+        dense_mmr_limit: int,
+        bm25_limit: int,
+        late_interaction_limit: int,
+        dense_vectors: list[list[float]] | None,
+        colbert_vectors: list[list[list[float]]] | None,
+    ) -> list[list[Any]]:
+        query_results: list[list[Any]] = []
+        for index, query in enumerate(clean_queries):
+            points = await self._retrieve_one(
+                query,
+                top_k,
+                strategy,
+                dense_mmr_limit,
+                bm25_limit,
+                late_interaction_limit,
+                dense_vector=dense_vectors[index] if dense_vectors else None,
+                colbert_vector=colbert_vectors[index] if colbert_vectors else None,
+            )
+            query_results.append(points)
+        return query_results
+
+    async def _retrieve_all_parallel(
+        self,
+        clean_queries: list[str],
+        *,
+        strategy: RetrievalStrategy,
+        top_k: int,
+        dense_mmr_limit: int,
+        bm25_limit: int,
+        late_interaction_limit: int,
+        dense_vectors: list[list[float]] | None,
+        colbert_vectors: list[list[list[float]]] | None,
+    ) -> list[list[Any]]:
+        max_concurrency = max(1, self.config.retrieval_subquery_max_concurrency)
+        sem = asyncio.Semaphore(max_concurrency)
+
+        async def run_one(index: int, query: str) -> list[Any]:
+            async with sem:
+                return await self._retrieve_one(
+                    query,
+                    top_k,
+                    strategy,
+                    dense_mmr_limit,
+                    bm25_limit,
+                    late_interaction_limit,
+                    dense_vector=dense_vectors[index] if dense_vectors else None,
+                    colbert_vector=colbert_vectors[index] if colbert_vectors else None,
+                )
+
+        tasks = [run_one(index, query) for index, query in enumerate(clean_queries)]
+        return list(await asyncio.gather(*tasks))
+
     def _dense_query(self, dense_vector: list[float], dense_mmr_limit: int) -> Any:
         """Build dense query vector, optionally wrapped with MMR diversification."""
 
@@ -200,6 +279,9 @@ class Retriever:
         dense_mmr_limit: int,
         bm25_limit: int,
         late_interaction_limit: int,
+        *,
+        dense_vector: list[float] | None = None,
+        colbert_vector: list[list[float]] | None = None,
     ) -> list[Any]:
         """Execute a single-query retrieval pipeline for the given strategy tier."""
 
@@ -214,7 +296,8 @@ class Retriever:
             )
             return response.points
 
-        dense_vector = (await self.create_dense_embeddings([query]))[0]
+        if dense_vector is None:
+            dense_vector = (await self.create_dense_embeddings([query]))[0]
         dense_query = self._dense_query(dense_vector, dense_mmr_limit)
 
         if strategy == "fast_retrieval":
@@ -253,7 +336,8 @@ class Retriever:
             return response.points
 
         if strategy == "fast_bm25_late_interaction_retrieval":
-            colbert_vector = (await self.create_late_interaction_embeddings([query]))[0]
+            if colbert_vector is None:
+                colbert_vector = (await self.create_late_interaction_embeddings([query]))[0]
             candidate_prefetch = models.Prefetch(
                 prefetch=prefetches,
                 query=models.FusionQuery(fusion=models.Fusion.RRF),

@@ -11,6 +11,8 @@ from middleware.llm_client import get_llm_client
 from prompts.context_editing import SUMMARY_SYSTEM_PROMPT
 from tool_wrappers.prompt_plain import messages_to_plain_context
 
+_SUMMARY_MODEL = "gpt-4.1-mini"
+
 
 def estimate_tokens(messages: list) -> int:
     """Rough token count from plain-text message context (chars // 4).
@@ -54,7 +56,7 @@ async def summarize_evicted(previous_summary: str, messages_to_evict: list) -> s
     Returns:
         Updated summary string stored in ``message_summary`` state.
     """
-    llm = get_llm_client(model=settings.openai_summary_model, temperature=0)
+    llm = get_llm_client(model=_SUMMARY_MODEL, temperature=0)
     prompt_messages = [SystemMessage(content=SUMMARY_SYSTEM_PROMPT)]
     if previous_summary:
         prompt_messages.append(HumanMessage(content=f"Previous summary:\n{previous_summary}"))

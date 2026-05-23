@@ -221,7 +221,9 @@ Judged via `HOTPOTQA_RAGAS_MODEL` and `AsyncOpenAI` (vanilla `llm_factory` wirin
 
 ### Retriever latency
 
-`retrieval_latency_ms` per question — time inside `Retriever.retrieve()` only. Aggregates (mean, p50, p95, min, max) in `run_metadata.json` and the **Retriever latency** section of `benchmark_report.md`.
+`retrieval_latency_ms` per question — time inside `Retriever.retrieve()` only (includes batched
+embeddings and parallel Qdrant when multiple sub-queries are passed). Aggregates (mean, p50, p95,
+min, max) in `run_metadata.json` and the **Retriever latency** section of `benchmark_report.md`.
 
 ### Reference fields (not RAGAS-scored as ID metrics)
 

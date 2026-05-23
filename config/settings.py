@@ -12,10 +12,8 @@ class Settings(BaseSettings):
 
     # --- OpenAI defaults ---
     openai_api_key: str = ""
-    openai_llm_model: str = "gpt-4.1-mini"
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dimensions: int = 1536
-    openai_summary_model: str = "gpt-4.1-mini"
     openai_temperature: float = 0
 
     # --- Per-graph-node LLM models ---
@@ -50,6 +48,8 @@ class Settings(BaseSettings):
     retrieval_candidate_for_late_interaction: int = 100
     retrieval_candidate_for_late_interaction_max: int = 500
     retrieval_mmr_diversity: float = 0.5
+    retrieval_subquery_parallel: bool = True
+    retrieval_subquery_max_concurrency: int = 8
 
     # --- Jina ColBERT multi-vector API ---
     jina_api_key: str = ""

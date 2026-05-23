@@ -7,8 +7,8 @@ import os
 import re
 
 fields = [
-    "openai_api_key", "openai_llm_model", "openai_embedding_model", "openai_embedding_dimensions",
-    "openai_summary_model", "openai_temperature", "qdrant_url", "qdrant_api_key", "qdrant_collection_name",
+    "openai_api_key", "openai_embedding_model", "openai_embedding_dimensions",
+    "openai_temperature", "qdrant_url", "qdrant_api_key", "qdrant_collection_name",
     "query_normalisation_model",
     "recall_check_model", "intent_check_model",
     "final_answer_model", "query_decomposition_model",
@@ -18,7 +18,8 @@ fields = [
     "retrieval_candidate_dense_mmr", "retrieval_candidate_dense_mmr_max",
     "retrieval_candidate_bm25", "retrieval_candidate_bm25_max",
     "retrieval_candidate_for_late_interaction", "retrieval_candidate_for_late_interaction_max",
-    "retrieval_mmr_diversity", "jina_api_key", "jina_colbert_model", "jina_colbert_dimensions",
+    "retrieval_mmr_diversity", "retrieval_subquery_parallel", "retrieval_subquery_max_concurrency",
+    "jina_api_key", "jina_colbert_model", "jina_colbert_dimensions",
     "jina_multi_vector_url", "langfuse_tracing_enabled", "langfuse_public_key", "langfuse_secret_key",
     "langfuse_host", "langfuse_base_url", "checkpointer_use_postgres", "database_url",
     "graph_recursion_limit", "graph_max_concurrency", "retrieval_loop_max_retries",
