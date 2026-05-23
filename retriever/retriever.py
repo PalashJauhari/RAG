@@ -119,6 +119,7 @@ class Retriever:
         dense_mmr_limit: int | None = None,
         bm25_limit: int | None = None,
         late_interaction_limit: int | None = None,
+        exclude_point_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Run retrieval for each query, then merge per-query top-k lists.
 
@@ -135,6 +136,7 @@ class Retriever:
             dense_mmr_limit: Dense prefetch output / MMR target; overrides settings when set.
             bm25_limit: BM25 prefetch limit; overrides settings when set.
             late_interaction_limit: RRF pool before ColBERT; overrides settings when set.
+            exclude_point_ids: Qdrant point ids to exclude via HasId filter on this pass.
 
         Returns:
             Up to ``top_k * len(queries)`` dicts with ``id``, ``score``, ``rank``, and ``payload``.
@@ -164,6 +166,7 @@ class Retriever:
                 dense_mmr_limit=dense_limit,
                 bm25_limit=bm25,
                 late_interaction_limit=late_limit,
+                exclude_point_ids=exclude_point_ids,
                 dense_vectors=dense_vectors,
                 colbert_vectors=colbert_vectors,
             )
@@ -175,6 +178,7 @@ class Retriever:
                 dense_mmr_limit=dense_limit,
                 bm25_limit=bm25,
                 late_interaction_limit=late_limit,
+                exclude_point_ids=exclude_point_ids,
                 dense_vectors=dense_vectors,
                 colbert_vectors=colbert_vectors,
             )
@@ -209,6 +213,7 @@ class Retriever:
         dense_mmr_limit: int,
         bm25_limit: int,
         late_interaction_limit: int,
+        exclude_point_ids: list[str] | None,
         dense_vectors: list[list[float]] | None,
         colbert_vectors: list[list[list[float]]] | None,
     ) -> list[list[Any]]:
@@ -221,6 +226,7 @@ class Retriever:
                 dense_mmr_limit,
                 bm25_limit,
                 late_interaction_limit,
+                exclude_point_ids=exclude_point_ids,
                 dense_vector=dense_vectors[index] if dense_vectors else None,
                 colbert_vector=colbert_vectors[index] if colbert_vectors else None,
             )
@@ -236,6 +242,7 @@ class Retriever:
         dense_mmr_limit: int,
         bm25_limit: int,
         late_interaction_limit: int,
+        exclude_point_ids: list[str] | None,
         dense_vectors: list[list[float]] | None,
         colbert_vectors: list[list[list[float]]] | None,
     ) -> list[list[Any]]:
@@ -251,12 +258,24 @@ class Retriever:
                     dense_mmr_limit,
                     bm25_limit,
                     late_interaction_limit,
+                    exclude_point_ids=exclude_point_ids,
                     dense_vector=dense_vectors[index] if dense_vectors else None,
                     colbert_vector=colbert_vectors[index] if colbert_vectors else None,
                 )
 
         tasks = [run_one(index, query) for index, query in enumerate(clean_queries)]
         return list(await asyncio.gather(*tasks))
+
+    @staticmethod
+    def _exclude_filter(exclude_point_ids: list[str] | None) -> models.Filter | None:
+        """Build a Qdrant filter that excludes already-seen point ids."""
+
+        if not exclude_point_ids:
+            return None
+        clean_ids = [str(point_id).strip() for point_id in exclude_point_ids if str(point_id).strip()]
+        if not clean_ids:
+            return None
+        return models.Filter(must_not=[models.HasIdCondition(has_id=clean_ids)])
 
     def _dense_query(self, dense_vector: list[float], dense_mmr_limit: int) -> Any:
         """Build dense query vector, optionally wrapped with MMR diversification."""
@@ -280,16 +299,20 @@ class Retriever:
         bm25_limit: int,
         late_interaction_limit: int,
         *,
+        exclude_point_ids: list[str] | None = None,
         dense_vector: list[float] | None = None,
         colbert_vector: list[list[float]] | None = None,
     ) -> list[Any]:
         """Execute a single-query retrieval pipeline for the given strategy tier."""
+
+        query_filter = self._exclude_filter(exclude_point_ids)
 
         if strategy == "keyword":
             response = await self.qdrant.query_points(
                 collection_name=self.config.qdrant_collection_name,
                 query=models.Document(text=query, model=self.config.qdrant_bm25_model),
                 using=self.config.qdrant_bm25_vector_name,
+                query_filter=query_filter,
                 limit=top_k,
                 with_payload=True,
                 with_vectors=False,
@@ -305,6 +328,7 @@ class Retriever:
                 collection_name=self.config.qdrant_collection_name,
                 query=dense_query,
                 using=self.config.qdrant_dense_vector_name,
+                query_filter=query_filter,
                 limit=top_k,
                 with_payload=True,
                 with_vectors=False,
@@ -316,11 +340,13 @@ class Retriever:
                 query=dense_query,
                 using=self.config.qdrant_dense_vector_name,
                 limit=dense_mmr_limit,
+                filter=query_filter,
             ),
             models.Prefetch(
                 query=models.Document(text=query, model=self.config.qdrant_bm25_model),
                 using=self.config.qdrant_bm25_vector_name,
                 limit=bm25_limit,
+                filter=query_filter,
             ),
         ]
 
@@ -329,6 +355,7 @@ class Retriever:
                 collection_name=self.config.qdrant_collection_name,
                 prefetch=prefetches,
                 query=models.FusionQuery(fusion=models.Fusion.RRF),
+                query_filter=query_filter,
                 limit=top_k,
                 with_payload=True,
                 with_vectors=False,
@@ -342,12 +369,14 @@ class Retriever:
                 prefetch=prefetches,
                 query=models.FusionQuery(fusion=models.Fusion.RRF),
                 limit=late_interaction_limit,
+                filter=query_filter,
             )
             response = await self.qdrant.query_points(
                 collection_name=self.config.qdrant_collection_name,
                 prefetch=candidate_prefetch,
                 query=colbert_vector,
                 using=self.config.qdrant_colbert_vector_name,
+                query_filter=query_filter,
                 limit=top_k,
                 with_payload=True,
                 with_vectors=False,

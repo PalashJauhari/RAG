@@ -13,6 +13,8 @@ Think like a sufficient-context evaluator: a final answer is possible only when 
 supported by retrieved context. The facts you emit are fixed for the rest of the turn, so avoid
 over-splitting and avoid redundant conclusion facts that can be inferred by combining earlier facts.
 
+The graph node assigns `fact_id` (1..N) and initializes verification fields after your output.
+
 Rules:
 1. Output `facts` as an ordered array of objects with only `fact`.
 2. Each fact is one checkable information need phrased as what must be established, not the answer.

@@ -45,12 +45,12 @@ function progressBoldRest(ev) {
     return { bold: boldName, rest: " — " + truncate(ev.normalized_query, 200) };
   }
   if (node === "query_complexity") {
-    const c = ev.complexity || "";
+    const split = ev.needs_split ? "needs_split" : "simple_query";
     const ex = ev.explanation ? " — " + truncate(ev.explanation, 120) : "";
-    return { bold: boldName, rest: (c ? ": " + c : "") + ex };
+    return { bold: boldName, rest: ": " + split + ex };
   }
   if (node === "fact_decomposition") {
-    const n = ev.required_fact_count || 0;
+    const n = ev.fact_count || 0;
     return { bold: boldName, rest: n ? " (" + n + " facts)" : "" };
   }
   if (node === "retrieval") {
@@ -65,11 +65,6 @@ function progressBoldRest(ev) {
     const docs = ev.retrieved_doc_count != null ? " · " + ev.retrieved_doc_count + " docs" : "";
     return { bold: boldName, rest: ": " + ok + docs + (unsupported ? " · " + unsupported + " unsupported" : "") + loopSuffix(ev) };
   }
-  if (node === "intent_check") {
-    const ia = ev.intent_aligned ? "aligned" : "misaligned";
-    const n = ev.fact_intent_count != null ? ev.fact_intent_count : (ev.fact_intents ? ev.fact_intents.length : 0);
-    return { bold: boldName, rest: ": " + ia + (n ? " · " + n + " facts" : "") };
-  }
   if (node === "strategy_upgrade") {
     const rs = ev.retrieval_strategy ? " · " + ev.retrieval_strategy : "";
     return { bold: boldName, rest: "deterministic" + rs + loopSuffix(ev) };
@@ -80,13 +75,7 @@ function progressBoldRest(ev) {
   }
   if (node === "gap_fill") {
     const q = (ev.active_retrieval_queries || []).join(" · ");
-    const rs = ev.retrieval_strategy ? " · " + ev.retrieval_strategy : "";
-    return { bold: boldName, rest: rs + (q ? " — " + truncate(q, 160) : "") };
-  }
-  if (node === "intent_correction_rewriter") {
-    const q = (ev.active_retrieval_queries || []).join(" · ");
-    const rs = ev.retrieval_strategy ? " · " + ev.retrieval_strategy : "";
-    return { bold: boldName, rest: rs + (q ? " — " + truncate(q, 160) : "") };
+    return { bold: boldName, rest: q ? " — " + truncate(q, 160) : "" };
   }
   if (node === "clear_turn_trace") {
     return { bold: boldName, rest: " — turn trace cleared" };

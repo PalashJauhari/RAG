@@ -1,24 +1,23 @@
-"""Structured audit row appended into LangGraph ``message_query`` (operator.add reducer).
+"""Append-only audit row for ``message_query`` state.
 
-Built by :func:`graph.graph.trace_row`. ``kind`` values used in production:
-``normalisation``, ``complexity``, ``query_prep``, ``retrieval``, ``recall_check``,
-``intent_check``, ``gap_fill``, ``strategy_upgrade``, ``intent_correction``.
+Each graph node may emit one or more rows describing what happened in that step (queries,
+retrieval, evaluation, gap_fill, strategy_upgrade).
 """
 
-from typing import Any
+from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
 
 class MessageQueryEntry(BaseModel):
-    """One trace row emitted by a graph node."""
+    """One trace row appended to ``message_query`` during a user turn."""
 
-    node: str = Field(description="LangGraph node id that produced this entry.")
+    node: str = Field(description="LangGraph node id that produced this row.")
     kind: str = Field(
         description=(
-            "Trace category, e.g. normalisation, complexity, query_prep (splitter/expansion/rewriter), "
-            "retrieval, evaluation, gap_fill, intent_correction."
+            "Trace category such as normalisation, fact_decomposition, complexity, "
+            "retrieval, recall_check, gap_fill, or strategy_upgrade."
         ),
     )
-    payload: dict[str, Any] = Field(default_factory=dict, description="JSON-safe detail blob.")
-    notes: str | None = Field(default=None, description="Optional short human summary.")
+    payload: dict = Field(default_factory=dict, description="JSON-safe detail for this step.")
+    notes: str | None = Field(default=None, description="Optional human-readable summary.")

@@ -1,20 +1,17 @@
-"""LangGraph retrieval agent: normalize, decompose facts, retrieve, verify recall, and answer.
+"""Factline LangGraph agent: normalize, decompose facts, retrieve, verify recall, and answer.
 
 High-level flow (see repository README):
-    query_normalisation -> fact_decomposition -> query_complexity -> (optional query_splitter) -> retrieval ->
-    recall_check -> [answer | intent_check -> gap_fill / intent_correction_rewriter ->
-    strategy_upgrade -> retrieval] ->
+    query_normalisation -> fact_decomposition -> query_complexity -> (optional query_splitter) ->
+    retrieval -> recall_check -> [answer | gap_fill -> strategy_upgrade -> retrieval] ->
     answer | partial_answer -> clear_turn_trace -> END
 
 Checkpointing: compiled graph uses a LangGraph checkpointer keyed by ``thread_id`` (API
 ``session_id``). Multi-turn threads persist ``messages`` and ``message_summary``; each
-``/run`` resets turn-local scratch (queries, docs, retry counters) while appending a new
-``HumanMessage``.
+``/run`` resets turn-local scratch while appending a new ``HumanMessage``.
 
 State design: ``messages`` stays lean (user turns + final/partial ``AIMessage`` JSON only).
-Intermediate outputs use explicit keys: ``normalized_query``, ``active_retrieval_queries``,
-``retrieval_strategy``, ``message_query`` (append-only audit), ``retrieved_documents``,
-``required_facts``, and ``verified_facts``.
+Intermediate outputs use explicit keys including ``facts``, ``retrieved_documents``,
+``retrieved_point_ids``, and ``message_query`` (append-only audit).
 """
 
 from __future__ import annotations
@@ -22,7 +19,7 @@ from __future__ import annotations
 import json
 import operator
 import re
-from typing import Annotated, Any, AsyncIterator, NamedTuple, TypedDict
+from typing import Annotated, Any, AsyncIterator, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph, add_messages
@@ -42,8 +39,6 @@ from observability.langfuse_handler import (
 from output_validation.fact_decomposition import RequiredFactsResult
 from output_validation.final_answer import FinalAnswer
 from output_validation.gap_fill import GapFillResult
-from output_validation.intent_check import IntentCheckResult
-from output_validation.intent_correction_rewriter import IntentCorrectionRewriteResult
 from output_validation.recall_check import RecallVerifyResult
 from output_validation.message_query_entry import MessageQueryEntry
 from output_validation.query_normalisation import QueryNormalisationResult
@@ -51,10 +46,6 @@ from output_validation.query_splitter import QuerySplitResult
 from output_validation.retrieval_strategy import RetrievalStrategy
 from prompts.final_answer import SYSTEM_PROMPT as FINAL_ANSWER_PROMPT
 from prompts.gap_fill import SYSTEM_PROMPT as GAP_FILL_PROMPT
-from prompts.intent_check import SYSTEM_PROMPT as INTENT_CHECK_PROMPT
-from prompts.intent_correction_rewriter import (
-    SYSTEM_PROMPT as INTENT_CORRECTION_REWRITER_PROMPT,
-)
 from prompts.fact_decomposition import SYSTEM_PROMPT as FACT_DECOMPOSITION_PROMPT
 from prompts.recall_check import VERIFY_SYSTEM_PROMPT
 from prompts.partial_answer import SYSTEM_PROMPT as PARTIAL_ANSWER_PROMPT
@@ -74,19 +65,14 @@ class RetrievalState(TypedDict, total=False):
 
     # --- Turn scratch (reset at each /run invoke) ---
     normalized_query: str
-    query_complexity: dict[str, Any]  # Last QueryComplexityResult; drives route_after_complexity.
     retrieval_strategy: str  # Tier for retrieval_node; set initially and by deterministic strategy_upgrade.
     active_retrieval_queries: list[str]
     retrieved_documents: Annotated[list[dict[str, Any]], operator.add]  # Accumulates per turn.
+    retrieved_point_ids: Annotated[list[str], operator.add]  # Seen Qdrant ids for HasId exclusion.
 
-    # --- Recall / intent scratch (reset each /run; last-write wins on updates) ---
-    required_facts: list[dict[str, Any]]  # Information needs from recall decomposition.
-    verified_facts: list[dict[str, Any]]  # Per-fact verification status + excerpts.
-    fact_intents: list[dict[str, Any]]  # Per unsupported fact intent alignment.
-    # Populated when intent_check finds misaligned facts; fed to intent_correction_rewriter.
-    intent_mismatch_details: list[dict[str, Any]]
+    # --- Fact scratch (reset each /run; recall_check updates verification in place) ---
+    facts: list[dict[str, Any]]
     recall_sufficient: bool  # recall_check → route_after_recall_check
-    intent_aligned: bool  # intent_check → route_after_intent_check
 
     # --- Audit trace (append-only per turn; cleared by clear_turn_trace_node) ---
     message_query: Annotated[list[dict[str, Any]], operator.add]
@@ -115,10 +101,67 @@ def trace_row(node: str, kind: str, payload: dict[str, Any], notes: str | None =
     return {"message_query": [entry.model_dump()]}
 
 
-def unsupported_facts_from_verified(verified_facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return verification rows still unsupported by the accumulated retrieval corpus."""
+def unsupported_facts(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return fact rows still unsupported by the accumulated retrieval corpus."""
 
-    return [row for row in verified_facts if not row.get("verification_status")]
+    return [row for row in facts if not row.get("verification_status")]
+
+
+def build_facts_from_decomposition(response: RequiredFactsResult) -> list[dict[str, Any]]:
+    """Assign fact_id and empty verification shell after LLM decomposition."""
+
+    return [
+        {
+            "fact_id": index,
+            "fact": item.fact,
+            "verification_status": False,
+            "verification_report": "",
+            "evidence_documents": [],
+            "search_queries": [],
+            "gap_fill_explanation": "",
+        }
+        for index, item in enumerate(response.facts, start=1)
+    ]
+
+
+def merge_gap_fill_into_facts(
+    facts: list[dict[str, Any]],
+    repairs: list[Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Merge gap-fill repair rows into the unified facts list by ``fact_id``."""
+
+    unsupported = unsupported_facts(facts)
+    expected_ids = [row["fact_id"] for row in unsupported]
+    repair_ids = [item.fact_id for item in repairs]
+    if repair_ids != expected_ids:
+        raise ValueError("Gap-fill fact_id values must match unsupported facts by order and id")
+    if [item.fact for item in repairs] != fact_texts(unsupported):
+        raise ValueError("Gap-fill fact text must match unsupported facts by order and text")
+
+    repair_by_id = {item.fact_id: item for item in repairs}
+    updated: list[dict[str, Any]] = []
+    queries: list[str] = []
+    for row in facts:
+        fact_id = row.get("fact_id")
+        repair = repair_by_id.get(fact_id)
+        if repair is None:
+            updated.append(row)
+            continue
+        updated.append(
+            {
+                **row,
+                "search_queries": list(repair.search_queries),
+                "gap_fill_explanation": repair.gap_fill_explanation,
+            }
+        )
+        queries.extend(repair.search_queries)
+    return updated, queries
+
+
+def needs_query_split(facts: list[dict[str, Any]]) -> bool:
+    """True when multiple facts require per-fact retrieval queries."""
+
+    return len(facts) > 1
 
 
 def fact_texts(rows: list[dict[str, Any]]) -> list[str]:
@@ -127,63 +170,26 @@ def fact_texts(rows: list[dict[str, Any]]) -> list[str]:
     return [str(row.get("fact") or "").strip() for row in rows if str(row.get("fact") or "").strip()]
 
 
-def complexity_from_required_facts(required_facts: list[dict[str, Any]]) -> dict[str, str]:
-    """Deterministic routing label from stable fact count."""
-
-    fact_count = len(required_facts)
-    if fact_count > 1:
-        return {
-            "complexity": "needs_split",
-            "explanation": f"{fact_count} required facts → split retrieval per fact.",
-        }
-    return {
-        "complexity": "simple_query",
-        "explanation": "Single required fact (or none) → retrieve with normalized query.",
-    }
-
-
-class RetrievalLimits(NamedTuple):
-    """Per-pass retrieval limits after repair-loop scaling."""
-
-    top_k: int
-    dense_mmr: int
-    bm25: int
-    late_interaction: int
-
-    def as_dict(self) -> dict[str, int]:
-        return {
-            "effective_top_k": self.top_k,
-            "effective_dense_mmr": self.dense_mmr,
-            "effective_bm25": self.bm25,
-            "effective_late_interaction": self.late_interaction,
-        }
-
-
-def effective_retrieval_limits(retry_count: int) -> RetrievalLimits:
-    """Scale all retrieval limits by ``1 + retry_count``, each capped by its max setting."""
-
-    multiplier = 1 + max(0, retry_count)
-    return RetrievalLimits(
-        top_k=min(settings.retrieval_top_k * multiplier, settings.retrieval_top_k_max),
-        dense_mmr=min(
-            settings.retrieval_candidate_dense_mmr * multiplier,
-            settings.retrieval_candidate_dense_mmr_max,
-        ),
-        bm25=min(
-            settings.retrieval_candidate_bm25 * multiplier,
-            settings.retrieval_candidate_bm25_max,
-        ),
-        late_interaction=min(
-            settings.retrieval_candidate_for_late_interaction * multiplier,
-            settings.retrieval_candidate_for_late_interaction_max,
-        ),
-    )
-
-
 def late_interaction_enabled() -> bool:
     """True when ColBERT late-interaction retrieval is configured and allowed."""
 
     return settings.use_late_interaction and bool(settings.jina_api_key.strip())
+
+
+def _turn_scratch_reset() -> dict[str, Any]:
+    """Default empty values for turn-local state cleared at invoke start and after answer."""
+
+    return {
+        "normalized_query": "",
+        "retrieval_strategy": "",
+        "active_retrieval_queries": [],
+        "retrieved_documents": Overwrite(value=[]),
+        "retrieved_point_ids": Overwrite(value=[]),
+        "facts": [],
+        "recall_sufficient": False,
+        "retrieval_retry_count": 0,
+        "message_query": Overwrite(value=[]),
+    }
 
 
 def build_node_ai_message(
@@ -322,24 +328,24 @@ class RetrievalGraph:
                     result = await llm.ainvoke(messages_for_llm)
                     update_llm_generation(gen, model=model, raw=result.get("raw"))
                 response = result["parsed"]
-                required_facts = [item.model_dump() for item in response.facts]
+                facts = build_facts_from_decomposition(response)
                 node_span.update(
                     output={
                         "normalized_query": normalized_query,
-                        "required_facts": required_facts,
+                        "facts": facts,
                     }
                 )
         else:
             result = await llm.ainvoke(messages_for_llm)
             response = result["parsed"]
-            required_facts = [item.model_dump() for item in response.facts]
+            facts = build_facts_from_decomposition(response)
 
-        merge: dict[str, Any] = {"required_facts": required_facts}
+        merge: dict[str, Any] = {"facts": facts}
         merge.update(
             trace_row(
                 "fact_decomposition",
                 "fact_decomposition",
-                {"required_facts": required_facts},
+                {"fact_count": len(facts)},
             )
         )
         return merge
@@ -347,30 +353,35 @@ class RetrievalGraph:
     async def query_complexity_node(self, state: RetrievalState) -> dict[str, Any]:
         """Route by fact count and seed queries for the simple path.
 
-        Reads: ``normalized_query`` and stable ``required_facts``.
-        Writes: ``query_complexity``, ``active_retrieval_queries``.
+        Reads: ``normalized_query`` and ``facts``.
+        Writes: ``retrieval_strategy``, ``active_retrieval_queries``.
         Routes via: ``route_after_complexity`` to retrieval or query_splitter.
         """
 
         normalized_query = str(state.get("normalized_query") or "").strip()
-        required_facts = state.get("required_facts") or []
-        output = complexity_from_required_facts(required_facts)
-        fact_count = len(required_facts)
+        facts = state.get("facts") or []
+        fact_count = len(facts)
+        needs_split = needs_query_split(facts)
+        explanation = (
+            f"{fact_count} facts → split retrieval per fact."
+            if needs_split
+            else "Single fact (or none) → retrieve with normalized query."
+        )
 
         if settings.langfuse_tracing_enabled:
             langfuse = get_langfuse_client()
             with langfuse.start_as_current_observation(as_type="span", name="query_complexity") as node_span:
                 node_span.update(
                     output={
-                        "complexity": output["complexity"],
-                        "explanation": output["explanation"],
-                        "required_facts": required_facts,
+                        "needs_split": needs_split,
+                        "explanation": explanation,
+                        "facts": facts,
                         "fact_count": fact_count,
                     }
                 )
 
         merge = {
-            "query_complexity": output,
+            "needs_split": needs_split,
             "retrieval_strategy": "fast_bm25_retrieval",
             "active_retrieval_queries": [normalized_query] if normalized_query else [],
         }
@@ -378,21 +389,21 @@ class RetrievalGraph:
             trace_row(
                 "query_complexity",
                 "complexity",
-                {"complexity": output["complexity"], "fact_count": fact_count},
-                notes=output["explanation"],
+                {"needs_split": needs_split, "fact_count": fact_count},
+                notes=explanation,
             )
         )
         return merge
 
     async def query_splitter_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Translate stable required facts into focused retrieval strings.
+        """Translate stable facts into focused retrieval strings.
 
         Writes: ``active_retrieval_queries``. Then fixed edge to ``retrieval``.
         """
 
         normalized_query = str(state.get("normalized_query") or "").strip()
-        required_facts = state.get("required_facts") or []
-        complexity = (state.get("query_complexity") or {}).get("complexity", "")
+        facts = state.get("facts") or []
+        needs_split = needs_query_split(facts)
         llm = get_llm_client(
             model=settings.query_decomposition_model,
             output_schema=QuerySplitResult,
@@ -400,9 +411,9 @@ class RetrievalGraph:
         )
         context = (
             f"## Normalized query\n{normalized_query}\n\n"
-            f"## Query complexity\n{complexity}\n\n"
-            "## Required facts\n"
-            f"{json.dumps(required_facts, ensure_ascii=False)}"
+            f"## Needs split\n{needs_split}\n\n"
+            "## Facts\n"
+            f"{json.dumps(facts, ensure_ascii=False)}"
         )
         messages_for_llm = [
             SystemMessage(content=QUERY_SPLITTER_PROMPT),
@@ -421,7 +432,7 @@ class RetrievalGraph:
                     queries = [normalized_query]
                 node_span.update(
                     output={
-                        "required_facts": required_facts,
+                        "facts": facts,
                         "active_retrieval_queries": queries,
                     }
                 )
@@ -461,39 +472,43 @@ class RetrievalGraph:
             fallback = str(state.get("normalized_query") or "").strip()
             search_queries = [fallback] if fallback else []
 
-        retry_count = state.get("retrieval_retry_count", 0)
-        limits = effective_retrieval_limits(retry_count)
+        exclude_ids = list(state.get("retrieved_point_ids") or []) or None
+        seen_ids = set(state.get("retrieved_point_ids") or [])
+
+        async def run_retrieval() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+            ranked_hits = await self.retriever.retrieve(
+                search_queries,
+                strategy=strategy,
+                top_k=settings.retrieval_top_k,
+                dense_mmr_limit=settings.retrieval_candidate_dense_mmr,
+                bm25_limit=settings.retrieval_candidate_bm25,
+                late_interaction_limit=settings.retrieval_candidate_for_late_interaction,
+                exclude_point_ids=exclude_ids,
+            )
+            compact_document_rows = compact_hotqa_documents_for_llm(ranked_hits)
+            rows_to_add: list[dict[str, Any]] = []
+            new_point_ids: list[str] = []
+            for row in compact_document_rows:
+                point_id = str(row.get("id") or "").strip()
+                if not point_id or point_id in seen_ids:
+                    continue
+                rows_to_add.append(row)
+                seen_ids.add(point_id)
+                new_point_ids.append(point_id)
+            return compact_document_rows, rows_to_add, new_point_ids
 
         if settings.langfuse_tracing_enabled:
             langfuse = get_langfuse_client()
             with langfuse.start_as_current_observation(as_type="span", name="retrieval") as node_span:
-                ranked_hits = await self.retriever.retrieve(
-                    search_queries,
-                    strategy=strategy,
-                    top_k=limits.top_k,
-                    dense_mmr_limit=limits.dense_mmr,
-                    bm25_limit=limits.bm25,
-                    late_interaction_limit=limits.late_interaction,
-                )
-                compact_document_rows = compact_hotqa_documents_for_llm(ranked_hits)
+                compact_document_rows, rows_to_add, new_point_ids = await run_retrieval()
                 accumulated = list(state.get("retrieved_documents") or [])
-                # Dedup by passage text so retries and multi-query fusion do not duplicate corpus rows.
-                seen_texts = {doc.get("text") for doc in accumulated if doc.get("text") is not None}
-                rows_to_add: list[dict[str, Any]] = []
-                for row in compact_document_rows:
-                    text = row.get("text")
-                    if text is None or text in seen_texts:
-                        continue
-                    rows_to_add.append(row)
-                    seen_texts.add(text)
                 corpus_after = accumulated + rows_to_add
                 node_span.update(
                     output={
                         "strategy": strategy,
                         "queries": search_queries,
-                        "retrieval_retry_count": retry_count,
                         "late_interaction_enabled": late_interaction_enabled(),
-                        **limits.as_dict(),
+                        "exclude_point_id_count": len(exclude_ids or []),
                         "candidate_doc_count": len(compact_document_rows),
                         "rows_to_add": rows_to_add,
                         "rows_to_add_count": len(rows_to_add),
@@ -503,27 +518,12 @@ class RetrievalGraph:
                     }
                 )
         else:
-            ranked_hits = await self.retriever.retrieve(
-                search_queries,
-                strategy=strategy,
-                top_k=limits.top_k,
-                dense_mmr_limit=limits.dense_mmr,
-                bm25_limit=limits.bm25,
-                late_interaction_limit=limits.late_interaction,
-            )
-            compact_document_rows = compact_hotqa_documents_for_llm(ranked_hits)
+            compact_document_rows, rows_to_add, new_point_ids = await run_retrieval()
             accumulated = list(state.get("retrieved_documents") or [])
-            seen_texts = {doc.get("text") for doc in accumulated if doc.get("text") is not None}
-            rows_to_add = []
-            for row in compact_document_rows:
-                text = row.get("text")
-                if text is None or text in seen_texts:
-                    continue
-                rows_to_add.append(row)
-                seen_texts.add(text)
 
         merge: dict[str, Any] = {
             "retrieved_documents": rows_to_add,
+            "retrieved_point_ids": new_point_ids,
             "retrieval_strategy": strategy,
             "active_retrieval_queries": search_queries,
         }
@@ -534,8 +534,6 @@ class RetrievalGraph:
                 {
                     "queries": search_queries,
                     "strategy": strategy,
-                    "retrieval_retry_count": retry_count,
-                    **limits.as_dict(),
                     "rows_to_add_count": len(rows_to_add),
                     "corpus_size_after": len(accumulated) + len(rows_to_add),
                 },
@@ -543,24 +541,22 @@ class RetrievalGraph:
         )
         return merge
 
-    # --- Recall / intent repair nodes ---
-    # All LLM work here is strictly sequential (no asyncio.gather).
-    # Repair subgraph: intent_check → gap_fill or intent_correction_rewriter → strategy_upgrade → retrieval.
+    # --- Recall / repair nodes ---
 
     async def recall_check_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Verify stable required facts against retrieved passages.
+        """Verify facts against retrieved passages and update verification in place.
 
-        Writes: ``verified_facts``, ``recall_sufficient``.
-        Routes via: ``route_after_recall_check`` (answer | partial_answer | intent_check).
+        Writes: ``facts``, ``recall_sufficient``.
+        Routes via: ``route_after_recall_check`` (answer | partial_answer | gap_fill).
         """
 
         normalized = str(state.get("normalized_query") or "").strip()
-        required_facts = list(state.get("required_facts") or [])
-        if not required_facts:
-            raise ValueError("recall_check requires required_facts from fact_decomposition")
+        facts = list(state.get("facts") or [])
+        if not facts:
+            raise ValueError("recall_check requires facts from fact_decomposition")
         docs = list(state.get("retrieved_documents") or [])
         doc_lines = [
-            f"[{i}] (score={row.get('score')}) {row.get('text') or ''}"
+            f"[{i}] (id={row.get('id')}, score={row.get('score')}) {row.get('text') or ''}"
             for i, row in enumerate(docs, start=1)
         ]
         doc_texts = [str(row.get("text") or "") for row in docs]
@@ -568,18 +564,18 @@ class RetrievalGraph:
             re.sub(r"\s+", " ", doc_text).strip() for doc_text in doc_texts
         ]
 
-        def _validate_verified_facts(
-            required_facts: list[dict[str, Any]],
+        def _merge_verification_into_facts(
+            facts: list[dict[str, Any]],
             verify: RecallVerifyResult,
         ) -> list[dict[str, Any]]:
-            required_texts = fact_texts(required_facts)
+            expected_texts = fact_texts(facts)
             verified_rows = list(verify.facts)
             verified_texts = [item.fact for item in verified_rows]
-            if verified_texts != required_texts:
-                raise ValueError("Recall verification facts must match required facts by order and text")
+            if verified_texts != expected_texts:
+                raise ValueError("Recall verification facts must match input facts by order and text")
 
-            verified: list[dict[str, Any]] = []
-            for verification in verified_rows:
+            updated: list[dict[str, Any]] = []
+            for fact_row, verification in zip(facts, verified_rows):
                 copied_excerpts = []
                 for excerpt in verification.evidence_documents:
                     normalized_excerpt = re.sub(r"\s+", " ", excerpt).strip()
@@ -588,9 +584,9 @@ class RetrievalGraph:
                     ):
                         copied_excerpts.append(excerpt)
                 if verification.verification_status and not copied_excerpts:
-                    verified.append(
+                    updated.append(
                         {
-                            "fact": verification.fact,
+                            **fact_row,
                             "verification_status": False,
                             "verification_report": (
                                 "Evidence excerpt was not copied verbatim from retrieved documents."
@@ -599,10 +595,15 @@ class RetrievalGraph:
                         }
                     )
                     continue
-                row = verification.model_dump()
-                row["evidence_documents"] = copied_excerpts
-                verified.append(row)
-            return verified
+                updated.append(
+                    {
+                        **fact_row,
+                        "verification_status": verification.verification_status,
+                        "verification_report": verification.verification_report,
+                        "evidence_documents": copied_excerpts,
+                    }
+                )
+            return updated
 
         verify_llm = get_llm_client(
             model=settings.recall_check_model,
@@ -610,17 +611,17 @@ class RetrievalGraph:
             include_raw=True,
         )
         model = settings.recall_check_model
+        verify_human = (
+            f"## Normalized query\n{normalized}\n\n"
+            "## Facts\n"
+            f"{json.dumps(facts, ensure_ascii=False)}\n\n"
+            "## Retrieved documents\n"
+            f"{chr(10).join(doc_lines) if doc_lines else '(none)'}"
+        )
 
         if settings.langfuse_tracing_enabled:
             langfuse = get_langfuse_client()
             with langfuse.start_as_current_observation(as_type="span", name="recall_check") as node_span:
-                verify_human = (
-                    f"## Normalized query\n{normalized}\n\n"
-                    "## Required facts\n"
-                    f"{json.dumps(required_facts, ensure_ascii=False)}\n\n"
-                    "## Retrieved documents\n"
-                    f"{chr(10).join(doc_lines) if doc_lines else '(none)'}"
-                )
                 with langfuse.start_as_current_observation(
                     as_type="generation", name="recall_check-verify_facts-llm", model=model
                 ) as gen_ver:
@@ -631,42 +632,30 @@ class RetrievalGraph:
                         ]
                     )
                     update_llm_generation(gen_ver, model=model, raw=ver_result.get("raw"))
-                verified_facts = _validate_verified_facts(
-                    required_facts, ver_result["parsed"]
-                )
-                unsupported_facts = unsupported_facts_from_verified(verified_facts)
-                recall_sufficient = not unsupported_facts
+                updated_facts = _merge_verification_into_facts(facts, ver_result["parsed"])
+                unsupported = unsupported_facts(updated_facts)
+                recall_sufficient = not unsupported
                 node_span.update(
                     output={
-                        "required_facts": required_facts,
-                        "verified_facts": verified_facts,
-                        "unsupported_facts": unsupported_facts,
+                        "facts": updated_facts,
+                        "unsupported_facts": unsupported,
                         "recall_sufficient": recall_sufficient,
                         "retrieved_documents": docs,
                     }
                 )
         else:
-            verify_human = (
-                f"## Normalized query\n{normalized}\n\n"
-                "## Required facts\n"
-                f"{json.dumps(required_facts, ensure_ascii=False)}\n\n"
-                "## Retrieved documents\n"
-                f"{chr(10).join(doc_lines) if doc_lines else '(none)'}"
-            )
             ver_result = await verify_llm.ainvoke(
                 [
                     SystemMessage(content=VERIFY_SYSTEM_PROMPT),
                     HumanMessage(content=verify_human),
                 ]
             )
-            verified_facts = _validate_verified_facts(
-                required_facts, ver_result["parsed"]
-            )
-            unsupported_facts = unsupported_facts_from_verified(verified_facts)
-            recall_sufficient = not unsupported_facts
+            updated_facts = _merge_verification_into_facts(facts, ver_result["parsed"])
+            unsupported = unsupported_facts(updated_facts)
+            recall_sufficient = not unsupported
 
         merge: dict[str, Any] = {
-            "verified_facts": verified_facts,
+            "facts": updated_facts,
             "recall_sufficient": recall_sufficient,
         }
         merge.update(
@@ -675,94 +664,21 @@ class RetrievalGraph:
                 "recall_check",
                 {
                     "recall_sufficient": recall_sufficient,
-                    "unsupported_facts": unsupported_facts,
-                },
-            )
-        )
-        return merge
-
-    async def intent_check_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Decide if active retrieval queries target each unsupported fact."""
-
-        unsupported_facts = unsupported_facts_from_verified(state.get("verified_facts") or [])
-        unsupported_texts = fact_texts(unsupported_facts)
-        context = (
-            "## Normalized query\n"
-            f"{state.get('normalized_query') or ''}\n\n"
-            "## Unsupported facts\n"
-            f"{json.dumps(unsupported_facts, ensure_ascii=False)}\n\n"
-            "## Active retrieval queries\n"
-            f"{json.dumps(state.get('active_retrieval_queries') or [], ensure_ascii=False)}"
-        )
-        llm = get_llm_client(
-            model=settings.intent_check_model,
-            output_schema=IntentCheckResult,
-            include_raw=True,
-        )
-        messages_for_llm = [
-            SystemMessage(content=INTENT_CHECK_PROMPT),
-            HumanMessage(content=context),
-        ]
-        model = settings.intent_check_model
-
-        if settings.langfuse_tracing_enabled:
-            langfuse = get_langfuse_client()
-            with langfuse.start_as_current_observation(as_type="span", name="intent_check") as node_span:
-                with langfuse.start_as_current_observation(as_type="generation", name="intent_check-llm", model=model) as gen:
-                    result = await llm.ainvoke(messages_for_llm)
-                    update_llm_generation(gen, model=model, raw=result.get("raw"))
-                response = result["parsed"]
-                fact_intents = list(response.fact_intents)
-                node_span.update(output={"fact_intents": [item.model_dump() for item in fact_intents]})
-        else:
-            result = await llm.ainvoke(messages_for_llm)
-            response = result["parsed"]
-            fact_intents = list(response.fact_intents)
-
-        if [row.fact for row in fact_intents] != unsupported_texts:
-            raise ValueError("Intent check facts must match unsupported facts by order and text")
-
-        fact_intents_dump: list[dict[str, Any]] = []
-        mismatch_details: list[dict[str, Any]] = []
-        for row in fact_intents:
-            row_dump = row.model_dump()
-            fact_intents_dump.append(row_dump)
-            if not row.intent_aligned:
-                mismatch_details.append(
-                    {
-                        "fact": row.fact,
-                        "intent_mismatch_details": row.intent_mismatch_details,
-                    }
-                )
-
-        intent_aligned = not mismatch_details
-        merge: dict[str, Any] = {
-            "fact_intents": fact_intents_dump,
-            "intent_aligned": intent_aligned,
-            "intent_mismatch_details": mismatch_details,
-        }
-        merge.update(
-            trace_row(
-                "intent_check",
-                "intent_check",
-                {
-                    "intent_aligned": intent_aligned,
-                    "misaligned_facts": mismatch_details,
+                    "unsupported_facts": unsupported,
                 },
             )
         )
         return merge
 
     async def gap_fill_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Generate three retrieval queries for each unsupported, intent-aligned fact."""
+        """Generate repair queries per unsupported fact and merge into the unified facts list."""
 
-        unsupported_facts = unsupported_facts_from_verified(state.get("verified_facts") or [])
-        unsupported_texts = fact_texts(unsupported_facts)
+        unsupported = unsupported_facts(state.get("facts") or [])
         context = (
             "## Normalized query\n"
             f"{state.get('normalized_query') or ''}\n\n"
             "## Unsupported facts\n"
-            f"{json.dumps(unsupported_facts, ensure_ascii=False)}\n\n"
+            f"{json.dumps(unsupported, ensure_ascii=False)}\n\n"
             "## Prior active retrieval queries\n"
             f"{json.dumps(state.get('active_retrieval_queries') or [], ensure_ascii=False)}\n\n"
             "## Retrieved documents\n"
@@ -786,108 +702,35 @@ class RetrievalGraph:
                     result = await llm.ainvoke(messages_for_llm)
                     update_llm_generation(gen, model=model, raw=result.get("raw"))
                 response = result["parsed"]
-                fact_queries = list(response.fact_queries)
+                updated_facts, queries = merge_gap_fill_into_facts(
+                    list(state.get("facts") or []), list(response.facts)
+                )
                 node_span.update(
                     output={
-                        "fact_queries": [item.model_dump() for item in fact_queries],
-                        "gap_fill_explanation": response.gap_fill_explanation,
+                        "facts": updated_facts,
+                        "active_retrieval_queries": queries,
                     }
                 )
         else:
             result = await llm.ainvoke(messages_for_llm)
             response = result["parsed"]
-            fact_queries = list(response.fact_queries)
-
-        if [row.fact for row in fact_queries] != unsupported_texts:
-            raise ValueError("Gap-fill query facts must match unsupported facts by order and text")
-
-        queries: list[str] = []
-        for row in fact_queries:
-            queries.extend(row.search_queries)
-
-        merge: dict[str, Any] = {"active_retrieval_queries": queries}
-        merge.update(
-            trace_row(
-                "gap_fill",
-                "gap_fill",
-                {"queries": queries, "facts": [row.fact for row in fact_queries]},
-                notes=response.gap_fill_explanation,
+            updated_facts, queries = merge_gap_fill_into_facts(
+                list(state.get("facts") or []), list(response.facts)
             )
-        )
-        return merge
 
-    async def intent_correction_rewriter_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Generate three corrected queries for misaligned unsupported facts."""
-
-        unsupported_facts = unsupported_facts_from_verified(state.get("verified_facts") or [])
-        unsupported_texts = fact_texts(unsupported_facts)
-        mismatch_details = state.get("intent_mismatch_details") or []
-        misaligned_facts = [{"fact": row["fact"]} for row in mismatch_details if row.get("fact")]
-        misaligned_texts = fact_texts(misaligned_facts)
-        context = (
-            "## Normalized query\n"
-            f"{state.get('normalized_query') or ''}\n\n"
-            "## Misaligned facts\n"
-            f"{json.dumps(misaligned_facts, ensure_ascii=False)}\n\n"
-            "## Intent mismatch details\n"
-            f"{json.dumps(mismatch_details, ensure_ascii=False)}\n\n"
-            "## Active retrieval queries\n"
-            f"{json.dumps(state.get('active_retrieval_queries') or [], ensure_ascii=False)}\n\n"
-            "## Retrieved documents\n"
-            f"{json.dumps(state.get('retrieved_documents') or [], ensure_ascii=False)}"
-        )
-        llm = get_llm_client(
-            model=settings.intent_correction_rewriter_model,
-            output_schema=IntentCorrectionRewriteResult,
-            include_raw=True,
-        )
-        messages_for_llm = [
-            SystemMessage(content=INTENT_CORRECTION_REWRITER_PROMPT),
-            HumanMessage(content=context),
-        ]
-        model = settings.intent_correction_rewriter_model
-
-        if settings.langfuse_tracing_enabled:
-            langfuse = get_langfuse_client()
-            with langfuse.start_as_current_observation(as_type="span", name="intent_correction_rewriter") as node_span:
-                with langfuse.start_as_current_observation(
-                    as_type="generation", name="intent_correction_rewriter-llm", model=model
-                ) as gen:
-                    result = await llm.ainvoke(messages_for_llm)
-                    update_llm_generation(gen, model=model, raw=result.get("raw"))
-                response = result["parsed"]
-                fact_queries = list(response.fact_queries)
-                node_span.update(
-                    output={
-                        "fact_queries": [item.model_dump() for item in fact_queries],
-                        "correction_explanation": response.correction_explanation,
-                    }
-                )
-        else:
-            result = await llm.ainvoke(messages_for_llm)
-            response = result["parsed"]
-            fact_queries = list(response.fact_queries)
-
-        if [row.fact for row in fact_queries] != misaligned_texts:
-            raise ValueError("Intent-correction query facts must match misaligned facts by order and text")
-
-        queries: list[str] = []
-        corrected_facts = set()
-        for row in fact_queries:
-            queries.extend(row.search_queries)
-            corrected_facts.add(row.fact)
-        # Keep every unsupported fact represented in the next retrieval pass.
-        for fact in unsupported_texts:
-            if fact not in corrected_facts:
-                queries.append(fact)
-
-        merge: dict[str, Any] = {"active_retrieval_queries": queries}
+        merge: dict[str, Any] = {
+            "facts": updated_facts,
+            "active_retrieval_queries": queries,
+        }
         merge.update(
             trace_row(
-                "intent_correction_rewriter",
-                "intent_correction",
-                {"queries": queries, "misaligned_facts": [row.fact for row in fact_queries]},
-                notes=response.correction_explanation,
+                "gap_fill",
+                "gap_fill",
+                {
+                    "queries": queries,
+                    "repaired_fact_ids": [row.fact_id for row in response.facts],
+                },
+                notes="; ".join(row.gap_fill_explanation for row in response.facts),
             )
         )
         return merge
@@ -903,7 +746,6 @@ class RetrievalGraph:
             if late_enabled and retry_count >= late_threshold
             else "fast_bm25_retrieval"
         )
-        limits = effective_retrieval_limits(retry_count)
 
         if settings.langfuse_tracing_enabled:
             langfuse = get_langfuse_client()
@@ -914,7 +756,6 @@ class RetrievalGraph:
                         "retrieval_retry_count": retry_count,
                         "late_threshold": late_threshold,
                         "late_interaction_enabled": late_enabled,
-                        **limits.as_dict(),
                     }
                 )
 
@@ -931,13 +772,8 @@ class RetrievalGraph:
                     "retrieval_retry_count": retry_count,
                     "late_threshold": late_threshold,
                     "late_interaction_enabled": late_enabled,
-                    **limits.as_dict(),
                 },
-                notes=(
-                    f"Retry {retry_count}: {strategy}; "
-                    f"top_k={limits.top_k}, dense_mmr={limits.dense_mmr}, "
-                    f"bm25={limits.bm25}, late={limits.late_interaction}."
-                ),
+                notes=f"Retry {retry_count}: {strategy}.",
             )
         )
         return merge
@@ -954,10 +790,6 @@ class RetrievalGraph:
         context = (
             "## Normalized query\n"
             f"{state.get('normalized_query') or ''}\n\n"
-            "## Retrieval strategy\n"
-            f"{state.get('retrieval_strategy') or ''}\n\n"
-            "## Active retrieval queries\n"
-            f"{json.dumps(state.get('active_retrieval_queries') or [], ensure_ascii=False)}\n\n"
             "## Retrieved documents\n"
             f"{json.dumps(state.get('retrieved_documents') or [], ensure_ascii=False)}"
         )
@@ -1002,26 +834,14 @@ class RetrievalGraph:
     async def partial_answer_node(self, state: RetrievalState) -> dict[str, Any]:
         """Emit grounded partial answer when retry budgets are exhausted.
 
-        Includes per-fact verification and retry context in the prompt. Routes to ``clear_turn_trace``.
+        Includes per-fact verification in the prompt. Routes to ``clear_turn_trace``.
         """
 
         context = (
             "## Normalized query\n"
             f"{state.get('normalized_query') or ''}\n\n"
-            "## Retrieval strategy\n"
-            f"{state.get('retrieval_strategy') or ''}\n\n"
-            "## Active retrieval queries\n"
-            f"{json.dumps(state.get('active_retrieval_queries') or [], ensure_ascii=False)}\n\n"
-            "## Required facts\n"
-            f"{json.dumps(state.get('required_facts') or [], ensure_ascii=False)}\n\n"
-            "## Verified facts\n"
-            f"{json.dumps(state.get('verified_facts') or [], ensure_ascii=False)}\n\n"
-            "## Unsupported facts\n"
-            f"{json.dumps(unsupported_facts_from_verified(state.get('verified_facts') or []), ensure_ascii=False)}\n\n"
-            "## Intent mismatch details\n"
-            f"{json.dumps(state.get('intent_mismatch_details') or [], ensure_ascii=False)}\n\n"
-            "## Retry count\n"
-            f"{state.get('retrieval_retry_count', 0)} / {settings.retrieval_loop_max_retries}\n\n"
+            "## Facts\n"
+            f"{json.dumps(state.get('facts') or [], ensure_ascii=False)}\n\n"
             "## Retrieved documents\n"
             f"{json.dumps(state.get('retrieved_documents') or [], ensure_ascii=False)}"
         )
@@ -1064,31 +884,20 @@ class RetrievalGraph:
         }
 
     async def clear_turn_trace_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Clear append-only audit trace so the next user turn does not leak prior diagnostics.
-
-        Uses ``Overwrite(value=[])`` because ``message_query`` uses ``operator.add`` reducer.
-        """
+        """Clear turn-local scratch so the checkpoint is clean after answer/partial_answer."""
 
         if settings.langfuse_tracing_enabled:
             langfuse = get_langfuse_client()
             with langfuse.start_as_current_observation(as_type="span", name="clear_turn_trace") as node_span:
                 node_span.update(output={"cleared": True})
-        return {
-            "message_query": Overwrite(value=[]),
-            "retrieved_documents": Overwrite(value=[]),
-        }
+        return _turn_scratch_reset()
 
     # --- Conditional routing ---
 
     def route_after_complexity(self, state: RetrievalState) -> str:
-        """Map ``query_complexity.complexity`` to the next graph node name.
+        """Route to query_splitter when multiple facts need per-fact queries."""
 
-        needs_split -> query_splitter
-        simple_query (and unknown) -> retrieval (uses seeded active_retrieval_queries)
-        """
-
-        complexity = (state.get("query_complexity") or {}).get("complexity")
-        if complexity == "needs_split":
+        if needs_query_split(state.get("facts") or []):
             return "query_splitter"
         return "retrieval"
 
@@ -1097,25 +906,14 @@ class RetrievalGraph:
 
         1. no unsupported facts → ``answer``
         2. retry budget exhausted → ``partial_answer``
-        3. unsupported facts remain and retries remain → ``intent_check``
+        3. unsupported facts remain and retries remain → ``gap_fill``
         """
 
-        if not unsupported_facts_from_verified(state.get("verified_facts") or []):
+        if not unsupported_facts(state.get("facts") or []):
             return "answer"
         if state.get("retrieval_retry_count", 0) >= settings.retrieval_loop_max_retries:
             return "partial_answer"
-        return "intent_check"
-
-    def route_after_intent_check(self, state: RetrievalState) -> str:
-        """Route after ``intent_check``.
-
-        ``intent_aligned`` → evidence-gap path (gap_fill → strategy_upgrade).
-        else → query/intent fix (intent_correction_rewriter → strategy_upgrade).
-        """
-
-        if state.get("intent_aligned"):
-            return "gap_fill"
-        return "intent_correction_rewriter"
+        return "gap_fill"
 
     # --- Graph wiring ---
 
@@ -1129,10 +927,8 @@ class RetrievalGraph:
         builder.add_node("query_splitter", self.query_splitter_node)
         builder.add_node("retrieval", self.retrieval_node)
         builder.add_node("recall_check", self.recall_check_node)
-        builder.add_node("intent_check", self.intent_check_node)
         builder.add_node("gap_fill", self.gap_fill_node)
         builder.add_node("strategy_upgrade", self.strategy_upgrade_node)
-        builder.add_node("intent_correction_rewriter", self.intent_correction_rewriter_node)
         builder.add_node("answer", self.answer_node)
         builder.add_node("partial_answer", self.partial_answer_node)
         builder.add_node("clear_turn_trace", self.clear_turn_trace_node)
@@ -1158,22 +954,11 @@ class RetrievalGraph:
             {
                 "answer": "answer",
                 "partial_answer": "partial_answer",
-                "intent_check": "intent_check",
-            },
-        )
-        builder.add_conditional_edges(
-            "intent_check",
-            self.route_after_intent_check,
-            {
                 "gap_fill": "gap_fill",
-                "intent_correction_rewriter": "intent_correction_rewriter",
             },
         )
-        # Intent-aligned repair chain (sequential nodes; no parallel branches).
         builder.add_edge("gap_fill", "strategy_upgrade")
         builder.add_edge("strategy_upgrade", "retrieval")
-        # Intent-mismatch correction shares the same deterministic retry/tier step.
-        builder.add_edge("intent_correction_rewriter", "strategy_upgrade")
         builder.add_edge("answer", "clear_turn_trace")
         builder.add_edge("partial_answer", "clear_turn_trace")
         builder.add_edge("clear_turn_trace", END)
@@ -1191,20 +976,7 @@ class RetrievalGraph:
         """
         return {
             "messages": [HumanMessage(content=user_query)],
-            "normalized_query": "",
-            "query_complexity": {},
-            "retrieval_strategy": "",
-            "active_retrieval_queries": [],
-            "retrieved_documents": Overwrite(value=[]),
-            # Recall / intent repair scratch (see RetrievalState comments).
-            "required_facts": [],
-            "verified_facts": [],
-            "fact_intents": [],
-            "intent_mismatch_details": [],
-            "recall_sufficient": False,
-            "intent_aligned": False,
-            "retrieval_retry_count": 0,
-            "message_query": Overwrite(value=[]),
+            **_turn_scratch_reset(),
         }
 
     def _invoke_config(self, session_id: str) -> dict[str, Any]:

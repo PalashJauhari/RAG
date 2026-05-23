@@ -8,9 +8,13 @@ from output_validation.fact_decomposition import validate_unique_fact_texts
 
 
 class VerifiedFact(BaseModel):
-    """Evidence status for one required fact."""
+    """Evidence status for one fact from the unified facts list."""
 
-    fact: str = Field(description="Exact required fact text from the decomposition.")
+    fact_id: int | None = Field(
+        default=None,
+        description="Stable fact id from fact_decomposition; preserved when returned.",
+    )
+    fact: str = Field(description="Exact fact text from the unified facts list.")
     verification_status: bool = Field(
         description="True when retrieved passages alone support this fact.",
     )
@@ -57,7 +61,7 @@ class RecallVerifyResult(BaseModel):
     """Per-fact sufficient-context verification against retrieved passages."""
 
     facts: list[VerifiedFact] = Field(
-        description="Verification result for every required fact.",
+        description="Verification result for every fact in the unified facts list.",
     )
 
     @model_validator(mode="after")

@@ -1,7 +1,7 @@
 """Structured output for ``gap_fill_node`` (prompt: ``prompts/gap_fill.py``).
 
-``fact_queries`` replace ``active_retrieval_queries`` on insufficient recall retries.
-Tier selection is deterministic in the graph.
+Repairs unsupported facts in place on the unified ``facts`` list; the graph flattens
+``search_queries`` into ``active_retrieval_queries`` for retrieval.
 """
 
 from pydantic import BaseModel, Field, model_validator
@@ -51,41 +51,48 @@ def ensure_three_search_queries(fact: str, queries: list[str]) -> list[str]:
     return normalized[:3]
 
 
-class FactSearchQueries(BaseModel):
-    """Three retrieval queries for one unsupported fact."""
+class GapFillFact(BaseModel):
+    """Retrieval repair for one unsupported fact."""
 
+    fact_id: int = Field(description="Stable fact id from the unified facts list.")
     fact: str = Field(description="Exact unsupported fact text.")
-
     search_queries: list[str] = Field(
         description="Exactly three focused, self-contained retrieval queries.",
     )
+    gap_fill_explanation: str = Field(
+        description="Brief explanation of how these queries address this fact's recall gap.",
+    )
 
     @model_validator(mode="after")
-    def validate_fact_and_queries(self) -> "FactSearchQueries":
+    def validate_repair_fields(self) -> "GapFillFact":
         fact = self.fact.strip()
+        explanation = self.gap_fill_explanation.strip()
         if not fact:
             raise ValueError("fact must be a non-empty string")
-        self.fact = fact
-        self.search_queries = ensure_three_search_queries(fact, self.search_queries)
-        return self
+        if not explanation:
+            raise ValueError("gap_fill_explanation must be a non-empty string")
+        return self.model_copy(
+            update={
+                "fact": fact,
+                "gap_fill_explanation": explanation,
+                "search_queries": ensure_three_search_queries(fact, self.search_queries),
+            }
+        )
 
 
 class GapFillResult(BaseModel):
-    """Missing-evidence queries generated after insufficient recall."""
+    """Per-fact repair rows for unsupported facts only."""
 
-    fact_queries: list[FactSearchQueries] = Field(
-        description="Exactly three search queries for each unsupported fact.",
-    )
-    gap_fill_explanation: str = Field(
-        description="Brief explanation of how the missing queries address the recall gap.",
-        examples=[
-            "Generated one query for each missing tier-specific refund detail.",
-        ],
+    facts: list[GapFillFact] = Field(
+        description="One repair object for every unsupported fact and no extras.",
     )
 
     @model_validator(mode="after")
-    def validate_fact_queries(self) -> "GapFillResult":
-        if not self.fact_queries:
-            raise ValueError("fact_queries must contain at least one fact")
-        validate_unique_fact_texts([item.fact for item in self.fact_queries])
+    def validate_facts(self) -> "GapFillResult":
+        if not self.facts:
+            raise ValueError("facts must contain at least one unsupported fact")
+        validate_unique_fact_texts([item.fact for item in self.facts])
+        fact_ids = [item.fact_id for item in self.facts]
+        if len(set(fact_ids)) != len(fact_ids):
+            raise ValueError("fact_id values must be unique within gap-fill output")
         return self

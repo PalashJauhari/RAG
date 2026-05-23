@@ -1,7 +1,6 @@
 """Compact retriever results for graph state and LLM prompts.
 
-Strips Qdrant payload metadata so recall/answer nodes see only ``score`` and ``text``.
-Source citation wiring is deferred; extend here when ``sources`` are populated.
+Strips Qdrant payload metadata so recall/answer nodes see ``id``, ``score``, and ``text``.
 """
 
 from __future__ import annotations
@@ -10,15 +9,10 @@ from typing import Any
 
 
 def compact_hotqa_documents_for_llm(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """
-    Reduce retriever docs to the fields currently consumed by recall/answer prompts.
-
-    Source metadata is intentionally left out for now; only score and text are exposed.
-    """
+    """Reduce retriever docs to the fields consumed by recall/answer prompts."""
 
     slim: list[dict[str, Any]] = []
     for doc in documents:
-        # Qdrant returns id/payload/rank; graph state and prompts only need score + text.
         payload = doc.get("payload") or {}
         raw = payload.get("text")
         if raw is None:
@@ -27,5 +21,5 @@ def compact_hotqa_documents_for_llm(documents: list[dict[str, Any]]) -> list[dic
             text = raw
         else:
             text = str(raw)
-        slim.append({"score": doc.get("score"), "text": text})
+        slim.append({"id": doc.get("id"), "score": doc.get("score"), "text": text})
     return slim

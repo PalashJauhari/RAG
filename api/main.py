@@ -1,8 +1,7 @@
 """FastAPI HTTP surface for the RAG retrieval orchestrator.
 
 Exposes ``POST /run`` (blocking invoke), ``POST /run/stream`` (SSE node progress for
-the Dash UI), and ``POST /resume`` (future clarification interrupts). After retrieval,
-``recall_check`` routes to answer, intent repair, or partial answer. Application lifespan
+the Dash UI), and ``POST /resume`` (future clarification interrupts). After retrieval, ``recall_check`` routes to answer, gap-fill repair, or partial answer. Application lifespan
 constructs a :class:`~graph.graph.RetrievalGraph` with either in-memory or Postgres
 LangGraph checkpointing. ``session_id`` maps to LangGraph ``thread_id``.
 """
@@ -68,7 +67,7 @@ async def lifespan(app: FastAPI):
         await app.state.retrieval_graph.close()
 
 
-app = FastAPI(title="RAG Retrieval Orchestrator", lifespan=lifespan)
+app = FastAPI(title="Factline", lifespan=lifespan)
 
 # CORS: Dash on 8050 calls the API from the browser; allow loopback variants.
 app.add_middleware(
@@ -155,23 +154,27 @@ def get_stream_event(
         if mq:
             event["message_query_tail"] = _message_query_tail(mq)
     elif node_name == "fact_decomposition":
-        required_facts = payload.get("required_facts") or []
+        facts = payload.get("facts") or []
         event.update(
             {
-                "label": "Decomposing required facts",
-                "required_fact_count": len(required_facts),
+                "label": "Decomposing facts",
+                "fact_count": len(facts),
             }
         )
         mq = payload.get("message_query")
         if mq:
             event["message_query_tail"] = _message_query_tail(mq)
     elif node_name == "query_complexity":
-        query_complexity = payload.get("query_complexity") or {}
+        needs_split = payload.get("needs_split")
+        mq = payload.get("message_query") or []
+        explanation = None
+        if mq and isinstance(mq[-1], dict):
+            explanation = mq[-1].get("notes")
         event.update(
             {
                 "label": "Routing by fact count",
-                "complexity": query_complexity.get("complexity"),
-                "explanation": query_complexity.get("explanation"),
+                "needs_split": needs_split,
+                "explanation": explanation,
             }
         )
         mq = payload.get("message_query")
@@ -202,29 +205,17 @@ def get_stream_event(
         if mq:
             event["message_query_tail"] = _message_query_tail(mq)
     elif node_name == "recall_check":
-        verified_facts = payload.get("verified_facts") or []
-        unsupported_facts = [
-            row for row in verified_facts if isinstance(row, dict) and not row.get("verification_status")
+        facts = payload.get("facts") or []
+        unsupported = [
+            row for row in facts if isinstance(row, dict) and not row.get("verification_status")
         ]
         event.update(
             {
                 "label": "Checking recall",
                 "recall_sufficient": payload.get("recall_sufficient"),
-                "unsupported_fact_count": len(unsupported_facts),
+                "unsupported_fact_count": len(unsupported),
                 "retrieved_doc_count": retrieved_doc_count or 0,
                 "retrieval_loop_count": retrieval_loop_count,
-            }
-        )
-        mq = payload.get("message_query")
-        if mq:
-            event["message_query_tail"] = _message_query_tail(mq)
-    elif node_name == "intent_check":
-        fact_intents = payload.get("fact_intents") or []
-        event.update(
-            {
-                "label": "Checking intent alignment",
-                "intent_aligned": payload.get("intent_aligned"),
-                "fact_intent_count": len(fact_intents),
             }
         )
         mq = payload.get("message_query")
@@ -243,16 +234,6 @@ def get_stream_event(
                 "label": "Evaluating retrieval tier",
                 "retrieval_strategy": payload.get("retrieval_strategy"),
                 "retrieval_loop_count": retrieval_loop_count,
-            }
-        )
-        mq = payload.get("message_query")
-        if mq:
-            event["message_query_tail"] = _message_query_tail(mq)
-    elif node_name == "intent_correction_rewriter":
-        event.update(
-            {
-                "label": "Correcting retrieval intent",
-                "active_retrieval_queries": payload.get("active_retrieval_queries") or [],
             }
         )
         mq = payload.get("message_query")
