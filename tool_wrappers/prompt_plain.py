@@ -8,7 +8,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 
-def _content_plain(content: Any) -> str:
+def content_plain(content: Any) -> str:
     """Normalize LangChain message content to plain text (string or text blocks in lists)."""
     if content is None:
         return ""
@@ -33,7 +33,7 @@ def messages_to_plain_context(messages: list[Any]) -> str:
         if not isinstance(m, BaseMessage):
             chunks.append(str(m))
             continue
-        text = _content_plain(getattr(m, "content", None))
+        text = content_plain(getattr(m, "content", None))
         if isinstance(m, HumanMessage):
             chunks.append(f"Human:\n{text}".strip())
         elif isinstance(m, AIMessage):

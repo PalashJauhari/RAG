@@ -1,4 +1,4 @@
-"""Download open-access PDFs from PubMed Central into ``raw_pdfs/``.
+"""Download open-access PDFs from PubMed Central into ``ingestion/raw_pdfs/``.
 
 Each run clears the output directory first (except ``.gitkeep``), searches PMC via
 NCBI Entrez, resolves OA links through the PMC OA service, and writes
@@ -44,6 +44,7 @@ OA_URL = "https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi"
 PMC_FTP_HOST = "ftp.ncbi.nlm.nih.gov"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+INGESTION_ROOT = Path(__file__).resolve().parent
 REQUEST_TIMEOUT_SECONDS = 60
 PMC_REQUEST_DELAY_SECONDS = 0.4
 NCBI_TOOL = "factline-rag"
@@ -236,10 +237,10 @@ def download_pmc_pdf(pmc_id: str) -> tuple[bytes, str, str]:
 
 
 def relative_pdf_path(pdf_path: Path) -> str:
-    """Return ``pdf_path`` relative to repo root when possible."""
+    """Return ``pdf_path`` relative to ingestion root when possible."""
 
     try:
-        return str(pdf_path.relative_to(REPO_ROOT))
+        return str(pdf_path.relative_to(INGESTION_ROOT))
     except ValueError:
         return str(pdf_path)
 
@@ -379,7 +380,7 @@ def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
 
     parser = argparse.ArgumentParser(
-        description="Download PMC open-access PDFs into raw_pdfs/ (clears output dir each run).",
+        description="Download PMC open-access PDFs into ingestion/raw_pdfs/ (clears output dir each run).",
     )
     parser.add_argument(
         "--query",
@@ -395,7 +396,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         default="raw_pdfs",
-        help="Download destination relative to repo root (default: raw_pdfs).",
+        help="Download destination under ingestion/ (default: ingestion/raw_pdfs).",
     )
     return parser.parse_args()
 
@@ -406,7 +407,7 @@ def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir)
     if not output_dir.is_absolute():
-        output_dir = REPO_ROOT / output_dir
+        output_dir = INGESTION_ROOT / output_dir
 
     run_download(
         query=args.query.strip(),

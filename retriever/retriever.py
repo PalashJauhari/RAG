@@ -159,7 +159,7 @@ class Retriever:
             colbert_vectors = await self.create_late_interaction_embeddings(clean_queries)
 
         if self.config.retrieval_subquery_parallel:
-            query_results = await self._retrieve_all_parallel(
+            query_results = await self.retrieve_all_parallel(
                 clean_queries,
                 strategy=strategy,
                 top_k=limit,
@@ -171,7 +171,7 @@ class Retriever:
                 colbert_vectors=colbert_vectors,
             )
         else:
-            query_results = await self._retrieve_all_sequential(
+            query_results = await self.retrieve_all_sequential(
                 clean_queries,
                 strategy=strategy,
                 top_k=limit,
@@ -204,7 +204,7 @@ class Retriever:
 
         return final_docs
 
-    async def _retrieve_all_sequential(
+    async def retrieve_all_sequential(
         self,
         clean_queries: list[str],
         *,
@@ -219,7 +219,7 @@ class Retriever:
     ) -> list[list[Any]]:
         query_results: list[list[Any]] = []
         for index, query in enumerate(clean_queries):
-            points = await self._retrieve_one(
+            points = await self.retrieve_one(
                 query,
                 top_k,
                 strategy,
@@ -233,7 +233,7 @@ class Retriever:
             query_results.append(points)
         return query_results
 
-    async def _retrieve_all_parallel(
+    async def retrieve_all_parallel(
         self,
         clean_queries: list[str],
         *,
@@ -251,7 +251,7 @@ class Retriever:
 
         async def run_one(index: int, query: str) -> list[Any]:
             async with sem:
-                return await self._retrieve_one(
+                return await self.retrieve_one(
                     query,
                     top_k,
                     strategy,
@@ -267,7 +267,7 @@ class Retriever:
         return list(await asyncio.gather(*tasks))
 
     @staticmethod
-    def _exclude_filter(exclude_point_ids: list[str] | None) -> models.Filter | None:
+    def exclude_filter(exclude_point_ids: list[str] | None) -> models.Filter | None:
         """Build a Qdrant filter that excludes already-seen point ids."""
 
         if not exclude_point_ids:
@@ -277,7 +277,7 @@ class Retriever:
             return None
         return models.Filter(must_not=[models.HasIdCondition(has_id=clean_ids)])
 
-    def _dense_query(self, dense_vector: list[float], dense_mmr_limit: int) -> Any:
+    def dense_query(self, dense_vector: list[float], dense_mmr_limit: int) -> Any:
         """Build dense query vector, optionally wrapped with MMR diversification."""
 
         if not self.config.use_mmr:
@@ -290,7 +290,7 @@ class Retriever:
             ),
         )
 
-    async def _retrieve_one(
+    async def retrieve_one(
         self,
         query: str,
         top_k: int,
@@ -305,7 +305,7 @@ class Retriever:
     ) -> list[Any]:
         """Execute a single-query retrieval pipeline for the given strategy tier."""
 
-        query_filter = self._exclude_filter(exclude_point_ids)
+        query_filter = self.exclude_filter(exclude_point_ids)
 
         if strategy == "keyword":
             response = await self.qdrant.query_points(
@@ -321,7 +321,7 @@ class Retriever:
 
         if dense_vector is None:
             dense_vector = (await self.create_dense_embeddings([query]))[0]
-        dense_query = self._dense_query(dense_vector, dense_mmr_limit)
+        dense_query = self.dense_query(dense_vector, dense_mmr_limit)
 
         if strategy == "fast_retrieval":
             response = await self.qdrant.query_points(

@@ -149,7 +149,7 @@ For each context, `text` is all non-empty `sentences` joined with spaces. Prepar
 - `keywords`: named entities plus other high-signal retrieval terms.
 - On failure after `HOTPOTQA_ENRICHMENT_MAX_RETRIES`, `enrichment` is `null`; upload embeds raw `text` only.
 
-**Upload embedding prefix** (`ingestion.embed_text.build_embedded_text`, via `ingestion.adapters.hotpotqa.context_to_chunk`) — same string for dense, BM25, and ColBERT:
+**Upload enriched search text** (`benchmarking.hotpotqa.enrich_text.build_enriched_text`, via `benchmarking.hotpotqa.adapters.hotpotqa.context_to_chunk`) — same string for dense, BM25, and ColBERT. Upload implementation: `benchmarking/hotpotqa/qdrant_upload_lib.py` (standalone from `ingestion/`).
 
 ```text
 Title:

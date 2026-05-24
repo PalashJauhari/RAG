@@ -8,7 +8,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from ingestion.schema import get_raw_text
+
+def get_raw_text(payload: dict[str, Any]) -> str:
+    """Return raw passage text from a Qdrant payload dict."""
+
+    data = payload or {}
+    additional = data.get("additional_metadata")
+    if isinstance(additional, dict):
+        raw = additional.get("raw_text")
+        if raw is not None and str(raw).strip():
+            return str(raw)
+
+    return str(data.get("text") or "")
 
 
 def compact_documents_for_llm(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:

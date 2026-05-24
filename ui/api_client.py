@@ -35,14 +35,14 @@ class RagApiClient:
         Returns:
             Normalized response dict (answer, confidence, retrieved_docs, etc.).
         """
-        return self._post(
+        return self.post_json(
             "/run",
             {"message": message, "session_id": session_id},
         )
 
     def resume(self, answer: str, session_id: str) -> dict[str, Any]:
         """Resume after clarification: ``POST /resume``."""
-        return self._post(
+        return self.post_json(
             "/resume",
             {"answer": answer, "session_id": session_id},
         )
@@ -83,7 +83,7 @@ class RagApiClient:
         except requests.exceptions.ConnectionError as exc:
             raise ConnectionError("Cannot reach API. Start uvicorn or set API_URL.") from exc
 
-    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """POST JSON to ``path`` and normalize errors into a dict with ``error`` key."""
         try:
             response = self.session.post(

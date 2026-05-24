@@ -1,8 +1,4 @@
-"""Canonical Qdrant chunk payload contract for all corpora.
-
-Qdrant stores ``text`` (embedded string), ``enrichments``, and ``additional_metadata``
-with mandatory ``raw_text``. Graph and RAGAS consume ``raw_text`` only at read time.
-"""
+"""Qdrant point payload contract for HotpotQA benchmark upload."""
 
 from __future__ import annotations
 
@@ -48,7 +44,7 @@ def get_enriched_text(payload: dict[str, Any] | ChunkPayload) -> str:
 
 
 def get_raw_text(payload: dict[str, Any] | ChunkPayload) -> str:
-    """Return raw passage text for graph, API, and RAGAS."""
+    """Return raw passage text for RAGAS and eval."""
 
     if isinstance(payload, ChunkPayload):
         return str(payload.additional_metadata.get("raw_text") or "")
@@ -60,7 +56,6 @@ def get_raw_text(payload: dict[str, Any] | ChunkPayload) -> str:
         if raw is not None and str(raw).strip():
             return str(raw)
 
-    # Legacy HotpotQA flat payload fallback (pre-contract collections).
     return str(data.get("text") or "")
 
 

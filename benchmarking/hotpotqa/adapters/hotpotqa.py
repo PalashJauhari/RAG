@@ -1,12 +1,12 @@
-"""Map HotpotQA eval JSON contexts to canonical :class:`~ingestion.schema.ChunkPayload`."""
+"""Map HotpotQA eval JSON contexts to canonical :class:`~benchmarking.hotpotqa.qdrant_payload.ChunkPayload`."""
 
 from __future__ import annotations
 
 import uuid
 from typing import Any
 
-from ingestion.embed_text import build_embedded_text
-from ingestion.schema import ChunkPayload
+from benchmarking.hotpotqa.enrich_text import build_enriched_text
+from benchmarking.hotpotqa.qdrant_payload import ChunkPayload
 
 
 def context_to_chunk(record: dict[str, Any], context: dict[str, Any]) -> tuple[str, ChunkPayload]:
@@ -17,7 +17,7 @@ def context_to_chunk(record: dict[str, Any], context: dict[str, Any]) -> tuple[s
     if not isinstance(enrichments, dict):
         enrichments = {}
 
-    embedded = build_embedded_text(
+    enriched = build_enriched_text(
         raw_text=raw_text,
         enrichments=enrichments,
         title=str(context.get("title") or ""),
@@ -26,7 +26,7 @@ def context_to_chunk(record: dict[str, Any], context: dict[str, Any]) -> tuple[s
     point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, context_id))
 
     payload = ChunkPayload(
-        text=embedded,
+        text=enriched,
         enrichments=enrichments,
         additional_metadata={
             "raw_text": raw_text,

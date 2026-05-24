@@ -1,4 +1,5 @@
 .env
+ingestion/.env
 __pycache__/
 *.pyc
 .venv/
@@ -12,5 +13,5 @@ benchmarking/hotpotqa/data/results/*
 
 artifacts/
 
-raw_pdfs/*
-!raw_pdfs/.gitkeep
+ingestion/raw_pdfs/*
+!ingestion/raw_pdfs/.gitkeep

@@ -12,13 +12,13 @@ from typing import Any
 from benchmarking.hotpotqa.settings import HOTPOTQA_ROOT, HotpotQASettings
 
 
-def _load_json(path: Path) -> dict[str, Any] | list[Any] | None:
+def load_json_file(path: Path) -> dict[str, Any] | list[Any] | None:
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _fmt(value: float | int | None, digits: int = 4) -> str:
+def format_metric(value: float | int | None, digits: int = 4) -> str:
     if value is None:
         return "—"
     if isinstance(value, float):
@@ -26,14 +26,21 @@ def _fmt(value: float | int | None, digits: int = 4) -> str:
     return str(value)
 
 
+def relative_hotpotqa_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(HOTPOTQA_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def build_report_markdown(settings: HotpotQASettings | None = None) -> str:
     """Build report body and write ``benchmark_report.md``."""
 
     settings = settings or HotpotQASettings()
 
-    metadata = _load_json(settings.run_metadata_path)
-    ragas = _load_json(settings.ragas_results_path)
-    retrieval_rows = _load_json(settings.retrieval_results_path)
+    metadata = load_json_file(settings.run_metadata_path)
+    ragas = load_json_file(settings.ragas_results_path)
+    retrieval_rows = load_json_file(settings.retrieval_results_path)
 
     strategy = None
     if isinstance(metadata, dict):
@@ -68,8 +75,8 @@ def build_report_markdown(settings: HotpotQASettings | None = None) -> str:
             [
                 "| Metric | Mean |",
                 "|--------|------|",
-                f"| Context precision | {_fmt(s.get('mean_context_precision'))} |",
-                f"| Context recall | {_fmt(s.get('mean_context_recall'))} |",
+                f"| Context precision | {format_metric(s.get('mean_context_precision'))} |",
+                f"| Context recall | {format_metric(s.get('mean_context_recall'))} |",
                 f"| Questions scored | {s.get('total_scored', '—')} |",
                 f"| Skipped (empty contexts) | {s.get('skipped_empty_contexts', 0)} |",
                 "",
@@ -90,11 +97,11 @@ def build_report_markdown(settings: HotpotQASettings | None = None) -> str:
             [
                 "| Stat | ms |",
                 "|------|-----|",
-                f"| Mean | {_fmt(latency.get('mean_ms'), 2)} |",
-                f"| p50 | {_fmt(latency.get('p50_ms'), 2)} |",
-                f"| p95 | {_fmt(latency.get('p95_ms'), 2)} |",
-                f"| Min | {_fmt(latency.get('min_ms'), 2)} |",
-                f"| Max | {_fmt(latency.get('max_ms'), 2)} |",
+                f"| Mean | {format_metric(latency.get('mean_ms'), 2)} |",
+                f"| p50 | {format_metric(latency.get('p50_ms'), 2)} |",
+                f"| p95 | {format_metric(latency.get('p95_ms'), 2)} |",
+                f"| Min | {format_metric(latency.get('min_ms'), 2)} |",
+                f"| Max | {format_metric(latency.get('max_ms'), 2)} |",
                 "",
             ]
         )
@@ -111,9 +118,9 @@ def build_report_markdown(settings: HotpotQASettings | None = None) -> str:
                 [
                     "| Stat | ms |",
                     "|------|-----|",
-                    f"| Mean | {_fmt(sum(ordered) / n, 2)} |",
-                    f"| Min | {_fmt(ordered[0], 2)} |",
-                    f"| Max | {_fmt(ordered[-1], 2)} |",
+                    f"| Mean | {format_metric(sum(ordered) / n, 2)} |",
+                    f"| Min | {format_metric(ordered[0], 2)} |",
+                    f"| Max | {format_metric(ordered[-1], 2)} |",
                     "",
                 ]
             )
@@ -138,25 +145,19 @@ def build_report_markdown(settings: HotpotQASettings | None = None) -> str:
             n = len(group_rows)
             lines.append(
                 f"| {qtype} | {level} | {n} | "
-                f"{_fmt(sum(r['context_precision'] for r in group_rows) / n)} | "
-                f"{_fmt(sum(r['context_recall'] for r in group_rows) / n)} |"
+                f"{format_metric(sum(r['context_precision'] for r in group_rows) / n)} | "
+                f"{format_metric(sum(r['context_recall'] for r in group_rows) / n)} |"
             )
         lines.append("")
-
-    def _rel(path: Path) -> str:
-        try:
-            return str(path.relative_to(HOTPOTQA_ROOT))
-        except ValueError:
-            return str(path)
 
     lines.extend(
         [
             "## Artifacts",
             "",
-            f"- `{_rel(settings.retrieval_results_path)}`",
-            f"- `{_rel(settings.run_metadata_path)}`",
-            f"- `{_rel(settings.ragas_results_path)}`",
-            f"- `{_rel(settings.benchmark_report_path)}`",
+            f"- `{relative_hotpotqa_path(settings.retrieval_results_path)}`",
+            f"- `{relative_hotpotqa_path(settings.run_metadata_path)}`",
+            f"- `{relative_hotpotqa_path(settings.ragas_results_path)}`",
+            f"- `{relative_hotpotqa_path(settings.benchmark_report_path)}`",
             "",
         ]
     )

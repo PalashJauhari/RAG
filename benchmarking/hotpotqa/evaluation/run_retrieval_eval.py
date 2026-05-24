@@ -17,12 +17,12 @@ from typing import Any
 
 from benchmarking.hotpotqa.settings import HotpotQASettings
 from benchmarking.hotpotqa.strategy import parse_strategy, validate_strategy_env
-from ingestion.schema import get_metadata, get_raw_text
+from benchmarking.hotpotqa.qdrant_payload import get_metadata, get_raw_text
 from output_validation.retrieval_strategy import RetrievalStrategy
 from retriever.retriever import Retriever
 
 
-def _latency_summary(latencies_ms: list[float]) -> dict[str, float]:
+def latency_summary(latencies_ms: list[float]) -> dict[str, float]:
     if not latencies_ms:
         return {"mean_ms": 0.0, "p50_ms": 0.0, "p95_ms": 0.0, "min_ms": 0.0, "max_ms": 0.0}
     ordered = sorted(latencies_ms)
@@ -41,7 +41,7 @@ def _latency_summary(latencies_ms: list[float]) -> dict[str, float]:
     }
 
 
-def _env_snapshot(settings: HotpotQASettings) -> dict[str, Any]:
+def env_snapshot(settings: HotpotQASettings) -> dict[str, Any]:
     return {
         "use_bm25": settings.use_bm25,
         "use_late_interaction": settings.use_late_interaction,
@@ -121,7 +121,7 @@ async def run_retrieval_eval(
     finally:
         await retriever.qdrant.close()
 
-    latency_stats = _latency_summary(latencies_ms)
+    latency_stats = latency_summary(latencies_ms)
     metadata = {
         "retrieval_strategy": strategy,
         "experiment_name": settings.hotpotqa_experiment_name,
@@ -129,7 +129,7 @@ async def run_retrieval_eval(
         "retrieval_top_k": settings.retrieval_top_k,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "retriever_latency": latency_stats,
-        "env": _env_snapshot(settings),
+        "env": env_snapshot(settings),
     }
 
     settings.results_dir.mkdir(parents=True, exist_ok=True)

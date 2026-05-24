@@ -98,15 +98,25 @@ Every Qdrant point (HotpotQA, PMC, or future corpora) uses the same payload shap
 | `additional_metadata.raw_text` | Always required; used by graph LLM nodes and RAGAS |
 | No enrichment | `enrichments = {}` and `text == raw_text` |
 
+### Production ingestion
+
+PMC PDF download, Unstructured partition/chunk, and Qdrant upload live under **`ingestion/`** with its own `.env`. See **[ingestion/README.md](ingestion/README.md)** for the full flow, commands, and env reference.
+
+```text
+download_data  →  unstructured_pipeline  →  chunks.json  →  qdrant_upload  →  Qdrant
+```
+
+**Isolation:** `ingestion/` does not import graph, retriever, or benchmark code. HotpotQA benchmarking is separate under `benchmarking/hotpotqa/`. Graph reads raw passage text via `tool_wrappers/retrieval_payload.py`.
+
 ### At retrieval time
 
 | Layer | Shape | `text` meaning |
 |-------|--------|----------------|
 | Retriever hit | `{id, score, rank, payload}` | Full Qdrant payload |
-| Graph `retrieved_documents` (during turn) | `{id, score, text}` | **`raw_text`** via `get_raw_text()` — not enriched embed string |
+| Graph `retrieved_documents` (during turn) | `{id, score, text}` | **`raw_text`** from payload — not enriched embed string |
 | API `/run` `retrieved_docs` | `[]` | **Intentionally empty** after `clear_turn_trace`; answer is the user-facing output |
 
-Compaction happens in `tool_wrappers/retrieval_payload.py` (`compact_documents_for_llm`). Adapters live under `ingestion/adapters/` (HotpotQA today; PMC TBD). Shared upload: `ingestion/qdrant_upload.py`. Schema helpers: `ingestion/schema.py`.
+Compaction happens in `tool_wrappers/retrieval_payload.py` (`compact_documents_for_llm`). Ingestion upload: `ingestion/qdrant_upload.py` + `ingestion/.env`. Benchmark upload: `benchmarking/hotpotqa/qdrant_upload_lib.py` + `benchmarking/hotpotqa/.env`.
 
 After changing the contract, **re-upload** your Qdrant collection (e.g. `python -m benchmarking.hotpotqa.qdrant_upload.upload` for benchmarks).
 
@@ -161,7 +171,7 @@ python check_settings.py          # list unused Settings fields (dev utility)
 | `output_validation/` | Pydantic schemas for structured outputs |
 | `api/` | FastAPI `/run`, `/run/stream`, `/resume` |
 | `ui/` | Dash chat client |
-| `ingestion/` | Download, chunk schema, adapters, shared Qdrant upload |
+| `ingestion/` | Self-contained PMC pipeline: download, chunk stub, `.env`, embed, Qdrant upload |
 | `benchmarking/` | Optional offline retrieval / eval suite |
 | `artifacts/` | Graph topology diagram |
 

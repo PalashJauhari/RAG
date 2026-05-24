@@ -1,4 +1,4 @@
-"""Qdrant collection setup and chunk upsert for production ingestion."""
+"""Qdrant collection setup and chunk upsert for HotpotQA benchmark."""
 
 from __future__ import annotations
 
@@ -6,14 +6,17 @@ from typing import Any
 
 from qdrant_client import AsyncQdrantClient, models
 
-from ingestion.embeddings import create_dense_embeddings, create_late_interaction_embeddings
-from ingestion.schema import ChunkPayload, get_enriched_text
-from ingestion.settings import IngestionSettings
+from benchmarking.hotpotqa.embeddings import (
+    create_dense_embeddings,
+    create_late_interaction_embeddings,
+)
+from benchmarking.hotpotqa.qdrant_payload import ChunkPayload, get_enriched_text
+from benchmarking.hotpotqa.settings import HotpotQASettings
 
 
 async def recreate_collection(
     client: AsyncQdrantClient,
-    settings: IngestionSettings,
+    settings: HotpotQASettings,
 ) -> None:
     """Delete existing collection with the same name, then create a fresh one."""
 
@@ -56,16 +59,15 @@ async def recreate_collection(
 
 async def upsert_chunks(
     client: AsyncQdrantClient,
-    settings: IngestionSettings,
+    settings: HotpotQASettings,
     chunks: list[tuple[str, ChunkPayload]],
     *,
-    batch_size: int | None = None,
+    batch_size: int,
 ) -> None:
     """Embed ``payload.text`` for each chunk and upsert to Qdrant."""
 
-    limit = batch_size or settings.ingestion_upload_batch_size
-    for start in range(0, len(chunks), limit):
-        batch = chunks[start : start + limit]
+    for start in range(0, len(chunks), batch_size):
+        batch = chunks[start : start + batch_size]
         texts = [get_enriched_text(payload) for _, payload in batch]
         dense_vectors = await create_dense_embeddings(settings, texts)
         colbert_vectors = None
@@ -101,4 +103,4 @@ async def upsert_chunks(
             points=points,
             wait=True,
         )
-        print(f"Uploaded {min(start + limit, len(chunks))}/{len(chunks)} points")
+        print(f"Uploaded {min(start + batch_size, len(chunks))}/{len(chunks)} points")

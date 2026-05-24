@@ -1,17 +1,17 @@
-"""Build embedded text strings from raw passages and optional enrichments."""
+"""Build enriched search strings from raw passages and optional enrichments."""
 
 from __future__ import annotations
 
 from typing import Any
 
 
-def build_embedded_text(
+def build_enriched_text(
     *,
     raw_text: str,
     enrichments: dict[str, Any] | None = None,
     title: str | None = None,
 ) -> str:
-    """Return text for dense/BM25/ColBERT embed.
+    """Return enriched text for dense/BM25/ColBERT embedding at upload.
 
     When ``enrichments`` is empty, returns ``raw_text`` unchanged.
     """

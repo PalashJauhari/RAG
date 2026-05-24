@@ -176,7 +176,7 @@ def late_interaction_enabled() -> bool:
     return settings.use_late_interaction and bool(settings.jina_api_key.strip())
 
 
-def _turn_scratch_reset() -> dict[str, Any]:
+def turn_scratch_reset() -> dict[str, Any]:
     """Default empty values for turn-local state cleared at invoke start and after answer."""
 
     return {
@@ -190,6 +190,52 @@ def _turn_scratch_reset() -> dict[str, Any]:
         "retrieval_retry_count": 0,
         "message_query": Overwrite(value=[]),
     }
+
+
+def merge_verification_into_facts(
+    facts: list[dict[str, Any]],
+    verify: RecallVerifyResult,
+    doc_texts: list[str],
+    normalized_doc_texts: list[str],
+) -> list[dict[str, Any]]:
+    """Apply recall verification rows onto facts with verbatim evidence checks."""
+
+    expected_texts = fact_texts(facts)
+    verified_rows = list(verify.facts)
+    verified_texts = [item.fact for item in verified_rows]
+    if verified_texts != expected_texts:
+        raise ValueError("Recall verification facts must match input facts by order and text")
+
+    updated: list[dict[str, Any]] = []
+    for fact_row, verification in zip(facts, verified_rows):
+        copied_excerpts = []
+        for excerpt in verification.evidence_documents:
+            normalized_excerpt = re.sub(r"\s+", " ", excerpt).strip()
+            if any(excerpt in doc_text for doc_text in doc_texts) or any(
+                normalized_excerpt in doc_text for doc_text in normalized_doc_texts
+            ):
+                copied_excerpts.append(excerpt)
+        if verification.verification_status and not copied_excerpts:
+            updated.append(
+                {
+                    **fact_row,
+                    "verification_status": False,
+                    "verification_report": (
+                        "Evidence excerpt was not copied verbatim from retrieved documents."
+                    ),
+                    "evidence_documents": [],
+                }
+            )
+            continue
+        updated.append(
+            {
+                **fact_row,
+                "verification_status": verification.verification_status,
+                "verification_report": verification.verification_report,
+                "evidence_documents": copied_excerpts,
+            }
+        )
+    return updated
 
 
 def build_node_ai_message(
@@ -564,47 +610,6 @@ class RetrievalGraph:
             re.sub(r"\s+", " ", doc_text).strip() for doc_text in doc_texts
         ]
 
-        def _merge_verification_into_facts(
-            facts: list[dict[str, Any]],
-            verify: RecallVerifyResult,
-        ) -> list[dict[str, Any]]:
-            expected_texts = fact_texts(facts)
-            verified_rows = list(verify.facts)
-            verified_texts = [item.fact for item in verified_rows]
-            if verified_texts != expected_texts:
-                raise ValueError("Recall verification facts must match input facts by order and text")
-
-            updated: list[dict[str, Any]] = []
-            for fact_row, verification in zip(facts, verified_rows):
-                copied_excerpts = []
-                for excerpt in verification.evidence_documents:
-                    normalized_excerpt = re.sub(r"\s+", " ", excerpt).strip()
-                    if any(excerpt in doc_text for doc_text in doc_texts) or any(
-                        normalized_excerpt in doc_text for doc_text in normalized_doc_texts
-                    ):
-                        copied_excerpts.append(excerpt)
-                if verification.verification_status and not copied_excerpts:
-                    updated.append(
-                        {
-                            **fact_row,
-                            "verification_status": False,
-                            "verification_report": (
-                                "Evidence excerpt was not copied verbatim from retrieved documents."
-                            ),
-                            "evidence_documents": [],
-                        }
-                    )
-                    continue
-                updated.append(
-                    {
-                        **fact_row,
-                        "verification_status": verification.verification_status,
-                        "verification_report": verification.verification_report,
-                        "evidence_documents": copied_excerpts,
-                    }
-                )
-            return updated
-
         verify_llm = get_llm_client(
             model=settings.recall_check_model,
             output_schema=RecallVerifyResult,
@@ -632,7 +637,9 @@ class RetrievalGraph:
                         ]
                     )
                     update_llm_generation(gen_ver, model=model, raw=ver_result.get("raw"))
-                updated_facts = _merge_verification_into_facts(facts, ver_result["parsed"])
+                updated_facts = merge_verification_into_facts(
+                    facts, ver_result["parsed"], doc_texts, normalized_doc_texts
+                )
                 unsupported = unsupported_facts(updated_facts)
                 recall_sufficient = not unsupported
                 node_span.update(
@@ -650,7 +657,9 @@ class RetrievalGraph:
                     HumanMessage(content=verify_human),
                 ]
             )
-            updated_facts = _merge_verification_into_facts(facts, ver_result["parsed"])
+            updated_facts = merge_verification_into_facts(
+                facts, ver_result["parsed"], doc_texts, normalized_doc_texts
+            )
             unsupported = unsupported_facts(updated_facts)
             recall_sufficient = not unsupported
 
@@ -890,7 +899,7 @@ class RetrievalGraph:
             langfuse = get_langfuse_client()
             with langfuse.start_as_current_observation(as_type="span", name="clear_turn_trace") as node_span:
                 node_span.update(output={"cleared": True})
-        return _turn_scratch_reset()
+        return turn_scratch_reset()
 
     # --- Conditional routing ---
 
@@ -968,7 +977,7 @@ class RetrievalGraph:
     # --- Public invoke API (called from api.main) ---
 
     @staticmethod
-    def _turn_invoke_input(user_query: str) -> dict[str, Any]:
+    def turn_invoke_input(user_query: str) -> dict[str, Any]:
         """Reset turn-local scratch and append one HumanMessage for a new /run or /run/stream.
 
         ``message_query: Overwrite([])`` clears prior-turn audit rows at invoke start; the
@@ -976,10 +985,10 @@ class RetrievalGraph:
         """
         return {
             "messages": [HumanMessage(content=user_query)],
-            **_turn_scratch_reset(),
+            **turn_scratch_reset(),
         }
 
-    def _invoke_config(self, session_id: str) -> dict[str, Any]:
+    def invoke_config(self, session_id: str) -> dict[str, Any]:
         return {
             "configurable": {"thread_id": session_id},
             "recursion_limit": settings.graph_recursion_limit,
@@ -1004,8 +1013,8 @@ class RetrievalGraph:
             Final graph state dict (includes ``messages``, ``retrieved_documents``, etc.).
         """
 
-        config = self._invoke_config(session_id)
-        invoke_input = self._turn_invoke_input(user_query)
+        config = self.invoke_config(session_id)
+        invoke_input = self.turn_invoke_input(user_query)
 
         if not settings.langfuse_tracing_enabled:
             return await self.graph.ainvoke(invoke_input, config=config)
@@ -1030,8 +1039,8 @@ class RetrievalGraph:
             Dicts keyed by node name (``stream_mode='updates'``).
         """
 
-        config = self._invoke_config(session_id)
-        invoke_input = self._turn_invoke_input(user_query)
+        config = self.invoke_config(session_id)
+        invoke_input = self.turn_invoke_input(user_query)
 
         if not settings.langfuse_tracing_enabled:
             async for update in self.graph.astream(
@@ -1071,7 +1080,7 @@ class RetrievalGraph:
         Returns:
             Final state after resume.
         """
-        config = self._invoke_config(session_id)
+        config = self.invoke_config(session_id)
 
         if not settings.langfuse_tracing_enabled:
             return await self.graph.ainvoke(Command(resume=value), config=config)

@@ -90,13 +90,13 @@ app.add_middleware(
 # --- SSE helpers ---
 
 
-def _sse(payload: dict[str, Any]) -> str:
+def encode_sse_frame(payload: dict[str, Any]) -> str:
     """Encode one Server-Sent Event ``data:`` frame (JSON payload)."""
 
     return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
 
 
-def _message_query_tail(entries: list[Any], max_entries: int = 5) -> list[Any]:
+def message_query_tail(entries: list[Any], max_entries: int = 5) -> list[Any]:
     """Return the last ``max_entries`` ``message_query`` audit rows for compact SSE."""
 
     if not isinstance(entries, list) or not entries:
@@ -152,7 +152,7 @@ def get_stream_event(
         )
         mq = payload.get("message_query")
         if mq:
-            event["message_query_tail"] = _message_query_tail(mq)
+            event["message_query_tail"] = message_query_tail(mq)
     elif node_name == "fact_decomposition":
         facts = payload.get("facts") or []
         event.update(
@@ -163,7 +163,7 @@ def get_stream_event(
         )
         mq = payload.get("message_query")
         if mq:
-            event["message_query_tail"] = _message_query_tail(mq)
+            event["message_query_tail"] = message_query_tail(mq)
     elif node_name == "query_complexity":
         needs_split = payload.get("needs_split")
         mq = payload.get("message_query") or []
@@ -179,7 +179,7 @@ def get_stream_event(
         )
         mq = payload.get("message_query")
         if mq:
-            event["message_query_tail"] = _message_query_tail(mq)
+            event["message_query_tail"] = message_query_tail(mq)
     elif node_name == "query_splitter":
         event.update(
             {
@@ -189,7 +189,7 @@ def get_stream_event(
         )
         mq = payload.get("message_query")
         if mq:
-            event["message_query_tail"] = _message_query_tail(mq)
+            event["message_query_tail"] = message_query_tail(mq)
     elif node_name == "retrieval":
         event.update(
             {
@@ -203,7 +203,7 @@ def get_stream_event(
         )
         mq = payload.get("message_query")
         if mq:
-            event["message_query_tail"] = _message_query_tail(mq)
+            event["message_query_tail"] = message_query_tail(mq)
     elif node_name == "recall_check":
         facts = payload.get("facts") or []
         unsupported = [
@@ -220,7 +220,7 @@ def get_stream_event(
         )
         mq = payload.get("message_query")
         if mq:
-            event["message_query_tail"] = _message_query_tail(mq)
+            event["message_query_tail"] = message_query_tail(mq)
     elif node_name == "gap_fill":
         event.update(
             {
@@ -238,7 +238,7 @@ def get_stream_event(
         )
         mq = payload.get("message_query")
         if mq:
-            event["message_query_tail"] = _message_query_tail(mq)
+            event["message_query_tail"] = message_query_tail(mq)
     elif node_name == "clear_turn_trace":
         event.update(
             {
@@ -383,7 +383,7 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
                         docs = payload.get("retrieved_documents") or []
                         new_doc_count = len(docs) if isinstance(docs, list) else 0
                         retrieved_doc_count += new_doc_count
-                yield _sse(
+                yield encode_sse_frame(
                     get_stream_event(
                         request.session_id,
                         update,
@@ -392,7 +392,7 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
                         retrieval_loop_count=retrieval_loop_count,
                     )
                 )
-            yield _sse(
+            yield encode_sse_frame(
                 {
                     "type": "done",
                     "session_id": request.session_id,
@@ -401,7 +401,7 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
             )
         except Exception as exc:
             # Streaming responses cannot switch to a normal JSON error once started.
-            yield _sse(
+            yield encode_sse_frame(
                 {
                     "type": "error",
                     "session_id": request.session_id,
