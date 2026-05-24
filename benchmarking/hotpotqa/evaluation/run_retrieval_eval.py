@@ -17,6 +17,7 @@ from typing import Any
 
 from benchmarking.hotpotqa.settings import HotpotQASettings
 from benchmarking.hotpotqa.strategy import parse_strategy, validate_strategy_env
+from ingestion.schema import get_metadata, get_raw_text
 from output_validation.retrieval_strategy import RetrievalStrategy
 from retriever.retriever import Retriever
 
@@ -103,14 +104,15 @@ async def run_retrieval_eval(
                     "retrieval_strategy": strategy,
                     "retrieval_latency_ms": round(elapsed_ms, 3),
                     "retrieved_contexts": [
-                        doc["payload"]["text"]
+                        get_raw_text(doc["payload"])
                         for doc in docs
-                        if doc.get("payload") and doc["payload"].get("text")
+                        if doc.get("payload")
                     ],
                     "retrieved_context_ids": [
-                        doc["payload"].get("context_id")
+                        get_metadata(doc["payload"]).get("context_id")
+                        or doc["payload"].get("context_id")
                         for doc in docs
-                        if doc.get("payload") and doc["payload"].get("context_id")
+                        if doc.get("payload")
                     ],
                     "retrieved_docs": docs,
                 }

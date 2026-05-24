@@ -53,7 +53,7 @@ from prompts.query_normalisation import SYSTEM_PROMPT as QUERY_NORMALISATION_PRO
 from prompts.query_splitter import SYSTEM_PROMPT as QUERY_SPLITTER_PROMPT
 from retriever.retriever import Retriever
 from tool_wrappers.prompt_plain import messages_to_plain_context
-from tool_wrappers.retrieval_payload import compact_hotqa_documents_for_llm
+from tool_wrappers.retrieval_payload import compact_documents_for_llm
 
 class RetrievalState(TypedDict, total=False):
     """Checkpointed conversation and per-turn scratch for one LangGraph thread."""
@@ -485,7 +485,7 @@ class RetrievalGraph:
                 late_interaction_limit=settings.retrieval_candidate_for_late_interaction,
                 exclude_point_ids=exclude_ids,
             )
-            compact_document_rows = compact_hotqa_documents_for_llm(ranked_hits)
+            compact_document_rows = compact_documents_for_llm(ranked_hits)
             rows_to_add: list[dict[str, Any]] = []
             new_point_ids: list[str] = []
             for row in compact_document_rows:

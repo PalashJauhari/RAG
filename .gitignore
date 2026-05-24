@@ -11,3 +11,6 @@ benchmarking/hotpotqa/data/results/*
 !benchmarking/hotpotqa/data/results/.gitkeep
 
 artifacts/
+
+raw_pdfs/*
+!raw_pdfs/.gitkeep

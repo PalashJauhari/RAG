@@ -65,19 +65,76 @@ Copy `.env.example` to `.env`. Essential groups:
 |-------|-----------|
 | Qdrant | `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION_NAME` |
 | Retrieval | `RETRIEVAL_TOP_K`, `RETRIEVAL_CANDIDATE_DENSE_MMR`, `RETRIEVAL_CANDIDATE_BM25`, `RETRIEVAL_CANDIDATE_FOR_LATE_INTERACTION`, `RETRIEVAL_MMR_DIVERSITY` |
-| Repair | `RETRIEVAL_LOOP_MAX_RETRIES` (strategy escalates to late interaction on later retries) |
+| Repair | `RETRIEVAL_LOOP_MAX_RETRIES` (repair loops escalate to ColBERT late interaction when enabled; default starts at `fast_bm25_retrieval`) |
 | Models | `QUERY_NORMALISATION_MODEL`, `QUERY_DECOMPOSITION_MODEL`, `RECALL_CHECK_MODEL`, `GAP_FILL_MODEL`, `FINAL_ANSWER_MODEL` |
 | Observability | `LANGFUSE_TRACING_ENABLED` (+ Langfuse keys when true) |
 
 Retrieval limits are **fixed every pass**. Repair loops rely on new gap-fill queries plus Qdrant HasId exclusion, not widened top-k.
+
+## Chunk payload contract
+
+Every Qdrant point (HotpotQA, PMC, or future corpora) uses the same payload shape. **Embedding** uses enriched `text`; **graph LLM nodes and RAGAS** use raw passage text only (`additional_metadata.raw_text`).
+
+### Qdrant point `payload`
+
+```json
+{
+  "text": "embedded string; equals raw_text when enrichments is {}",
+  "enrichments": {
+    "summary": "optional structured enrichment"
+  },
+  "additional_metadata": {
+    "raw_text": "mandatory original passage or chunk",
+    "source": "hotpotqa",
+    "context_id": "source-specific keys as needed"
+  }
+}
+```
+
+| Field | Rule |
+|-------|------|
+| `text` | Only string used for dense, BM25, and ColBERT at upload |
+| `enrichments` | Structured LLM enrichment; `{}` when none |
+| `additional_metadata.raw_text` | Always required; used by graph LLM nodes and RAGAS |
+| No enrichment | `enrichments = {}` and `text == raw_text` |
+
+### At retrieval time
+
+| Layer | Shape | `text` meaning |
+|-------|--------|----------------|
+| Retriever hit | `{id, score, rank, payload}` | Full Qdrant payload |
+| Graph `retrieved_documents` (during turn) | `{id, score, text}` | **`raw_text`** via `get_raw_text()` — not enriched embed string |
+| API `/run` `retrieved_docs` | `[]` | **Intentionally empty** after `clear_turn_trace`; answer is the user-facing output |
+
+Compaction happens in `tool_wrappers/retrieval_payload.py` (`compact_documents_for_llm`). Adapters live under `ingestion/adapters/` (HotpotQA today; PMC TBD). Shared upload: `ingestion/qdrant_upload.py`. Schema helpers: `ingestion/schema.py`.
+
+After changing the contract, **re-upload** your Qdrant collection (e.g. `python -m benchmarking.hotpotqa.qdrant_upload.upload` for benchmarks).
 
 ## API
 
 | Endpoint | Description |
 |----------|-------------|
 | `POST /run` | Run one turn; returns `{ answer, sources, confidence, retrieved_docs }` |
-| `POST /run/stream` | Same turn with SSE node events (counts only on the wire) |
+| `POST /run/stream` | Same turn with SSE node progress (counts only on the wire) |
 | `POST /resume` | Reserved for future clarification interrupts |
+
+**`/run` response:** The graph clears turn-local scratch (including `retrieved_documents`) in `clear_turn_trace` after `answer` or `partial_answer`. The API therefore returns **`retrieved_docs: []`** by design — clients should use `answer`, `sources`, and `confidence`. Passage text during the turn lives in graph state for recall/answer nodes only; it is not persisted in the checkpoint or echoed on `/run`.
+
+**`/run/stream`:** Node events expose retrieval **counts** (not passage text). The final `done` frame includes `retrieved_doc_count`. Full passages are available in Langfuse when tracing is enabled.
+
+Example `/run` JSON shape:
+
+```json
+{
+  "session_id": "demo",
+  "interrupted": false,
+  "question": null,
+  "answer": "...",
+  "sources": [],
+  "confidence": "high",
+  "retrieved_docs": []
+}
+```
 
 Example SSE frames:
 
@@ -104,6 +161,7 @@ python check_settings.py          # list unused Settings fields (dev utility)
 | `output_validation/` | Pydantic schemas for structured outputs |
 | `api/` | FastAPI `/run`, `/run/stream`, `/resume` |
 | `ui/` | Dash chat client |
+| `ingestion/` | Download, chunk schema, adapters, shared Qdrant upload |
 | `benchmarking/` | Optional offline retrieval / eval suite |
 | `artifacts/` | Graph topology diagram |
 

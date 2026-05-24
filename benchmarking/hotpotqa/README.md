@@ -149,7 +149,7 @@ For each context, `text` is all non-empty `sentences` joined with spaces. Prepar
 - `keywords`: named entities plus other high-signal retrieval terms.
 - On failure after `HOTPOTQA_ENRICHMENT_MAX_RETRIES`, `enrichment` is `null`; upload embeds raw `text` only.
 
-**Upload embedding prefix** (`build_embedding_text`) — same string for dense, BM25, and ColBERT:
+**Upload embedding prefix** (`ingestion.embed_text.build_embedded_text`, via `ingestion.adapters.hotpotqa.context_to_chunk`) — same string for dense, BM25, and ColBERT:
 
 ```text
 Title:
@@ -215,7 +215,7 @@ Stock `ContextPrecision` and `ContextRecall` from `ragas.metrics.collections`, u
 
 - `user_input` = question  
 - `reference` = `reference_answer` (HotpotQA gold short answer)  
-- `retrieved_contexts` = passage texts returned by the retriever  
+- `retrieved_contexts` = list of **`additional_metadata.raw_text`** values (not enriched `payload.text`)  
 
 Judged via `HOTPOTQA_RAGAS_MODEL` and `AsyncOpenAI` (vanilla `llm_factory` wiring). Rows with empty `retrieved_contexts` are skipped.
 
@@ -265,7 +265,16 @@ benchmarking/hotpotqa/
       "id": "uuid",
       "score": 21.6,
       "rank": 1,
-      "payload": { "context_id": "...", "text": "...", "is_supporting": true }
+      "payload": {
+        "text": "Title:\n...\nPassage:\n...",
+        "enrichments": { "summary": "...", "keywords": ["..."] },
+        "additional_metadata": {
+          "raw_text": "...",
+          "source": "hotpotqa",
+          "context_id": "...",
+          "is_supporting": true
+        }
+      }
     }
   ]
 }

@@ -1,53 +1,20 @@
 """Build prefixed embedding text from HotpotQA context records."""
 
+from __future__ import annotations
 
-def build_embedding_text(context: dict) -> str:
-    """Return text for dense/BM25/ColBERT embed; raw ``text`` only when enrichment is missing."""
+from typing import Any
 
-    passage = str(context.get("text") or "").strip()
-    enrichment = context.get("enrichment")
-    if not passage:
-        return ""
-    if not enrichment:
-        return passage
+from ingestion.embed_text import build_embedded_text
 
-    sections: list[str] = []
 
-    title = str(context.get("title") or "").strip()
-    if title:
-        sections.extend(["Title:", title, ""])
+def build_embedding_text(context: dict[str, Any]) -> str:
+    """Return embedded text for HotpotQA upload (delegates to shared builder)."""
 
-    summary = str(enrichment.get("summary") or "").strip()
-    if summary:
-        sections.extend(["Summary:", summary, ""])
-
-    facts = enrichment.get("facts") or []
-    fact_lines = [
-        f"- {str(row.get('fact') or '').strip()}"
-        for row in facts
-        if isinstance(row, dict) and str(row.get("fact") or "").strip()
-    ]
-    if fact_lines:
-        sections.append("Present Facts:")
-        sections.extend(fact_lines)
-        sections.append("")
-
-    question_lines = [
-        f"- {str(row.get('fact_question') or '').strip()}"
-        for row in facts
-        if isinstance(row, dict) and str(row.get("fact_question") or "").strip()
-    ]
-    if question_lines:
-        sections.append("Sample Query Questions:")
-        sections.extend(question_lines)
-        sections.append("")
-
-    keywords = enrichment.get("keywords") or []
-    keyword_text = ", ".join(
-        str(item).strip() for item in keywords if isinstance(item, str) and item.strip()
+    enrichments = context.get("enrichment")
+    if not isinstance(enrichments, dict):
+        enrichments = {}
+    return build_embedded_text(
+        raw_text=str(context.get("text") or ""),
+        enrichments=enrichments,
+        title=str(context.get("title") or ""),
     )
-    if keyword_text:
-        sections.extend(["Keywords:", keyword_text, ""])
-
-    sections.extend(["Passage:", passage])
-    return "\n".join(sections)
