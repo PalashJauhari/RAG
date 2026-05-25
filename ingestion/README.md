@@ -103,18 +103,47 @@ Image summaries require OpenAI configured in **platform.unstructured.io → AI p
 
 ### Output — `chunks.json`
 
-Raw Unstructured `download_job_output` — no Factline wrapper:
+Unstructured `download_job_output`, post-processed when `UNSTRUCTURED_INCLUDE_ORIG_ELEMENTS=true`:
 
 ```json
 [
   {
     "filename": "PMC_12345.pdf",
-    "elements": [ "..." ]
+    "elements": [
+      {
+        "type": "CompositeElement",
+        "element_id": "...",
+        "text": "...",
+        "metadata": {
+          "page_number": 5,
+          "orig_elements": [
+            {"type": "NarrativeText", "text": "...", "metadata": {"page_number": 5}},
+            {"type": "Image", "element_id": "...", "metadata": {"page_number": 5}}
+          ],
+          "images": [
+            {
+              "element_id": "...",
+              "mime_type": "image/png",
+              "base64": "...",
+              "page_number": 5
+            }
+          ]
+        }
+      }
+    ]
   }
 ]
 ```
 
-Each `elements` entry is the verbatim chunked element list (`type`, `element_id`, `text`, `metadata`, …).
+Post-processing ([`chunk_postprocess.py`](chunk_postprocess.py)) runs before write:
+
+1. **Decode** `metadata.orig_elements` from Unstructured's compressed base64+zlib form into a JSON array.
+2. **Extract** partition images via `extract_images_from_orig_elements()` into `metadata.images[]` (Image elements with `image_base64` only).
+3. **Strip** `image_base64` / `image_mime_type` from Image entries inside `orig_elements` to avoid duplicating large blobs.
+
+Chunks without images omit `metadata.images`. Text-only chunks have decoded `orig_elements` only.
+
+**File size:** decoded output is much larger than raw Unstructured JSON. Phase 2 should embed chunk `text` only — do not upsert raw base64 to Qdrant by default.
 
 ---
 
@@ -135,6 +164,7 @@ ingestion/
   settings.py
   download_data.py
   unstructured_pipeline.py
+  chunk_postprocess.py
   schema.py
   enrich_text.py
   embeddings.py

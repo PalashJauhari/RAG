@@ -148,10 +148,9 @@ class IngestionSettings(BaseSettings):
             "overlap": self.unstructured_overlap,
             "overlap_all": self.unstructured_overlap_all,
         }
-        if self.unstructured_contextual_chunking.strip():
-            chunker_settings["contextual_chunking_strategy"] = (
-                self.unstructured_contextual_chunking.strip()
-            )
+        contextual = self.unstructured_contextual_chunking.strip().lower()
+        if contextual in {"v1", "true", "1", "yes", "on"}:
+            chunker_settings["contextual_chunking_strategy"] = "v1"
 
         nodes.append(
             {

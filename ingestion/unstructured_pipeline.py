@@ -25,7 +25,21 @@ from unstructured_client import UnstructuredClient
 from unstructured_client.models.operations import CreateJobRequest, DownloadJobOutputRequest
 from unstructured_client.models.shared import BodyCreateJob, InputFiles
 
+from ingestion.chunk_postprocess import normalize_file_result
 from ingestion.settings import INGESTION_ROOT, IngestionSettings, settings
+
+
+def normalize_job_status(status: Any) -> str:
+    """Return upper-case job status name from SDK enum or string."""
+
+    if status is None:
+        return ""
+    if hasattr(status, "value"):
+        return str(status.value).upper()
+    text = str(status).upper()
+    if text.startswith("JOBSTATUS."):
+        return text.split(".", 1)[1]
+    return text
 
 
 def run_pipeline(
@@ -127,7 +141,7 @@ def run_pipeline(
                 if job is None:
                     raise RuntimeError(f"Job {job_id}: missing status response")
 
-                status = str(job.status or "").upper()
+                status = normalize_job_status(job.status)
                 if status in {"SCHEDULED", "IN_PROGRESS"}:
                     time.sleep(pipeline_settings.unstructured_job_poll_seconds)
                     continue
@@ -174,6 +188,9 @@ def run_pipeline(
                 results.extend(future.result())
             except Exception as exc:
                 print(f"Job batch failed: {exc}")
+
+    if pipeline_settings.unstructured_include_orig_elements:
+        results = [normalize_file_result(file_result) for file_result in results]
 
     chunks_file.parent.mkdir(parents=True, exist_ok=True)
     chunks_file.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
