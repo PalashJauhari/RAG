@@ -23,6 +23,7 @@ import os
 import shutil
 import tarfile
 import time
+import zlib
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from ftplib import FTP
@@ -161,14 +162,34 @@ def ftp_fetch_bytes(ftp_path: str) -> bytes:
 def extract_first_pdf_from_tgz(data: bytes) -> bytes:
     """Return the first PDF member from a PMC OA ``tgz`` package."""
 
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
-        pdf_members = [member for member in archive.getmembers() if member.name.lower().endswith(".pdf")]
-        if not pdf_members:
-            raise ValueError("OA package contains no PDF files.")
-        extracted = archive.extractfile(pdf_members[0])
-        if extracted is None:
-            raise ValueError("Could not extract PDF from OA package.")
-        return extracted.read()
+    if not data:
+        raise ValueError("OA package is empty.")
+    if data.startswith(b"%PDF"):
+        return data
+
+    modes: tuple[str, ...] = ("r:gz", "r:")
+    last_error: Exception | None = None
+    for mode in modes:
+        if mode == "r:gz" and not data.startswith(b"\x1f\x8b"):
+            continue
+        try:
+            with tarfile.open(fileobj=io.BytesIO(data), mode=mode) as archive:
+                pdf_members = [
+                    member
+                    for member in archive.getmembers()
+                    if member.name.lower().endswith(".pdf")
+                ]
+                if not pdf_members:
+                    raise ValueError("OA package contains no PDF files.")
+                extracted = archive.extractfile(pdf_members[0])
+                if extracted is None:
+                    raise ValueError("Could not extract PDF from OA package.")
+                return extracted.read()
+        except (tarfile.TarError, zlib.error, OSError, ValueError) as exc:
+            last_error = exc
+
+    detail = str(last_error) if last_error else "unrecognized archive format"
+    raise ValueError(f"Could not read OA package as tar archive: {detail}")
 
 
 def resolve_oa_links(pmc_id: str) -> list[tuple[str, str]]:
@@ -230,7 +251,7 @@ def download_pmc_pdf(pmc_id: str) -> tuple[bytes, str, str]:
             if not pdf_bytes.startswith(b"%PDF"):
                 raise ValueError("Downloaded payload is not a PDF.")
             return pdf_bytes, link_format, href
-        except (OSError, requests.RequestException, ValueError, tarfile.TarError) as exc:
+        except (OSError, requests.RequestException, ValueError, tarfile.TarError, zlib.error) as exc:
             errors.append(f"{link_format}: {exc}")
 
     raise RuntimeError("; ".join(errors) if errors else "No downloadable OA PDF or tgz package.")
@@ -335,7 +356,14 @@ def run_download(
             )
             print(f"  -> skipped: {exc}")
 
-        except (RuntimeError, requests.RequestException, OSError, ET.ParseError, tarfile.TarError) as exc:
+        except (
+            RuntimeError,
+            requests.RequestException,
+            OSError,
+            ET.ParseError,
+            tarfile.TarError,
+            zlib.error,
+        ) as exc:
             failed_count += 1
             papers.append(
                 paper_row(

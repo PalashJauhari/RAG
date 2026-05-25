@@ -15,3 +15,6 @@ artifacts/
 
 ingestion/raw_pdfs/*
 !ingestion/raw_pdfs/.gitkeep
+
+ingestion/sandbox/out/*
+!ingestion/sandbox/out/.gitkeep
