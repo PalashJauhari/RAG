@@ -1,7 +1,7 @@
 /**
  * Dash clientside SSE consumer for POST /run/stream.
  * Event shape matches api.main.get_stream_event (node, type, label, node-specific fields).
- * Progress column: bold = LangGraph node id; remainder = human-readable detail.
+ * Inline progress card: bold = LangGraph node id; remainder = human-readable detail.
  */
 window.dash_clientside = window.dash_clientside || {};
 window.dash_clientside.rag_ui = window.dash_clientside.rag_ui || {};
@@ -23,6 +23,147 @@ function truncate(s, maxLen) {
 function loopSuffix(ev) {
   const n = ev.retrieval_loop_count ?? ev.retrieval_retry_count;
   return n != null ? " · loop " + n : "";
+}
+
+function chatScrollBottom() {
+  const scroll = document.querySelector(".rag-chat-scroll");
+  if (scroll) scroll.scrollTop = scroll.scrollHeight;
+}
+
+function progressScrollBottom(progressEl) {
+  if (progressEl) progressEl.scrollTop = progressEl.scrollHeight;
+}
+
+function ensureThinkingPanelHost() {
+  let panel = document.getElementById("rag-thinking-panel");
+  if (panel) return panel;
+  const composer = document.querySelector(".rag-composer-outer");
+  if (!composer || !composer.parentElement) return null;
+  panel = document.createElement("div");
+  panel.id = "rag-thinking-panel";
+  panel.className = "rag-thinking-panel rag-thinking-panel--hidden";
+  composer.parentElement.insertBefore(panel, composer);
+  return panel;
+}
+
+function buildThinkingCardDOM() {
+  const card = document.createElement("div");
+  card.className = "rag-thinking-card";
+
+  const bar = document.createElement("button");
+  bar.type = "button";
+  bar.className = "rag-thinking-bar";
+  bar.setAttribute("aria-expanded", "true");
+
+  const spinner = document.createElement("span");
+  spinner.className = "rag-thinking-spinner";
+  spinner.setAttribute("aria-hidden", "true");
+
+  const label = document.createElement("span");
+  label.className = "rag-thinking-label";
+  label.textContent = "Thinking";
+
+  const summary = document.createElement("span");
+  summary.className = "rag-thinking-summary";
+  summary.textContent = "Connecting…";
+
+  const chevron = document.createElement("span");
+  chevron.className = "rag-thinking-chevron";
+  chevron.textContent = "▾";
+  chevron.setAttribute("aria-hidden", "true");
+
+  bar.appendChild(spinner);
+  bar.appendChild(label);
+  bar.appendChild(summary);
+  bar.appendChild(chevron);
+
+  bar.addEventListener("click", function () {
+    const collapsed = card.classList.toggle("rag-thinking-card--collapsed");
+    bar.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  });
+
+  const body = document.createElement("div");
+  body.className = "rag-thinking-body";
+
+  const progressEl = document.createElement("div");
+  progressEl.className = "rag-inline-progress";
+
+  body.appendChild(progressEl);
+  card.appendChild(bar);
+  card.appendChild(body);
+
+  return { card: card, progressEl: progressEl };
+}
+
+function rebuildThinkingCard() {
+  const panel = ensureThinkingPanelHost();
+  if (!panel) return null;
+  panel.className = "rag-thinking-panel";
+  panel.innerHTML = "";
+  const built = buildThinkingCardDOM();
+  panel.appendChild(built.card);
+  return built.progressEl;
+}
+
+function resolveProgressEl(fallback) {
+  const el = document.querySelector("#rag-thinking-panel .rag-inline-progress");
+  if (el && el.isConnected) return el;
+  if (fallback && fallback.isConnected) return fallback;
+  if (window.dash_clientside.rag_ui._inFlight) return rebuildThinkingCard();
+  return fallback || null;
+}
+
+function updateThinkingSummary(boldText, restText) {
+  const summary = document.querySelector(".rag-thinking-summary");
+  if (!summary) return;
+  const text = (boldText || "") + (restText || "");
+  summary.textContent = truncate(text.trim(), 120) || "Working…";
+}
+
+function createInlineUserBubble(text) {
+  const chatInner = document.getElementById("chat-area");
+  if (!chatInner) return;
+
+  // If we're in the empty state, clear it immediately on first question submit.
+  const empty = chatInner.querySelector(".rag-empty-state");
+  if (empty) {
+    chatInner.innerHTML = "";
+  }
+
+  const row = document.createElement("div");
+  row.className = "rag-live-turn rag-msg-row-user";
+
+  const bubble = document.createElement("div");
+  bubble.className = "rag-bubble-user";
+  bubble.style.whiteSpace = "pre-wrap";
+  bubble.textContent = text;
+
+  row.appendChild(bubble);
+  chatInner.appendChild(row);
+  chatScrollBottom();
+}
+
+function openThinkingPanel(messageText) {
+  const panel = ensureThinkingPanelHost();
+  if (!panel) return null;
+  clearStreamUI();
+  createInlineUserBubble(messageText);
+  panel.className = "rag-thinking-panel";
+  panel.innerHTML = "";
+  const built = buildThinkingCardDOM();
+  panel.appendChild(built.card);
+  return built.progressEl;
+}
+
+function clearStreamUI() {
+  const liveRows = document.querySelectorAll(".rag-live-turn");
+  for (let i = 0; i < liveRows.length; i++) liveRows[i].remove();
+
+  const panel = document.getElementById("rag-thinking-panel");
+  if (panel) {
+    panel.innerHTML = "";
+    panel.className = "rag-thinking-panel rag-thinking-panel--hidden";
+  }
 }
 
 /** Bold segment is the LangGraph node id (``ev.node``); rest is detail text. */
@@ -67,7 +208,7 @@ function progressBoldRest(ev) {
   }
   if (node === "strategy_upgrade") {
     const rs = ev.retrieval_strategy ? " · " + ev.retrieval_strategy : "";
-    return { bold: boldName, rest: "deterministic" + rs + loopSuffix(ev) };
+    return { bold: boldName, rest: " · deterministic" + rs + loopSuffix(ev) };
   }
   if (node === "query_splitter") {
     const pq = (ev.active_retrieval_queries || []).join(" · ");
@@ -86,6 +227,7 @@ function progressBoldRest(ev) {
 }
 
 function appendProgressBold(progressEl, boldText, restText) {
+  progressEl = resolveProgressEl(progressEl);
   if (!progressEl) return;
   const row = document.createElement("div");
   row.className = "rag-progress-line";
@@ -96,7 +238,8 @@ function appendProgressBold(progressEl, boldText, restText) {
   }
   if (restText) row.appendChild(document.createTextNode(restText));
   progressEl.appendChild(row);
-  progressEl.scrollTop = progressEl.scrollHeight;
+  progressScrollBottom(progressEl);
+  updateThinkingSummary(boldText, restText);
 }
 
 async function parseSSEStream(response, progressEl) {
@@ -167,8 +310,7 @@ function appendTimeTakenFooter(content, elapsedMs) {
 }
 
 window.dash_clientside.rag_ui.clear_progress = function (_session_gen) {
-  const el = document.getElementById("rag-stream-progress");
-  if (el) el.innerHTML = "";
+  clearStreamUI();
   window.dash_clientside.rag_ui._inFlight = false;
   setComposerDisabled(false);
   return "";
@@ -200,8 +342,8 @@ window.dash_clientside.rag_ui.submit_message = async function (
   chat.push({ role: "user", content: raw });
 
   const base = (api_base || "http://127.0.0.1:8000").replace(/\/$/, "");
-  const progressEl = document.getElementById("rag-stream-progress");
-  if (progressEl) progressEl.innerHTML = "";
+  const progressEl = pending_interrupt ? null : openThinkingPanel(raw);
+  chatScrollBottom();
 
   try {
     if (pending_interrupt) {
@@ -243,6 +385,7 @@ window.dash_clientside.rag_ui.submit_message = async function (
     }
 
     var startStream = clockNowMs();
+    appendProgressBold(progressEl, "…", " — connecting");
     const r = await fetch(base + "/run/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
@@ -270,6 +413,7 @@ window.dash_clientside.rag_ui.submit_message = async function (
           elapsedStream
         ),
       });
+      clearStreamUI();
       return [chat, false, "", ""];
     }
 
@@ -282,9 +426,12 @@ window.dash_clientside.rag_ui.submit_message = async function (
     if (finalDocCount) content += "\n\nRetrieved " + finalDocCount + " passages.";
     content = appendTimeTakenFooter(content, elapsedStream);
     chat.push({ role: "assistant", content: content });
+    clearStreamUI();
     return [chat, false, "", ""];
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
+    if (progressEl) appendProgressBold(progressEl, "error", " — " + truncate(msg, 400));
+    clearStreamUI();
     return [chat, !!pending_interrupt, "", msg];
   } finally {
     window.dash_clientside.rag_ui._inFlight = false;

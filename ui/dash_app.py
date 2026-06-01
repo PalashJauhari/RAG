@@ -1,6 +1,6 @@
 """Dash chat UI for the RAG orchestrator.
 
-Layout: left sidebar (session), center chat + composer, right Progress column.
+Layout: left sidebar (session), center chat + inline streaming panel + composer.
 Streaming uses clientside JS (``assets/rag_ui.js``) calling ``POST /run/stream`` on the
 FastAPI service (``API_URL`` / ``dcc.Store`` ``api-base-url``). ``session-id`` maps to
 graph ``thread_id``; ``pending-interrupt`` supports future ``/resume`` clarification flows.
@@ -27,7 +27,7 @@ app = Dash(
 app.title = "Factline"
 
 
-# --- Layout (stores + three-column shell) ---
+# --- Layout (stores + chat shell) ---
 # Lambda layout so session-id is fresh per page load; stores hold API URL and chat state.
 
 app.layout = lambda: html.Div(
@@ -87,6 +87,10 @@ app.layout = lambda: html.Div(
                             children=[html.Div(className="rag-chat-inner", id="chat-area")],
                         ),
                         html.Div(
+                            id="rag-thinking-panel",
+                            className="rag-thinking-panel rag-thinking-panel--hidden",
+                        ),
+                        html.Div(
                             className="rag-composer-outer",
                             children=[
                                 html.Div(
@@ -113,16 +117,6 @@ app.layout = lambda: html.Div(
                                 ),
                             ],
                         ),
-                    ],
-                ),
-                html.Div(
-                    className="rag-progress-col",
-                    children=[
-                        html.Div(
-                            className="rag-progress-head",
-                            children=[html.H3("Progress")],
-                        ),
-                        html.Div(id="rag-stream-progress"),
                     ],
                 ),
             ],
@@ -155,6 +149,19 @@ def render_interrupt_banner(pending):
     return html.Div()
 
 
+def _meta_row(*, is_user: bool) -> html.Div:
+    """Small timestamp/read-receipt footer matching the forecasting UI."""
+    checks = (
+        html.Span("✓✓", className="rag-meta-checks")
+        if is_user
+        else None
+    )
+    return html.Div(
+        className="rag-meta-row",
+        children=[html.Span("Just now"), checks] if checks else [html.Span("Just now")],
+    )
+
+
 @callback(Output("chat-area", "children"), Input("chat-state", "data"))
 def render_chat(messages):
     """Render ``chat-state`` as user/assistant bubbles (Markdown for assistant)."""
@@ -179,7 +186,10 @@ def render_chat(messages):
                     children=[
                         html.Div(
                             className="rag-bubble-user",
-                            children=html.Div(content, style={"whiteSpace": "pre-wrap"}),
+                            children=[
+                                html.Div(content, style={"whiteSpace": "pre-wrap"}),
+                                _meta_row(is_user=True),
+                            ],
                         )
                     ],
                 )
@@ -192,11 +202,14 @@ def render_chat(messages):
                         html.Div("G", className="rag-avatar"),
                         html.Div(
                             className="rag-bubble-assistant",
-                            children=dcc.Markdown(
-                                content,
-                                dangerously_allow_html=False,
-                                className="rag-md",
-                            ),
+                            children=[
+                                dcc.Markdown(
+                                    content,
+                                    dangerously_allow_html=False,
+                                    className="rag-md",
+                                ),
+                                _meta_row(is_user=False),
+                            ],
                         ),
                     ],
                 )
@@ -224,7 +237,7 @@ def on_new_session(n_clicks, gen):
     return str(uuid4()), [], False, next_gen, "", ""
 
 
-# --- Clientside callbacks (SSE stream + progress column in rag_ui.js) ---
+# --- Clientside callbacks (SSE stream + inline progress panel in rag_ui.js) ---
 
 app.clientside_callback(
     ClientsideFunction(namespace="rag_ui", function_name="clear_progress"),
