@@ -1,6 +1,6 @@
-"""Aggregate benchmark JSON artifacts into ``benchmark_report.md``.
+"""Build ``benchmark_report.md`` from benchmark JSON artifacts (internal; no CLI).
 
-Run: ``python -m benchmarking.hotpotqa.metrics.build_report``
+Called from :func:`~benchmarking.hotpotqa.run_benchmark.run_benchmark`.
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ def build_report_markdown(settings: HotpotQASettings | None = None) -> str:
             ]
         )
     else:
-        lines.append("_No `ragas_results.json` found (run without `--skip-ragas`?)._\n")
+        lines.append("_No `ragas_results.json` found._\n")
 
     lines.extend(["", "## Retriever latency", ""])
     lines.append(
@@ -167,11 +167,3 @@ def build_report_markdown(settings: HotpotQASettings | None = None) -> str:
     settings.benchmark_report_path.write_text(body, encoding="utf-8")
     print(f"Wrote benchmark report to {settings.benchmark_report_path}")
     return body
-
-
-def main() -> None:
-    build_report_markdown()
-
-
-if __name__ == "__main__":
-    main()

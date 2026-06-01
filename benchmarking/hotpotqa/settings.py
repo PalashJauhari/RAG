@@ -39,17 +39,17 @@ class HotpotQASettings(Settings):
 
     @property
     def retrieval_results_path(self) -> Path:
-        """Per-experiment retrieval eval JSON from ``run_retrieval_eval``."""
+        """Per-experiment retrieval JSON written by the benchmark retrieval step."""
         return self.results_dir / "retrieval_results.json"
 
     @property
     def run_metadata_path(self) -> Path:
-        """Run metadata JSON written alongside retrieval results."""
+        """Run metadata JSON from the benchmark retrieval step."""
         return self.results_dir / "run_metadata.json"
 
     @property
     def ragas_results_path(self) -> Path:
-        """Per-experiment RAGAS scores JSON from ``ragas_metrics``."""
+        """Per-experiment RAGAS scores JSON from the benchmark RAGAS step."""
         return self.results_dir / "ragas_results.json"
 
     @property

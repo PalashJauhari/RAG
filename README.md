@@ -39,7 +39,7 @@ Optional Dash UI (port 8050): `python ui/dash_app.py`
 2. **Decompose** into an ordered `facts` list (`fact_id`, verification shell).
 3. **Route** on fact count: one fact → retrieve with the normalized query; multiple facts → split into focused queries.
 4. **Retrieve** with hybrid Qdrant search; repair passes exclude already-seen point ids (HasId) and dedupe by id.
-5. **Verify recall** per fact against retrieved passages; update verification in place on the same `facts` list.
+5. **Verify recall** with one parallel LLM call per fact against retrieved passages; update verification in place on the same `facts` list.
 6. **Repair** unsupported facts via `gap_fill` → `strategy_upgrade` → retrieval (until retries exhausted).
 7. **Answer** (or partial answer) strictly from retrieved documents, then clear turn-local state.
 

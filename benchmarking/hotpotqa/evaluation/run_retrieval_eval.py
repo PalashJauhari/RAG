@@ -1,14 +1,11 @@
-"""Run :class:`~retriever.retriever.Retriever` on HotpotQA questions (no LangGraph).
+"""Retrieval step for the HotpotQA benchmark (internal; no CLI).
 
-Requires ``--strategy`` (or call :func:`run_retrieval_eval` with a strategy literal).
+Called from :func:`~benchmarking.hotpotqa.run_benchmark.run_benchmark`.
 Writes ``retrieval_results.json`` and ``run_metadata.json`` under the experiment folder.
-
-Run: ``python -m benchmarking.hotpotqa.evaluation.run_retrieval_eval --strategy fast_bm25_retrieval``
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import time
@@ -16,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from benchmarking.hotpotqa.settings import HotpotQASettings
-from benchmarking.hotpotqa.strategy import parse_strategy, validate_strategy_env
+from benchmarking.hotpotqa.strategy import validate_strategy_env
 from benchmarking.hotpotqa.qdrant_payload import get_metadata, get_raw_text
 from output_validation.retrieval_strategy import RetrievalStrategy
 from retriever.retriever import Retriever
@@ -145,22 +142,3 @@ async def run_retrieval_eval(
     print(f"Wrote run metadata to {settings.run_metadata_path}")
 
     return {"results": results, "metadata": metadata}
-
-
-async def main() -> None:
-    parser = argparse.ArgumentParser(description="HotpotQA retriever-only evaluation")
-    parser.add_argument(
-        "--strategy",
-        required=True,
-        help=(
-            "Retrieval strategy literal: fast_retrieval, keyword, "
-            "fast_bm25_retrieval, fast_bm25_late_interaction_retrieval"
-        ),
-    )
-    args = parser.parse_args()
-    strategy = parse_strategy(args.strategy)
-    await run_retrieval_eval(strategy)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

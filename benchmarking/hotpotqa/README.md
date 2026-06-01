@@ -71,15 +71,11 @@ flowchart TB
   end
   subgraph run [Per experiment]
     Bench["run_benchmark --strategy"]
-    Ret["run_retrieval_eval"]
-    Ragas["ragas_metrics"]
-    Report["benchmark_report.md"]
-    Bench --> Ret --> Ragas
-    Ret --> Report
-    Ragas --> Report
+    Artifacts["retrieval_results + ragas_results + benchmark_report.md"]
+    Bench --> Artifacts
   end
-  Qdrant --> Ret
-  JSON --> Ret
+  Qdrant --> Bench
+  JSON --> Bench
 ```
 
 ## Quick start
@@ -104,14 +100,6 @@ python -m benchmarking.hotpotqa.run_benchmark --strategy fast_bm25_retrieval
 python -m benchmarking.hotpotqa.run_benchmark --strategy fast_bm25_late_interaction_retrieval
 ```
 
-Dev shortcut (skip RAGAS):
-
-```bash
-python -m benchmarking.hotpotqa.run_benchmark --strategy fast_retrieval --skip-ragas
-```
-
-`--skip-ragas` still runs retrieval and writes `benchmark_report.md`; the RAGAS section will note missing `ragas_results.json`.
-
 ## Step-by-step scripts
 
 | Step | Command | What it does | Output |
@@ -126,7 +114,7 @@ python -m benchmarking.hotpotqa.run_benchmark --strategy fast_retrieval --skip-r
 |------|-------------------------------|
 | `prepare_eval_data` | **Yes** — stratified subsample (seed 42) by `type` × `level`, then writes JSON |
 | `qdrant_upload` | **No** — uploads **all** records in `hotpotqa_eval.json` |
-| `run_retrieval_eval` / `ragas_metrics` | **Yes** — caps rows to first N in JSON (safety if JSON is larger than intended) |
+| `run_benchmark` (retrieval + RAGAS steps) | **Yes** — caps rows to first N in JSON (safety if JSON is larger than intended) |
 
 After changing `HOTPOTQA_MAX_QUESTIONS`, re-run **prepare**, then **upload** (upload always rebuilds the collection from the current JSON).
 
@@ -173,21 +161,15 @@ Passage:
 
 Re-running prepare always re-enriches; re-run upload after prepare to refresh vectors.
 
-### Step 3 breakdown (debugging)
+### Step 3 outputs
 
-| Module | Output |
-|--------|--------|
-| `evaluation.run_retrieval_eval` | `retrieval_results.json`, `run_metadata.json` |
-| `metrics.ragas_metrics` | `ragas_results.json`, optional `type_level_metrics.xlsx` |
-| `metrics.build_report` | `benchmark_report.md` (includes RAGAS means + optional type/level breakdown) |
+`run_benchmark` writes under `data/results/{HOTPOTQA_EXPERIMENT_NAME}/`:
 
-Standalone steps (each needs prior artifacts):
-
-```bash
-python -m benchmarking.hotpotqa.evaluation.run_retrieval_eval --strategy fast_bm25_retrieval
-python -m benchmarking.hotpotqa.metrics.ragas_metrics
-python -m benchmarking.hotpotqa.metrics.build_report
-```
+| Artifact | Contents |
+|----------|----------|
+| `retrieval_results.json`, `run_metadata.json` | Per-question retrieval + latency |
+| `ragas_results.json`, optional `type_level_metrics.xlsx` | Context precision/recall |
+| `benchmark_report.md` | Summary, RAGAS means, latency, type/level breakdown |
 
 ## Environment variables
 
@@ -205,7 +187,7 @@ See [`.env.example`](.env.example) for the **standalone** template (copy to `ben
 - **Rate limiting**: `OPENAI_RATE_LIMIT_*`
 - **Langfuse** (optional): `LANGFUSE_TRACING_ENABLED`, keys, host
 
-CLI overrides: `--experiment-name` on `run_benchmark`; `--skip-ragas` to skip RAGAS only.
+CLI overrides: `--strategy` (required), `--experiment-name` on `run_benchmark`.
 
 ## Metrics glossary
 

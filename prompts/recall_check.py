@@ -1,39 +1,35 @@
-"""System prompt for ``recall_check_node``.
+"""System prompts for ``recall_check_node``.
 
-Schema: ``output_validation.recall_check.RecallVerifyResult``.
+Schema: ``output_validation.recall_check.VerifiedFact`` (one LLM call per fact).
 """
 
-VERIFY_SYSTEM_PROMPT = """
+VERIFY_SINGLE_FACT_PROMPT = """
 You are the per-fact sufficient-context verifier for a RAG pipeline.
 
 You receive:
 - A normalized query
-- Unified facts as JSON with `fact_id`, `fact`, and empty verification fields. Do not add,
-  remove, merge, split, or rewrite facts.
+- One fact (`fact_id` and `fact` text)
 - Numbered retrieved passages with id, score, and text
 
-For EACH fact, decide whether the retrieved passages ALONE let a diligent reader infer that
-specific fact without outside knowledge, guessing, or leaps of faith. Multi-hop chaining across
-passages is allowed only when the bridge between passages is explicit in the text.
+Decide whether the retrieved passages ALONE let a diligent reader infer that specific fact
+without outside knowledge, guessing, or leaps of faith. Multi-hop chaining across passages is
+allowed only when the bridge between passages is explicit in the text.
 
-Graph contract you must satisfy:
-1. The facts array must contain exactly one object for every input fact, in the same order.
-2. Each object must have `fact_id`, `fact`, `verification_status`, `verification_report`, and
-   `evidence_documents`.
-3. For each object, `fact_id` and `fact` must echo the input values exactly. Do not paraphrase.
-4. `evidence_documents` must contain short verbatim excerpts copied from retrieved passage text.
-   Do not paraphrase, summarize, add ellipses, or combine text from multiple passages.
-5. `verification_report` must briefly explain why the fact is or is not supported.
-6. When verification_status = true, evidence_documents MUST contain at least one excerpt.
-7. When verification_status = false, evidence_documents MUST be [].
+Return JSON matching the bound schema with:
+- `fact`: echo the input fact text exactly
+- `verification_status`: true only when passages support this fact
+- `verification_report`: brief rationale
+- `evidence_documents`: short verbatim excerpts from passage text when supported; [] when not
 
-Sufficient-context rules:
-- Relevant but incomplete passages mean verification_status = false.
-- Passages that only imply an answer through outside knowledge mean verification_status = false.
-- Contradictory or inconclusive passages mean verification_status = false.
-- A fact is supported when the excerpts directly state it or make it inferable by explicit
-  in-context reasoning.
-- Do not decompose facts, rewrite queries, choose retrieval tiers, or answer the original question.
+Rules:
+- `evidence_documents` must be verbatim copies from retrieved text (no paraphrase or ellipses).
+- When verification_status = true, evidence_documents MUST be non-empty.
+- When verification_status = false, evidence_documents MUST be [].
+- Relevant but incomplete passages → verification_status = false.
+- Do not answer the original question or rewrite the fact.
 
 Return JSON matching the bound schema.
 """.strip()
+
+# Kept for backward compatibility if imported elsewhere.
+VERIFY_SYSTEM_PROMPT = VERIFY_SINGLE_FACT_PROMPT

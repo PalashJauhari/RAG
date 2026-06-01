@@ -16,9 +16,9 @@ Intermediate outputs use explicit keys including ``facts``, ``retrieved_document
 
 from __future__ import annotations
 
+import asyncio
 import json
 import operator
-import re
 from typing import Annotated, Any, AsyncIterator, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -39,7 +39,7 @@ from observability.langfuse_handler import (
 from output_validation.fact_decomposition import RequiredFactsResult
 from output_validation.final_answer import FinalAnswer
 from output_validation.gap_fill import GapFillResult
-from output_validation.recall_check import RecallVerifyResult
+from output_validation.recall_check import VerifiedFact
 from output_validation.message_query_entry import MessageQueryEntry
 from output_validation.query_normalisation import QueryNormalisationResult
 from output_validation.query_splitter import QuerySplitResult
@@ -47,7 +47,7 @@ from output_validation.retrieval_strategy import RetrievalStrategy
 from prompts.final_answer import SYSTEM_PROMPT as FINAL_ANSWER_PROMPT
 from prompts.gap_fill import SYSTEM_PROMPT as GAP_FILL_PROMPT
 from prompts.fact_decomposition import SYSTEM_PROMPT as FACT_DECOMPOSITION_PROMPT
-from prompts.recall_check import VERIFY_SYSTEM_PROMPT
+from prompts.recall_check import VERIFY_SINGLE_FACT_PROMPT
 from prompts.partial_answer import SYSTEM_PROMPT as PARTIAL_ANSWER_PROMPT
 from prompts.query_normalisation import SYSTEM_PROMPT as QUERY_NORMALISATION_PROMPT
 from prompts.query_splitter import SYSTEM_PROMPT as QUERY_SPLITTER_PROMPT
@@ -112,6 +112,88 @@ def unsupported_facts(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
 
     return [row for row in facts if not row.get("verification_status")]
+
+
+async def verify_single_fact(
+    fact_row: dict[str, Any],
+    *,
+    normalized_query: str,
+    docs_block: str,
+    verifier: Any,
+) -> dict[str, Any]:
+    """Run one ``VerifiedFact`` LLM call and merge the verdict onto ``fact_row``.
+
+    Input:
+        fact_row: one unified fact dict (``fact_id``, ``fact``, verification fields).
+        normalized_query: standalone query for this turn.
+        docs_block: numbered retrieved passages for the prompt.
+        verifier: structured-output client from :func:`~middleware.llm_client.get_llm_client`.
+
+    LLM output (``VerifiedFact`` / ``llm_response["parsed"]``)::
+
+        {
+            "fact": "<echo>",
+            "verification_status": bool,
+            "verification_report": str,
+            "evidence_documents": list[str],
+        }
+
+    Output:
+        Same dict as ``fact_row`` with ``verification_status``, ``verification_report``,
+        and ``evidence_documents`` overwritten from the verdict.
+    """
+
+    human_content = (
+        f"## Normalized query\n{normalized_query}\n\n"
+        f"## Fact to verify\n"
+        f"fact_id: {fact_row.get('fact_id')}\n"
+        f"fact: {fact_row.get('fact')}\n\n"
+        f"## Retrieved documents\n{docs_block}"
+    )
+    messages_for_llm = [
+        SystemMessage(content=VERIFY_SINGLE_FACT_PROMPT),
+        HumanMessage(content=human_content),
+    ]
+    llm_response = await verifier.ainvoke(messages_for_llm)
+    verdict = llm_response["parsed"]
+    return {
+        **fact_row,
+        "verification_status": verdict.verification_status,
+        "verification_report": verdict.verification_report,
+        "evidence_documents": list(verdict.evidence_documents),
+    }
+
+
+async def run_verification(
+    facts: list[dict[str, Any]],
+    *,
+    normalized_query: str,
+    docs_block: str,
+    verifier: Any,
+) -> list[dict[str, Any]]:
+    """Verify every fact in parallel; preserve input order.
+
+    Input:
+        facts: full list from ``state["facts"]``.
+        normalized_query, docs_block, verifier: passed through to :func:`verify_single_fact`.
+
+    Output:
+        list[dict] — one updated fact row per input row, same order as ``facts``.
+    """
+
+    return list(
+        await asyncio.gather(
+            *[
+                verify_single_fact(
+                    row,
+                    normalized_query=normalized_query,
+                    docs_block=docs_block,
+                    verifier=verifier,
+                )
+                for row in facts
+            ]
+        )
+    )
 
 
 def build_facts_from_decomposition(response: RequiredFactsResult) -> list[dict[str, Any]]:
@@ -219,59 +301,6 @@ def turn_scratch_reset() -> dict[str, Any]:
         "retrieval_retry_count": 0,
         "message_query": Overwrite(value=[]),
     }
-
-
-def merge_verification_into_facts(
-    facts: list[dict[str, Any]],
-    verify: RecallVerifyResult,
-    doc_texts: list[str],
-    normalized_doc_texts: list[str],
-) -> list[dict[str, Any]]:
-    """Merge recall_check LLM output into facts with verbatim evidence enforcement.
-
-    The verifier may mark a fact supported and quote excerpts. We only keep excerpts
-    that appear as substrings in the retrieved corpus (raw or whitespace-normalized).
-    If the model claims support but no excerpt matches, we downgrade to unsupported.
-    """
-
-    expected_texts = fact_texts(facts)
-    verified_rows = list(verify.facts)
-    verified_texts = [item.fact for item in verified_rows]
-    if verified_texts != expected_texts:
-        raise ValueError("Recall verification facts must match input facts by order and text")
-
-    updated: list[dict[str, Any]] = []
-    for fact_row, verification in zip(facts, verified_rows):
-        copied_excerpts = []
-        for excerpt in verification.evidence_documents:
-            normalized_excerpt = re.sub(r"\s+", " ", excerpt).strip()
-            # Substring check prevents fabricated quotes not present in retrieval.
-            if any(excerpt in doc_text for doc_text in doc_texts) or any(
-                normalized_excerpt in doc_text for doc_text in normalized_doc_texts
-            ):
-                copied_excerpts.append(excerpt)
-        if verification.verification_status and not copied_excerpts:
-            # LLM said supported but evidence not grounded → treat as unsupported.
-            updated.append(
-                {
-                    **fact_row,
-                    "verification_status": False,
-                    "verification_report": (
-                        "Evidence excerpt was not copied verbatim from retrieved documents."
-                    ),
-                    "evidence_documents": [],
-                }
-            )
-            continue
-        updated.append(
-            {
-                **fact_row,
-                "verification_status": verification.verification_status,
-                "verification_report": verification.verification_report,
-                "evidence_documents": copied_excerpts,
-            }
-        )
-    return updated
 
 
 def build_node_ai_message(
@@ -635,82 +664,85 @@ class RetrievalGraph:
     # --- Recall / repair nodes ---
 
     async def recall_check_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Verify facts against retrieved passages and update verification in place.
+        """Verify each fact in parallel against retrieved passages; update verification in place.
 
-        Writes: ``facts``, ``recall_sufficient``.
+        Input (from ``state``):
+            normalized_query: str — standalone query for this turn.
+            facts: list[dict] — unified fact rows from fact_decomposition, e.g.::
+
+                {
+                    "fact_id": 1,
+                    "fact": "Whether X has Y",
+                    "verification_status": false,
+                    "verification_report": "",
+                    "evidence_documents": [],
+                    "search_queries": [],
+                    "gap_fill_explanation": "",
+                }
+
+            retrieved_documents: list[dict] — compact corpus from retrieval, e.g.::
+
+                {"id": "...", "score": 0.9, "text": "<raw passage>"}
+
+        Output (state merge):
+            facts: list[dict] — same rows with verification fields set per fact.
+            recall_sufficient: bool — ``True`` only when every fact has
+                ``verification_status`` true.
+            message_query: append-only trace row (via :func:`trace_row`).
+
         Routes via: ``route_after_recall_check`` (answer | partial_answer | gap_fill).
         """
 
-        normalized = str(state.get("normalized_query") or "").strip()
+        normalized_query = str(state.get("normalized_query") or "").strip()
         facts = list(state.get("facts") or [])
         if not facts:
             raise ValueError("recall_check requires facts from fact_decomposition")
-        docs = list(state.get("retrieved_documents") or [])
+
+        retrieved_docs = list(state.get("retrieved_documents") or [])
         doc_lines = [
             f"[{i}] (id={row.get('id')}, score={row.get('score')}) {row.get('text') or ''}"
-            for i, row in enumerate(docs, start=1)
+            for i, row in enumerate(retrieved_docs, start=1)
         ]
-        doc_texts = [str(row.get("text") or "") for row in docs]
-        normalized_doc_texts = [
-            re.sub(r"\s+", " ", doc_text).strip() for doc_text in doc_texts
-        ]
+        docs_block = "\n".join(doc_lines) if doc_lines else "(none)"
 
-        verify_llm = get_llm_client(
+        verifier = get_llm_client(
             model=settings.recall_check_model,
-            output_schema=RecallVerifyResult,
+            output_schema=VerifiedFact,
             include_raw=True,
-        )
-        model = settings.recall_check_model
-        verify_human = (
-            f"## Normalized query\n{normalized}\n\n"
-            "## Facts\n"
-            f"{json.dumps(facts, ensure_ascii=False)}\n\n"
-            "## Retrieved documents\n"
-            f"{chr(10).join(doc_lines) if doc_lines else '(none)'}"
         )
 
         if settings.langfuse_tracing_enabled:
             langfuse = get_langfuse_client()
             with langfuse.start_as_current_observation(as_type="span", name="recall_check") as node_span:
-                with langfuse.start_as_current_observation(
-                    as_type="generation", name="recall_check-verify_facts-llm", model=model
-                ) as gen_ver:
-                    ver_result = await verify_llm.ainvoke(
-                        [
-                            SystemMessage(content=VERIFY_SYSTEM_PROMPT),
-                            HumanMessage(content=verify_human),
-                        ]
-                    )
-                    update_llm_generation(gen_ver, model=model, raw=ver_result.get("raw"))
-                updated_facts = merge_verification_into_facts(
-                    facts, ver_result["parsed"], doc_texts, normalized_doc_texts
+                verified_facts = await run_verification(
+                    facts,
+                    normalized_query=normalized_query,
+                    docs_block=docs_block,
+                    verifier=verifier,
                 )
-                unsupported = unsupported_facts(updated_facts)
-                recall_sufficient = not unsupported
+                unsupported = unsupported_facts(verified_facts)
+                recall_sufficient = all(row["verification_status"] for row in verified_facts)
                 node_span.update(
                     output={
-                        "facts": updated_facts,
+                        "facts": verified_facts,
                         "unsupported_facts": unsupported,
+                        "unsupported_fact_count": len(unsupported),
                         "recall_sufficient": recall_sufficient,
-                        "retrieved_documents": docs,
+                        "retrieved_documents": retrieved_docs,
                     }
                 )
         else:
-            ver_result = await verify_llm.ainvoke(
-                [
-                    SystemMessage(content=VERIFY_SYSTEM_PROMPT),
-                    HumanMessage(content=verify_human),
-                ]
+            verified_facts = await run_verification(
+                facts,
+                normalized_query=normalized_query,
+                docs_block=docs_block,
+                verifier=verifier,
             )
-            updated_facts = merge_verification_into_facts(
-                facts, ver_result["parsed"], doc_texts, normalized_doc_texts
-            )
-            unsupported = unsupported_facts(updated_facts)
-            # True only when every fact has verification_status=True after grounding check.
-            recall_sufficient = not unsupported
+            unsupported = unsupported_facts(verified_facts)
+            recall_sufficient = all(row["verification_status"] for row in verified_facts)
 
         merge: dict[str, Any] = {
-            "facts": updated_facts,
+            "facts": verified_facts,
             "recall_sufficient": recall_sufficient,
         }
         merge.update(
@@ -969,7 +1001,7 @@ class RetrievalGraph:
         3. unsupported facts remain and retries remain → ``gap_fill``
         """
 
-        if not unsupported_facts(state.get("facts") or []):
+        if state.get("recall_sufficient"):
             return "answer"
         if state.get("retrieval_retry_count", 0) >= settings.retrieval_loop_max_retries:
             return "partial_answer"

@@ -1,9 +1,8 @@
-"""Score retrieval results with vanilla RAGAS context precision and context recall.
+"""RAGAS scoring step for the HotpotQA benchmark (internal; no CLI).
 
 Uses ``ragas.metrics.collections`` only (no custom metrics or prompts).
 Reads ``retrieval_results.json``; writes ``ragas_results.json`` and optional xlsx.
-
-Run: ``python -m benchmarking.hotpotqa.metrics.ragas_metrics``
+Called from :func:`~benchmarking.hotpotqa.run_benchmark.run_benchmark`.
 """
 
 from __future__ import annotations
@@ -106,11 +105,3 @@ async def run_ragas_metrics(settings: HotpotQASettings | None = None) -> dict[st
         print("pandas/openpyxl not available; skipped type_level_metrics.xlsx")
 
     return output
-
-
-async def main() -> None:
-    await run_ragas_metrics()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

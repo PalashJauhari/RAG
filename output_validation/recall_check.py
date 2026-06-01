@@ -58,7 +58,7 @@ class VerifiedFact(BaseModel):
 
 
 class RecallVerifyResult(BaseModel):
-    """Per-fact sufficient-context verification against retrieved passages."""
+    """Batch verification result (legacy). ``recall_check_node`` uses :class:`VerifiedFact` per call."""
 
     facts: list[VerifiedFact] = Field(
         description="Verification result for every fact in the unified facts list.",

@@ -104,6 +104,79 @@ def message_query_tail(entries: list[Any], max_entries: int = 5) -> list[Any]:
     return entries[-max_entries:]
 
 
+def message_content(message: Any) -> str | None:
+    """Extract string content from an ``AIMessage`` or a LangGraph/LangChain message dict."""
+
+    raw: Any = None
+    if isinstance(message, AIMessage):
+        raw = message.content
+    elif isinstance(message, dict):
+        raw = message.get("content")
+        if raw is None:
+            data = message.get("data")
+            if isinstance(data, dict):
+                raw = data.get("content")
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        text = raw.strip()
+        return text or None
+    if isinstance(raw, list):
+        parts: list[str] = []
+        for block in raw:
+            if isinstance(block, str) and block.strip():
+                parts.append(block.strip())
+            elif isinstance(block, dict):
+                text = block.get("text") or block.get("content")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+        joined = "\n".join(parts).strip()
+        return joined or None
+    return str(raw).strip() or None
+
+
+def message_name(message: Any) -> str | None:
+    """Return graph node name from ``AIMessage.name`` or serialized message dict."""
+
+    if isinstance(message, AIMessage):
+        name = getattr(message, "name", None)
+        return str(name).strip() if name else None
+    if isinstance(message, dict):
+        name = message.get("name")
+        if name:
+            return str(name).strip()
+        data = message.get("data")
+        if isinstance(data, dict) and data.get("name"):
+            return str(data["name"]).strip()
+    return None
+
+
+def final_answer_from_messages(
+    messages: list[Any],
+    *,
+    allowed_names: set[str] | None = None,
+) -> FinalAnswer:
+    """Parse ``FinalAnswer`` JSON from the first usable AI message in ``messages``."""
+
+    fallback = FinalAnswer(answer="", sources=[], confidence="low")
+    for message in messages or []:
+        if allowed_names is not None:
+            name = message_name(message)
+            if name and name not in allowed_names:
+                continue
+        content = message_content(message)
+        if not content:
+            continue
+        try:
+            payload = json.loads(content) if content.lstrip().startswith("{") else content
+            if isinstance(payload, dict):
+                return FinalAnswer.model_validate(payload)
+            return FinalAnswer(answer=str(payload), sources=[], confidence="low")
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return FinalAnswer(answer=content, sources=[], confidence="low")
+    return fallback
+
+
 def get_stream_event(
     session_id: str,
     update: dict[str, Any],
@@ -247,21 +320,11 @@ def get_stream_event(
         )
     elif node_name in {"answer", "partial_answer"}:
         # Final answer lives in messages as JSON; parse for the ``final`` SSE frame.
-        answer = FinalAnswer(answer="", sources=[], confidence="low")
-        for message in payload.get("messages") or []:
-            if not isinstance(message, AIMessage) or not message.content:
-                continue
-            try:
-                content = (
-                    json.loads(message.content)
-                    if isinstance(message.content, str)
-                    else message.content
-                )
-                answer = FinalAnswer.model_validate(content)
-                break
-            except (json.JSONDecodeError, ValueError, TypeError):
-                answer = FinalAnswer(answer=str(message.content), sources=[], confidence="low")
-                break
+        allowed = {"answer_node"} if node_name == "answer" else {"partial_answer_node"}
+        answer = final_answer_from_messages(
+            list(payload.get("messages") or []),
+            allowed_names=allowed,
+        )
         event.update(
             {
                 "type": "final",
@@ -311,25 +374,16 @@ def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
             "retrieved_docs": [],
         }
 
-    messages = result.get("messages", [])
-    answer = FinalAnswer(answer="", sources=[], confidence="low")
-    for message in reversed(messages):
-        if not isinstance(message, AIMessage) or not message.content:
-            continue
-        if getattr(message, "name", None) not in {"answer_node", "partial_answer_node"}:
-            continue
-        try:
-            payload = json.loads(message.content) if isinstance(message.content, str) else message.content
-            answer = FinalAnswer.model_validate(payload)
-            break
-        except (json.JSONDecodeError, ValueError, TypeError):
-            answer = FinalAnswer(answer=str(message.content), sources=[], confidence="low")
-            break
-
+    messages = list(result.get("messages") or [])
+    answer = final_answer_from_messages(
+        list(reversed(messages)),
+        allowed_names={"answer_node", "partial_answer_node"},
+    )
     if not answer.answer:
         for message in reversed(messages):
-            if isinstance(message, AIMessage) and message.content:
-                answer = FinalAnswer(answer=str(message.content), sources=[], confidence="low")
+            content = message_content(message)
+            if content:
+                answer = FinalAnswer(answer=content, sources=[], confidence="low")
                 break
 
     retrieved_docs = list(result.get("retrieved_documents") or [])

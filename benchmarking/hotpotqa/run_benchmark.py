@@ -1,6 +1,8 @@
 """Orchestrate HotpotQA retriever benchmark: retrieve → RAGAS → report.
 
-Run: ``python -m benchmarking.hotpotqa.run_benchmark --strategy fast_bm25_retrieval``
+Single entry point. Run::
+
+    python -m benchmarking.hotpotqa.run_benchmark --strategy fast_bm25_retrieval
 """
 
 from __future__ import annotations
@@ -20,7 +22,6 @@ async def run_benchmark(
     strategy: str,
     *,
     experiment_name: str | None = None,
-    skip_ragas: bool = False,
 ) -> None:
     """Run the full benchmark pipeline for one retrieval strategy."""
 
@@ -34,19 +35,14 @@ async def run_benchmark(
     print(f"Strategy: {parsed}")
 
     await run_retrieval_eval(parsed, settings=settings)
-
-    if not skip_ragas:
-        await run_ragas_metrics(settings=settings)
-    else:
-        print("Skipping RAGAS metrics (--skip-ragas)")
-
+    await run_ragas_metrics(settings=settings)
     build_report_markdown(settings=settings)
     print("Benchmark complete.")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="HotpotQA retriever-only benchmark (retrieve, RAGAS, report)"
+        description="HotpotQA retriever benchmark (retrieve, RAGAS, report)"
     )
     parser.add_argument(
         "--strategy",
@@ -61,17 +57,11 @@ def main() -> None:
         default=None,
         help="Override HOTPOTQA_EXPERIMENT_NAME for this run",
     )
-    parser.add_argument(
-        "--skip-ragas",
-        action="store_true",
-        help="Skip RAGAS context precision/recall (faster dev runs)",
-    )
     args = parser.parse_args()
     asyncio.run(
         run_benchmark(
             args.strategy,
             experiment_name=args.experiment_name,
-            skip_ragas=args.skip_ragas,
         )
     )
 

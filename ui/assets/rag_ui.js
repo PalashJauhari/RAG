@@ -120,34 +120,16 @@ function updateThinkingSummary(boldText, restText) {
   summary.textContent = truncate(text.trim(), 120) || "Working…";
 }
 
-function createInlineUserBubble(text) {
-  const chatInner = document.getElementById("chat-area");
-  if (!chatInner) return;
-
-  // If we're in the empty state, clear it immediately on first question submit.
-  const empty = chatInner.querySelector(".rag-empty-state");
-  if (empty) {
-    chatInner.innerHTML = "";
+function commitChatState(chat) {
+  if (window.dash_clientside && window.dash_clientside.set_props) {
+    window.dash_clientside.set_props("chat-state", { data: chat });
   }
-
-  const row = document.createElement("div");
-  row.className = "rag-live-turn rag-msg-row-user";
-
-  const bubble = document.createElement("div");
-  bubble.className = "rag-bubble-user";
-  bubble.style.whiteSpace = "pre-wrap";
-  bubble.textContent = text;
-
-  row.appendChild(bubble);
-  chatInner.appendChild(row);
-  chatScrollBottom();
 }
 
-function openThinkingPanel(messageText) {
+function openThinkingPanel() {
   const panel = ensureThinkingPanelHost();
   if (!panel) return null;
   clearStreamUI();
-  createInlineUserBubble(messageText);
   panel.className = "rag-thinking-panel";
   panel.innerHTML = "";
   const built = buildThinkingCardDOM();
@@ -156,9 +138,6 @@ function openThinkingPanel(messageText) {
 }
 
 function clearStreamUI() {
-  const liveRows = document.querySelectorAll(".rag-live-turn");
-  for (let i = 0; i < liveRows.length; i++) liveRows[i].remove();
-
   const panel = document.getElementById("rag-thinking-panel");
   if (panel) {
     panel.innerHTML = "";
@@ -269,7 +248,13 @@ async function parseSSEStream(response, progressEl) {
           appendProgressBold(progressEl, "sse", " — could not parse SSE frame");
           continue;
         }
-        if (payload.type === "final") finalPayload = payload;
+        if (payload.type === "final") {
+          const answerText =
+            payload.answer != null ? String(payload.answer).trim() : "";
+          if (!finalPayload || answerText) {
+            finalPayload = payload;
+          }
+        }
         if (payload.type === "done" && payload.retrieved_doc_count != null)
           retrievedDocCount = payload.retrieved_doc_count;
         if (payload.type === "error") {
@@ -340,9 +325,10 @@ window.dash_clientside.rag_ui.submit_message = async function (
 
   let chat = Array.isArray(chat_state) ? chat_state.slice() : [];
   chat.push({ role: "user", content: raw });
+  commitChatState(chat);
 
   const base = (api_base || "http://127.0.0.1:8000").replace(/\/$/, "");
-  const progressEl = pending_interrupt ? null : openThinkingPanel(raw);
+  const progressEl = pending_interrupt ? null : openThinkingPanel();
   chatScrollBottom();
 
   try {
@@ -405,7 +391,7 @@ window.dash_clientside.rag_ui.submit_message = async function (
     const { finalPayload, retrievedDocCount } = await parseSSEStream(r, progressEl);
     var elapsedStream = clockNowMs() - startStream;
 
-    if (!finalPayload) {
+    if (!finalPayload || !(finalPayload.answer && String(finalPayload.answer).trim())) {
       chat.push({
         role: "assistant",
         content: appendTimeTakenFooter(
@@ -431,6 +417,12 @@ window.dash_clientside.rag_ui.submit_message = async function (
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
     if (progressEl) appendProgressBold(progressEl, "error", " — " + truncate(msg, 400));
+    if (!pending_interrupt && chat.length) {
+      chat.push({
+        role: "assistant",
+        content: "Error: " + truncate(msg, 2000),
+      });
+    }
     clearStreamUI();
     return [chat, !!pending_interrupt, "", msg];
   } finally {
