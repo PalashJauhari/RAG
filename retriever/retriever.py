@@ -22,10 +22,15 @@ from output_validation.retrieval_strategy import RetrievalStrategy
 
 
 class Retriever:
-    """Hybrid retriever against a Qdrant collection with dense, sparse, and late interaction."""
+    """Qdrant hybrid retriever: dense, BM25, RRF fusion, and optional ColBERT re-ranking.
+
+    One ``retrieve()`` call may take multiple query strings (e.g. fact-level queries from the graph).
+    Embeddings are batched per modality; each query is searched against Qdrant in parallel
+  (see ``retrieve_all_parallel``).
+    """
 
     def __init__(self, config: Settings):
-        """Wire OpenAI embeddings, Qdrant client, and Jina rate-limit semaphore.
+        """Create clients for OpenAI dense embeddings, Qdrant, and rate-limited Jina calls.
 
         Args:
             config: App or HotpotQA settings (must expose Qdrant and embedding fields).
@@ -38,11 +43,11 @@ class Retriever:
             cloud_inference=config.use_bm25,
             timeout=config.request_timeout_seconds,
         )
-        # Limits concurrent Jina HTTP calls across retrieve() invocations.
+        # Cap parallel Jina multi-vector requests to reduce 429s under load.
         self._jina_request_sem = asyncio.Semaphore(2)
 
     async def create_dense_embeddings(self, queries: list[str]) -> list[list[float]]:
-        """Embed query strings with the configured OpenAI embedding model."""
+        """Batch-embed all query strings in one OpenAI API call (order matches ``queries``)."""
         response = await self.openai.embeddings.create(
             model=self.config.openai_embedding_model,
             input=queries,
@@ -123,9 +128,9 @@ class Retriever:
     ) -> list[dict[str, Any]]:
         """Run retrieval for each query, then merge per-query top-k lists.
 
-        When ``retrieval_subquery_parallel`` is true (default), dense and ColBERT embeddings
-        are batched once per call and Qdrant sub-queries run concurrently up to
-        ``retrieval_subquery_max_concurrency``. Each sub-query returns up to ``top_k`` hits.
+        Dense and ColBERT embeddings are batched once per call; Qdrant sub-queries run
+        concurrently up to ``retrieval_subquery_max_concurrency``. Each sub-query returns up to
+        ``top_k`` hits.
         Results are concatenated in query order with point-id deduplication (first occurrence
         wins). There is no cross-query RRF and no global ``[:top_k]`` cap on the merged list.
 
@@ -150,88 +155,49 @@ class Retriever:
         bm25 = bm25_limit or self.config.retrieval_candidate_bm25
         late_limit = late_interaction_limit or self.config.retrieval_candidate_for_late_interaction
 
+        # One OpenAI embedding request for all queries (skipped for BM25-only strategy).
         dense_vectors: list[list[float]] | None = None
         if strategy != "keyword":
             dense_vectors = await self.create_dense_embeddings(clean_queries)
 
+        # ColBERT query vectors only when the late-interaction strategy is selected.
         colbert_vectors: list[list[list[float]]] | None = None
         if strategy == "fast_bm25_late_interaction_retrieval":
             colbert_vectors = await self.create_late_interaction_embeddings(clean_queries)
 
-        if self.config.retrieval_subquery_parallel:
-            query_results = await self.retrieve_all_parallel(
-                clean_queries,
-                strategy=strategy,
-                top_k=limit,
-                dense_mmr_limit=dense_limit,
-                bm25_limit=bm25,
-                late_interaction_limit=late_limit,
-                exclude_point_ids=exclude_point_ids,
-                dense_vectors=dense_vectors,
-                colbert_vectors=colbert_vectors,
-            )
-        else:
-            query_results = await self.retrieve_all_sequential(
-                clean_queries,
-                strategy=strategy,
-                top_k=limit,
-                dense_mmr_limit=dense_limit,
-                bm25_limit=bm25,
-                late_interaction_limit=late_limit,
-                exclude_point_ids=exclude_point_ids,
-                dense_vectors=dense_vectors,
-                colbert_vectors=colbert_vectors,
-            )
+        # Each inner list is the top-k Qdrant hits for one input query string.
+        hits_per_query = await self.retrieve_all_parallel(
+            clean_queries,
+            strategy=strategy,
+            top_k=limit,
+            dense_mmr_limit=dense_limit,
+            bm25_limit=bm25,
+            late_interaction_limit=late_limit,
+            exclude_point_ids=exclude_point_ids,
+            dense_vectors=dense_vectors,
+            colbert_vectors=colbert_vectors,
+        )
 
+        # Flatten per-query hit lists into one deduplicated corpus (first occurrence wins).
         seen_ids: set[str] = set()
         final_docs: list[dict[str, Any]] = []
-        for points in query_results:
-            for point in points:
-                point_id = str(point.id)
-                if point_id in seen_ids:
-                    continue
-                seen_ids.add(point_id)
-                final_docs.append(
-                    {
-                        "id": point_id,
-                        "score": point.score,
-                        "payload": point.payload or {},
-                    }
-                )
+        for query_hits in hits_per_query:
+            for retrieved_point in query_hits:
+                point_id = str(retrieved_point.id)
+                if point_id not in seen_ids:
+                    seen_ids.add(point_id)
+                    final_docs.append(
+                        {
+                            "id": point_id,
+                            "score": retrieved_point.score,
+                            "payload": retrieved_point.payload or {},
+                        }
+                    )
 
         for rank, doc in enumerate(final_docs, start=1):
             doc["rank"] = rank
 
         return final_docs
-
-    async def retrieve_all_sequential(
-        self,
-        clean_queries: list[str],
-        *,
-        strategy: RetrievalStrategy,
-        top_k: int,
-        dense_mmr_limit: int,
-        bm25_limit: int,
-        late_interaction_limit: int,
-        exclude_point_ids: list[str] | None,
-        dense_vectors: list[list[float]] | None,
-        colbert_vectors: list[list[list[float]]] | None,
-    ) -> list[list[Any]]:
-        query_results: list[list[Any]] = []
-        for index, query in enumerate(clean_queries):
-            points = await self.retrieve_one(
-                query,
-                top_k,
-                strategy,
-                dense_mmr_limit,
-                bm25_limit,
-                late_interaction_limit,
-                exclude_point_ids=exclude_point_ids,
-                dense_vector=dense_vectors[index] if dense_vectors else None,
-                colbert_vector=colbert_vectors[index] if colbert_vectors else None,
-            )
-            query_results.append(points)
-        return query_results
 
     async def retrieve_all_parallel(
         self,
@@ -246,10 +212,16 @@ class Retriever:
         dense_vectors: list[list[float]] | None,
         colbert_vectors: list[list[list[float]]] | None,
     ) -> list[list[Any]]:
+        """Run one Qdrant search per query string, concurrently (bounded by ``retrieval_subquery_max_concurrency``).
+
+        Returns:
+            List aligned with ``clean_queries``; each element is the scored points for that query.
+        """
         max_concurrency = max(1, self.config.retrieval_subquery_max_concurrency)
         sem = asyncio.Semaphore(max_concurrency)
 
         async def run_one(index: int, query: str) -> list[Any]:
+            """Retrieve top-k points for a single query using the active strategy tier."""
             async with sem:
                 return await self.retrieve_one(
                     query,
@@ -278,7 +250,7 @@ class Retriever:
         return models.Filter(must_not=[models.HasIdCondition(has_id=clean_ids)])
 
     def dense_query(self, dense_vector: list[float], dense_mmr_limit: int) -> Any:
-        """Build dense query vector, optionally wrapped with MMR diversification."""
+        """Return a dense nearest query, optionally with MMR for result diversity."""
 
         if not self.config.use_mmr:
             return dense_vector
@@ -303,10 +275,19 @@ class Retriever:
         dense_vector: list[float] | None = None,
         colbert_vector: list[list[float]] | None = None,
     ) -> list[Any]:
-        """Execute a single-query retrieval pipeline for the given strategy tier."""
+        """Run retrieval for one query string against Qdrant.
 
+        Uses precomputed ``dense_vector`` / ``colbert_vector`` when provided by
+        ``retrieve_all_parallel``; otherwise embeds this query on the fly.
+
+        Returns:
+            Qdrant ``ScoredPoint`` list (up to ``top_k`` hits) for this query.
+        """
+
+        # Optional must_not filter so follow-up retrieval can skip already-used chunks.
         query_filter = self.exclude_filter(exclude_point_ids)
 
+        # --- keyword: BM25 sparse search only (no dense / fusion / ColBERT). ---
         if strategy == "keyword":
             response = await self.qdrant.query_points(
                 collection_name=self.config.qdrant_collection_name,
@@ -319,15 +300,17 @@ class Retriever:
             )
             return response.points
 
+        # Dense path: embed on demand when the caller did not batch embeddings upstream.
         if dense_vector is None:
             dense_vector = (await self.create_dense_embeddings([query]))[0]
-        dense_query = self.dense_query(dense_vector, dense_mmr_limit)
+        # Nearest-neighbor vector, or MMR-wrapped query when diversity is enabled.
+        dense_query_vec = self.dense_query(dense_vector, dense_mmr_limit)
 
+        # --- fast_retrieval: single dense (or MMR) query against the collection. ---
         if strategy == "fast_retrieval":
             response = await self.qdrant.query_points(
                 collection_name=self.config.qdrant_collection_name,
-                query=dense_query,
-                using=self.config.qdrant_dense_vector_name,
+                query=dense_query_vec,
                 query_filter=query_filter,
                 limit=top_k,
                 with_payload=True,
@@ -335,9 +318,10 @@ class Retriever:
             )
             return response.points
 
+        # Shared hybrid stage: pull separate dense and BM25 candidate pools (same filter).
         prefetches = [
             models.Prefetch(
-                query=dense_query,
+                query=dense_query_vec,
                 using=self.config.qdrant_dense_vector_name,
                 limit=dense_mmr_limit,
                 filter=query_filter,
@@ -350,6 +334,7 @@ class Retriever:
             ),
         ]
 
+        # --- fast_bm25_retrieval: RRF fusion over dense + BM25 prefetches. ---
         if strategy == "fast_bm25_retrieval":
             response = await self.qdrant.query_points(
                 collection_name=self.config.qdrant_collection_name,
@@ -362,15 +347,18 @@ class Retriever:
             )
             return response.points
 
+        # --- fast_bm25_late_interaction_retrieval: RRF candidates, then ColBERT re-rank. ---
         if strategy == "fast_bm25_late_interaction_retrieval":
             if colbert_vector is None:
                 colbert_vector = (await self.create_late_interaction_embeddings([query]))[0]
+            # Nested prefetch: fuse dense+BM25 into ``late_interaction_limit`` candidates.
             candidate_prefetch = models.Prefetch(
                 prefetch=prefetches,
                 query=models.FusionQuery(fusion=models.Fusion.RRF),
                 limit=late_interaction_limit,
                 filter=query_filter,
             )
+            # Final query scores candidates with the multi-vector ColBERT index.
             response = await self.qdrant.query_points(
                 collection_name=self.config.qdrant_collection_name,
                 prefetch=candidate_prefetch,

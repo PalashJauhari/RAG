@@ -18,7 +18,7 @@ fields = [
     "retrieval_candidate_dense_mmr",
     "retrieval_candidate_bm25",
     "retrieval_candidate_for_late_interaction",
-    "retrieval_mmr_diversity", "retrieval_subquery_parallel", "retrieval_subquery_max_concurrency",
+    "retrieval_mmr_diversity", "retrieval_subquery_max_concurrency",
     "jina_api_key", "jina_colbert_model", "jina_colbert_dimensions",
     "jina_multi_vector_url", "langfuse_tracing_enabled", "langfuse_public_key", "langfuse_secret_key",
     "langfuse_host", "langfuse_base_url", "checkpointer_use_postgres", "database_url",

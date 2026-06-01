@@ -42,7 +42,6 @@ class Settings(BaseSettings):
     retrieval_candidate_bm25: int = 100
     retrieval_candidate_for_late_interaction: int = 100
     retrieval_mmr_diversity: float = 0.5
-    retrieval_subquery_parallel: bool = True
     retrieval_subquery_max_concurrency: int = 8
 
     # --- Jina ColBERT multi-vector API ---
