@@ -21,7 +21,7 @@ from middleware.llm_client import get_llm_client
 
 logger = logging.getLogger(__name__)
 
-UPLOAD_BATCH_SIZE = 64
+UPLOAD_BATCH_SIZE = 16
 ENRICH_CONCURRENCY = 10
 ENRICH_MAX_RETRIES = 3
 
