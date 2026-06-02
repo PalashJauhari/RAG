@@ -40,7 +40,7 @@ Optional Dash UI (port 8050): `python ui/dash_app.py`
 3. **Route** on fact count: one fact → retrieve with the normalized query; multiple facts → split into focused queries.
 4. **Retrieve** with hybrid Qdrant search; repair passes exclude already-seen point ids (HasId) and dedupe by id.
 5. **Verify recall** with one parallel LLM call per fact against retrieved passages; update verification in place on the same `facts` list.
-6. **Repair** unsupported facts via `gap_fill` → `strategy_upgrade` → retrieval (until retries exhausted).
+6. **Repair** unsupported facts via `create_queries_for_unsupported_facts` → `strategy_upgrade` → retrieval (until retries exhausted).
 7. **Answer** (or partial answer) strictly from retrieved documents, then clear turn-local state.
 
 Unified fact record:
@@ -114,7 +114,7 @@ download_data  →  unstructured_pipeline  →  chunks.json  →  qdrant_upload 
 |-------|--------|----------------|
 | Retriever hit | `{id, score, rank, payload}` | Full Qdrant payload |
 | Graph `retrieved_documents` (during turn) | `{id, score, text}` | **`raw_text`** from payload — not enriched embed string |
-| API `/run` `retrieved_docs` | `[]` | **Intentionally empty** after `clear_turn_trace`; answer is the user-facing output |
+| API `/run` `retrieved_docs` | `{id, score, text}[]` | Compact corpus from the completed turn (turn scratch reset on the next `/run`) |
 
 Compaction happens in `tool_wrappers/retrieval_payload.py` (`compact_documents_for_llm`). Ingestion upload: `ingestion/qdrant_upload.py` + `ingestion/.env`. Benchmark upload: `benchmarking/hotpotqa/qdrant_upload_lib.py` + `benchmarking/hotpotqa/.env`.
 
@@ -128,7 +128,7 @@ After changing the contract, **re-upload** your Qdrant collection (e.g. `python 
 | `POST /run/stream` | Same turn with SSE node progress (counts only on the wire) |
 | `POST /resume` | Reserved for future clarification interrupts |
 
-**`/run` response:** The graph clears turn-local scratch (including `retrieved_documents`) in `clear_turn_trace` after `answer` or `partial_answer`. The API therefore returns **`retrieved_docs: []`** by design — clients should use `answer`, `sources`, and `confidence`. Passage text during the turn lives in graph state for recall/answer nodes only; it is not persisted in the checkpoint or echoed on `/run`.
+**`/run` response:** Turn-local scratch (including `retrieved_documents`) is reset at the start of the next `/run`. The completed-turn response may include **`retrieved_docs`** from the final graph state; clients should primarily use `answer`, `sources`, and `confidence`.
 
 **`/run/stream`:** Node events expose retrieval **counts** (not passage text). The final `done` frame includes `retrieved_doc_count`. Full passages are available in Langfuse when tracing is enabled.
 

@@ -193,12 +193,9 @@ function progressBoldRest(ev) {
     const pq = (ev.active_retrieval_queries || []).join(" · ");
     return { bold: boldName, rest: pq ? " — " + truncate(pq, 180) : "" };
   }
-  if (node === "gap_fill") {
+  if (node === "create_queries_for_unsupported_facts") {
     const q = (ev.active_retrieval_queries || []).join(" · ");
     return { bold: boldName, rest: q ? " — " + truncate(q, 160) : "" };
-  }
-  if (node === "clear_turn_trace") {
-    return { bold: boldName, rest: " — turn trace cleared" };
   }
 
   const label = ev.label || "";

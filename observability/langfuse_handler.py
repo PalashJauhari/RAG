@@ -7,8 +7,8 @@ One root span per ``run`` / ``stream_run`` / ``resume``; inline node spans and n
 **Fact / recall spans**: ``fact_decomposition`` logs the normalized query and unified ``facts``
 before retrieval. ``query_complexity`` is deterministic (``len(facts) > 1`` routing; no LLM span).
 ``recall_check`` runs parallel per-fact LLM verification under a single node span (no per-fact
-Langfuse children) and logs unsupported rows plus accumulated ``retrieved_documents``. ``gap_fill`` logs repair
-queries. ``strategy_upgrade`` logs deterministic ``retrieval_strategy`` and
+Langfuse children) and logs unsupported rows plus accumulated ``retrieved_documents``.
+``create_queries_for_unsupported_facts`` logs repair queries. ``strategy_upgrade`` logs deterministic ``retrieval_strategy`` and
 ``retrieval_retry_count``.
 
 **Retrieval span** (``retrieval_node`` in :mod:`graph.graph`): ``output`` includes ``strategy``,

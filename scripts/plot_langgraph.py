@@ -1,7 +1,8 @@
-"""Render the compiled LangGraph to Mermaid source and PNG.
+"""Render the compiled LangGraph to Mermaid source and PNG (topology only).
 
 Default outputs: ``artifacts/langgraph.mmd`` and ``artifacts/langgraph.png``.
-Uses in-memory checkpointing only (no Postgres required).
+Does **not** generate ``langgraph_io.*`` state I/O diagrams — those are intentionally
+unsupported. Uses in-memory checkpointing only (no Postgres required).
 
 Example::
 
@@ -23,6 +24,23 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from graph import RetrievalGraph
+
+
+def _reject_io_artifact_path(path: Path, label: str) -> None:
+    """Topology script must not write ``*_io`` artifact names."""
+    if path.stem.endswith("_io"):
+        raise SystemExit(
+            f"{label} must not use *_io names (topology only): {path}. "
+            "Use artifacts/langgraph.mmd and artifacts/langgraph.png."
+        )
+
+
+def _remove_stale_io_artifacts(artifacts_dir: Path) -> None:
+    """Delete legacy hand-maintained I/O diagram files if they still exist."""
+    for pattern in ("langgraph_io.mmd", "langgraph_io.png", "*_io.mmd", "*_io.png"):
+        for stale in artifacts_dir.glob(pattern):
+            stale.unlink()
+            print(f"Removed stale artifact {stale}")
 
 
 async def main() -> None:
@@ -61,8 +79,11 @@ async def main() -> None:
 
     output_path = Path(args.output)
     mermaid_path = Path(args.mermaid_output)
+    _reject_io_artifact_path(output_path, "--output")
+    _reject_io_artifact_path(mermaid_path, "--mermaid-output")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     mermaid_path.parent.mkdir(parents=True, exist_ok=True)
+    _remove_stale_io_artifacts(output_path.parent)
 
     retrieval_graph = RetrievalGraph(InMemorySaver())
     try:
@@ -81,7 +102,7 @@ async def main() -> None:
         if not output_path.exists():
             output_path.write_bytes(png)
     finally:
-        await retrieval_graph.close()
+        await retrieval_graph.retriever.qdrant.close()
 
     print(f"Wrote Mermaid graph to {mermaid_path}")
     print(f"Wrote graph image to {output_path}")

@@ -1,4 +1,4 @@
-"""System prompt for ``gap_fill_node``.
+"""System prompt for ``create_queries_for_unsupported_facts_node``.
 
 Schema: ``output_validation.gap_fill.GapFillResult``.
 After insufficient recall, updates unsupported fact rows; tier is deterministic in the graph.

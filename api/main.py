@@ -45,18 +45,15 @@ class ResumeRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create the shared ``RetrievalGraph`` once per process and tear it down on shutdown.
-
-    Postgres mode opens ``AsyncPostgresSaver`` via an async context manager stored on
-    ``RetrievalGraph`` so ``close()`` can exit the connection cleanly.
-    """
+    """Create the shared ``RetrievalGraph`` once per process and tear it down on shutdown."""
+    postgres_context = None
     if settings.checkpointer_use_postgres:
         if not settings.database_url.strip():
             raise ValueError("CHECKPOINTER_USE_POSTGRES=true but DATABASE_URL is missing.")
         postgres_context = AsyncPostgresSaver.from_conn_string(settings.database_url)
         checkpointer = await postgres_context.__aenter__()
         await checkpointer.setup()
-        app.state.retrieval_graph = RetrievalGraph(checkpointer, postgres_context=postgres_context)
+        app.state.retrieval_graph = RetrievalGraph(checkpointer)
         print("RAG checkpointer: Postgres", flush=True)
     else:
         app.state.retrieval_graph = RetrievalGraph(InMemorySaver())
@@ -64,7 +61,9 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        await app.state.retrieval_graph.close()
+        await app.state.retrieval_graph.retriever.qdrant.close()
+        if postgres_context is not None:
+            await postgres_context.__aexit__(None, None, None)
 
 
 app = FastAPI(title="Factline", lifespan=lifespan)
@@ -94,14 +93,6 @@ def encode_sse_frame(payload: dict[str, Any]) -> str:
     """Encode one Server-Sent Event ``data:`` frame (JSON payload)."""
 
     return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
-
-
-def message_query_tail(entries: list[Any], max_entries: int = 5) -> list[Any]:
-    """Return the last ``max_entries`` ``message_query`` audit rows for compact SSE."""
-
-    if not isinstance(entries, list) or not entries:
-        return []
-    return entries[-max_entries:]
 
 
 def message_content(message: Any) -> str | None:
@@ -223,9 +214,6 @@ def get_stream_event(
                 "normalized_query": payload.get("normalized_query"),
             }
         )
-        mq = payload.get("message_query")
-        if mq:
-            event["message_query_tail"] = message_query_tail(mq)
     elif node_name == "fact_decomposition":
         facts = payload.get("facts") or []
         event.update(
@@ -234,25 +222,13 @@ def get_stream_event(
                 "fact_count": len(facts),
             }
         )
-        mq = payload.get("message_query")
-        if mq:
-            event["message_query_tail"] = message_query_tail(mq)
     elif node_name == "query_complexity":
-        needs_split = payload.get("needs_split")
-        mq = payload.get("message_query") or []
-        explanation = None
-        if mq and isinstance(mq[-1], dict):
-            explanation = mq[-1].get("notes")
         event.update(
             {
                 "label": "Routing by fact count",
-                "needs_split": needs_split,
-                "explanation": explanation,
+                "needs_split": payload.get("needs_split"),
             }
         )
-        mq = payload.get("message_query")
-        if mq:
-            event["message_query_tail"] = message_query_tail(mq)
     elif node_name == "query_splitter":
         event.update(
             {
@@ -260,9 +236,6 @@ def get_stream_event(
                 "active_retrieval_queries": payload.get("active_retrieval_queries") or [],
             }
         )
-        mq = payload.get("message_query")
-        if mq:
-            event["message_query_tail"] = message_query_tail(mq)
     elif node_name == "retrieval":
         event.update(
             {
@@ -274,9 +247,6 @@ def get_stream_event(
                 "retrieval_loop_count": retrieval_loop_count,
             }
         )
-        mq = payload.get("message_query")
-        if mq:
-            event["message_query_tail"] = message_query_tail(mq)
     elif node_name == "recall_check":
         facts = payload.get("facts") or []
         unsupported = [
@@ -291,13 +261,10 @@ def get_stream_event(
                 "retrieval_loop_count": retrieval_loop_count,
             }
         )
-        mq = payload.get("message_query")
-        if mq:
-            event["message_query_tail"] = message_query_tail(mq)
-    elif node_name == "gap_fill":
+    elif node_name == "create_queries_for_unsupported_facts":
         event.update(
             {
-                "label": "Filling recall gaps",
+                "label": "Creating queries for unsupported facts",
                 "active_retrieval_queries": payload.get("active_retrieval_queries") or [],
             }
         )
@@ -307,15 +274,6 @@ def get_stream_event(
                 "label": "Evaluating retrieval tier",
                 "retrieval_strategy": payload.get("retrieval_strategy"),
                 "retrieval_loop_count": retrieval_loop_count,
-            }
-        )
-        mq = payload.get("message_query")
-        if mq:
-            event["message_query_tail"] = message_query_tail(mq)
-    elif node_name == "clear_turn_trace":
-        event.update(
-            {
-                "label": "Clearing turn trace",
             }
         )
     elif node_name in {"answer", "partial_answer"}:

@@ -1,17 +1,57 @@
 """Factline LangGraph agent: normalize, decompose facts, retrieve, verify recall, and answer.
 
-High-level flow (see repository README):
-    query_normalisation -> fact_decomposition -> query_complexity -> (optional query_splitter) ->
-    retrieval -> recall_check -> [answer | gap_fill -> strategy_upgrade -> retrieval] ->
-    answer | partial_answer -> clear_turn_trace -> END
+Overview
+--------
+This module defines the production RAG **orchestration graph** used by ``api.main``.
+Each user turn runs a fixed pipeline of LLM + retrieval nodes. State is checkpointed per
+``session_id`` (LangGraph ``thread_id``) so multi-turn chat history survives across
+``/run`` calls while per-turn scratch is reset at each invoke start.
 
-Checkpointing: compiled graph uses a LangGraph checkpointer keyed by ``thread_id`` (API
-``session_id``). Multi-turn threads persist ``messages`` and ``message_summary``; each
-``/run`` resets turn-local scratch while appending a new ``HumanMessage``.
+High-level flow (see repository README and ``artifacts/langgraph.png``)::
 
-State design: ``messages`` stays lean (user turns + final/partial ``AIMessage`` JSON only).
-Intermediate outputs use explicit keys including ``facts``, ``retrieved_documents``,
-``retrieved_point_ids``, and ``message_query`` (append-only audit).
+    query_normalisation
+        → fact_decomposition
+        → query_complexity
+        → (optional) query_splitter
+        → retrieval
+        → recall_check
+        → [answer | create_queries_for_unsupported_facts → strategy_upgrade → retrieval]* 
+        → answer | partial_answer
+        → END
+
+Repair loop (``*``): runs while facts fail recall and ``retrieval_retry_count <
+RETRIEVAL_LOOP_MAX_RETRIES``. Each repair pass uses new gap-fill queries and Qdrant
+HasId exclusion — not widened top-k.
+
+Checkpointing
+-----------
+- ``messages`` and ``message_summary`` persist on the thread between turns.
+- Turn scratch (``facts``, ``retrieved_documents``, etc.) is wiped via
+  :func:`prepare_state_for_next_question` at each ``/run`` / ``/run/stream`` invoke start.
+- ``retrieved_documents`` / ``retrieved_point_ids`` use ``operator.add`` reducers during
+  a turn so multiple retrieval passes accumulate; ``Overwrite`` clears them on reset.
+
+Unified fact record (in ``state["facts"]``)::
+
+    {
+        "fact_id": 1,
+        "fact": "Whether X has Y",           # stable after decomposition
+        "verification_status": false,        # set by recall_check
+        "verification_report": "",
+        "evidence_documents": [],              # verbatim excerpts when supported
+        "search_queries": [],                # set by create_queries_for_unsupported_facts
+        "gap_fill_explanation": "",
+    }
+
+Compact retrieved doc (in ``state["retrieved_documents"]`` during a turn)::
+
+    {"id": "<qdrant_point_id>", "score": float, "text": "<raw_text>"}
+
+Module layout
+-------------
+- :class:`RetrievalState` — TypedDict for checkpointed state keys and reducers.
+- Module-level helpers — pure fact/recall utilities (no I/O except async verify helpers).
+- :class:`RetrievalGraph` — node implementations, routing, compile, ``run`` / ``stream_run``.
 """
 
 from __future__ import annotations
@@ -22,7 +62,9 @@ import operator
 from typing import Annotated, Any, AsyncIterator, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+# LangGraph: StateGraph builder, END sentinel, and add_messages reducer for messages key.
 from langgraph.graph import END, StateGraph, add_messages
+# Overwrite replaces list reducer accumulators on reset; Command resumes interrupted graphs.
 from langgraph.types import Command, Overwrite
 
 from config.settings import settings
@@ -36,14 +78,15 @@ from observability.langfuse_handler import (
     get_langfuse_client,
     update_llm_generation,
 )
+# Pydantic structured-output schemas — one per LLM step in the graph.
 from output_validation.fact_decomposition import RequiredFactsResult
 from output_validation.final_answer import FinalAnswer
 from output_validation.gap_fill import GapFillResult
 from output_validation.recall_check import VerifiedFact
-from output_validation.message_query_entry import MessageQueryEntry
 from output_validation.query_normalisation import QueryNormalisationResult
 from output_validation.query_splitter import QuerySplitResult
 from output_validation.retrieval_strategy import RetrievalStrategy
+# System prompts (imported as *_PROMPT constants to avoid shadowing node method names).
 from prompts.final_answer import SYSTEM_PROMPT as FINAL_ANSWER_PROMPT
 from prompts.gap_fill import SYSTEM_PROMPT as GAP_FILL_PROMPT
 from prompts.fact_decomposition import SYSTEM_PROMPT as FACT_DECOMPOSITION_PROMPT
@@ -55,60 +98,86 @@ from retriever.retriever import Retriever
 from tool_wrappers.prompt_plain import messages_to_plain_context
 from tool_wrappers.retrieval_payload import compact_documents_for_llm
 
+
 class RetrievalState(TypedDict, total=False):
-    """Checkpointed conversation and per-turn scratch for one LangGraph thread."""
+    """Checkpointed conversation and per-turn scratch for one LangGraph thread.
 
-    # --- Conversation (persists across turns on the thread) ---
-    # add_messages appends HumanMessage / AIMessage and applies RemoveMessage ops.
-    messages: Annotated[list, add_messages]
-    message_summary: str  # Rolling summary when context_editing truncation is enabled.
+    Keys marked with reducers behave specially on merge:
+    - ``messages``: ``add_messages`` — append HumanMessage / AIMessage; supports RemoveMessage.
+    - ``retrieved_documents``: ``operator.add`` — append new doc rows each retrieval pass.
+    - ``retrieved_point_ids``: ``operator.add`` — append seen Qdrant ids for HasId exclusion.
 
-    # --- Turn scratch (reset at each /run invoke) ---
-    normalized_query: str
-    retrieval_strategy: str  # Tier for retrieval_node; set initially and by deterministic strategy_upgrade.
-    active_retrieval_queries: list[str]
-    retrieved_documents: Annotated[list[dict[str, Any]], operator.add]  # Accumulates per turn.
-    retrieved_point_ids: Annotated[list[str], operator.add]  # Seen Qdrant ids for HasId exclusion.
-
-    # --- Fact scratch (reset each /run; recall_check updates verification in place) ---
-    facts: list[dict[str, Any]]
-    recall_sufficient: bool  # recall_check → route_after_recall_check
-
-    # --- Audit trace (append-only per turn; cleared by clear_turn_trace_node) ---
-    message_query: Annotated[list[dict[str, Any]], operator.add]
-
-    # --- Repair loop budget (strategy_upgrade increments; gates partial_answer) ---
-    retrieval_retry_count: int
-
-
-# --- Trace and fact helpers (pure functions; no I/O) ---
-
-
-def trace_row(node: str, kind: str, payload: dict[str, Any], notes: str | None = None) -> dict[str, Any]:
-    """Build one audit row for ``message_query`` (append-only trace per turn).
-
-    Each node returns ``merge.update(trace_row(...))`` so LangGraph's ``operator.add``
-  reducer appends a single structured entry without replacing prior trace rows.
-
-    Args:
-        node: LangGraph node id (e.g. ``retrieval``).
-        kind: Trace category (e.g. ``recall_check``, ``query_prep``).
-        payload: JSON-safe detail; kept slim to avoid duplicating live state.
-        notes: Optional human-readable summary for logs/UI.
-
-    Returns:
-        Dict with a single-element ``message_query`` list to merge into state.
+    All other keys are replaced by the latest node output unless ``Overwrite`` is used in
+    :func:`prepare_state_for_next_question`.
     """
 
-    entry = MessageQueryEntry(node=node, kind=kind, payload=payload, notes=notes)
-    return {"message_query": [entry.model_dump()]}
+    # --- Conversation (persists across turns on the thread) ---
+
+    messages: Annotated[list, add_messages]
+    # Full chat checkpoint: user HumanMessages + final/partial AIMessage JSON only.
+    # Intermediate node outputs are NOT stored here (keeps checkpoint small).
+
+    message_summary: str
+    # Rolling summary of evicted turns when ``middleware.context_editing`` truncation is
+    # enabled. Currently unused (truncation disabled in query_normalisation_node).
+
+    # --- Turn scratch (reset at each /run invoke via prepare_state_for_next_question) ---
+
+    normalized_query: str
+    # Standalone query rewritten from the latest user message + thread context.
+
+    retrieval_strategy: str
+    # Active Qdrant tier for retrieval_node: e.g. ``fast_bm25_retrieval``,
+    # ``fast_bm25_late_interaction_retrieval``. Seeded by query_complexity; upgraded by
+    # strategy_upgrade during repair loops.
+
+    active_retrieval_queries: list[str]
+    # One or more search strings passed to Retriever.retrieve this pass. Seeded from
+    # normalized_query or query_splitter; replaced by create_queries_for_unsupported_facts
+    # on repair.
+
+    retrieved_documents: Annotated[list[dict[str, Any]], operator.add]
+    # Turn-local corpus of compact docs ``{id, score, text}`` where text is raw_text.
+    # Accumulates across retrieval passes until the next invoke's prepare_state_for_next_question.
+
+    retrieved_point_ids: Annotated[list[str], operator.add]
+    # All Qdrant point ids seen this turn; fed to HasId must_not on subsequent retrieval.
+
+    # --- Fact scratch (reset each /run; recall_check mutates verification fields) ---
+
+    facts: list[dict[str, Any]]
+    # Unified fact records from fact_decomposition; verification updated by recall_check.
+
+    recall_sufficient: bool
+    # True when every fact has verification_status=True after recall_check.
+    # Drives route_after_recall_check (answer vs repair vs partial_answer).
+
+    # --- Repair loop budget ---
+
+    retrieval_retry_count: int
+    # Incremented by strategy_upgrade each repair pass. Compared against
+    # settings.retrieval_loop_max_retries to gate partial_answer.
+
+
+# --- Fact and recall helpers ---
+#
+# Pure functions (except verify_single_fact / run_verification which call the LLM).
+# Called from graph nodes and kept at module level for clarity and testability.
 
 
 def unsupported_facts(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Facts recall_check could not verify (``verification_status`` is false).
+    """Return fact rows that recall_check marked as not verified.
 
-    Used by gap_fill (what to repair), route_after_recall_check (answer vs repair),
-    and Langfuse spans.
+    Input:
+        facts: full ``state["facts"]`` list (supported + unsupported mixed).
+
+    Output:
+        Subset where ``verification_status`` is falsy (False, missing, etc.).
+
+    Used by:
+        - create_queries_for_unsupported_facts_node (LLM prompt context)
+        - add_queries_for_unsupported_facts (alignment checks)
+        - recall_check Langfuse output
     """
 
     return [row for row in facts if not row.get("verification_status")]
@@ -119,15 +188,16 @@ async def verify_single_fact(
     *,
     normalized_query: str,
     docs_block: str,
-    verifier: Any,
 ) -> dict[str, Any]:
-    """Run one ``VerifiedFact`` LLM call and merge the verdict onto ``fact_row``.
+    """Run one parallel recall-check LLM call for a single fact row.
+
+    Creates its own structured-output client (``settings.recall_check_model`` +
+    ``VerifiedFact`` schema). Does not mutate ``fact_row`` in place — returns a new dict.
 
     Input:
-        fact_row: one unified fact dict (``fact_id``, ``fact``, verification fields).
-        normalized_query: standalone query for this turn.
-        docs_block: numbered retrieved passages for the prompt.
-        verifier: structured-output client from :func:`~middleware.llm_client.get_llm_client`.
+        fact_row: one unified fact dict with at least ``fact_id`` and ``fact``.
+        normalized_query: standalone query for this turn (context for the verifier).
+        docs_block: numbered passage block built from ``state["retrieved_documents"]``.
 
     LLM output (``VerifiedFact`` / ``llm_response["parsed"]``)::
 
@@ -139,10 +209,20 @@ async def verify_single_fact(
         }
 
     Output:
-        Same dict as ``fact_row`` with ``verification_status``, ``verification_report``,
-        and ``evidence_documents`` overwritten from the verdict.
+        Copy of ``fact_row`` with ``verification_status``, ``verification_report``, and
+        ``evidence_documents`` overwritten from the verdict. Other keys unchanged
+        (``search_queries``, ``gap_fill_explanation``, etc.).
+
+    Raises:
+        Propagates LLM / validation errors to the caller (recall_check_node fails the turn).
     """
 
+    # One client per call; parallel invocations share OpenAI rate limiter from get_llm_client.
+    verifier = get_llm_client(
+        model=settings.recall_check_model,
+        output_schema=VerifiedFact,
+        include_raw=True,
+    )
     human_content = (
         f"## Normalized query\n{normalized_query}\n\n"
         f"## Fact to verify\n"
@@ -154,8 +234,10 @@ async def verify_single_fact(
         SystemMessage(content=VERIFY_SINGLE_FACT_PROMPT),
         HumanMessage(content=human_content),
     ]
+    # Structured invoke returns {"parsed": VerifiedFact, "raw": AIMessage} when include_raw=True.
     llm_response = await verifier.ainvoke(messages_for_llm)
     verdict = llm_response["parsed"]
+    # Spread preserves fact_id and any prior repair fields; overwrite verification columns only.
     return {
         **fact_row,
         "verification_status": verdict.verification_status,
@@ -169,16 +251,21 @@ async def run_verification(
     *,
     normalized_query: str,
     docs_block: str,
-    verifier: Any,
 ) -> list[dict[str, Any]]:
-    """Verify every fact in parallel; preserve input order.
+    """Verify all facts in parallel via :func:`verify_single_fact`; preserve order.
 
     Input:
-        facts: full list from ``state["facts"]``.
-        normalized_query, docs_block, verifier: passed through to :func:`verify_single_fact`.
+        facts: full list from ``state["facts"]`` (typically all rows need verification).
+        normalized_query: passed through to each verify_single_fact call.
+        docs_block: shared numbered corpus string for every fact (full turn corpus).
 
     Output:
-        list[dict] — one updated fact row per input row, same order as ``facts``.
+        list[dict] — one updated fact row per input row, **same order** as ``facts``.
+        Order follows asyncio.gather task list order, not completion time.
+
+    Note:
+        Any single verify_single_fact failure fails the entire gather (no partial results).
+        gather preserves task order → output[i] corresponds to facts[i] regardless of finish time.
     """
 
     return list(
@@ -188,7 +275,6 @@ async def run_verification(
                     row,
                     normalized_query=normalized_query,
                     docs_block=docs_block,
-                    verifier=verifier,
                 )
                 for row in facts
             ]
@@ -196,11 +282,19 @@ async def run_verification(
     )
 
 
-def build_facts_from_decomposition(response: RequiredFactsResult) -> list[dict[str, Any]]:
-    """Turn LLM decomposition output into the unified in-graph fact record shape.
+def create_fact_list_with_metadata(response: RequiredFactsResult) -> list[dict[str, Any]]:
+    """Build the in-graph fact list from fact_decomposition LLM output.
 
-    Assigns stable ``fact_id`` (1-based), empty verification fields, and slots for
-    evidence / search_queries / gap_fill_explanation filled in later nodes.
+    Input:
+        response: ``RequiredFactsResult`` — ordered list of atomic fact strings from the LLM.
+
+    Output:
+        list[dict] — one unified fact record per decomposition item with:
+        - ``fact_id``: stable 1-based index for the turn
+        - ``fact``: atomic information need (not the answer value)
+        - verification / repair fields initialized empty for recall_check and gap-fill
+
+    Does not run verification or retrieval — shape only.
     """
 
     return [
@@ -217,21 +311,29 @@ def build_facts_from_decomposition(response: RequiredFactsResult) -> list[dict[s
     ]
 
 
-def merge_gap_fill_into_facts(
+def add_queries_for_unsupported_facts(
     facts: list[dict[str, Any]],
     repairs: list[Any],
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Apply gap_fill LLM output onto existing facts and collect new search queries.
+    """Merge gap-fill LLM repairs onto unsupported facts; collect flat query list.
 
-    Gap-fill runs only for unsupported facts. The LLM must return one repair row per
-    unsupported fact with matching ``fact_id`` and unchanged ``fact`` text (guards
-    against hallucinated fact rewrites).
+    Input:
+        facts: **full** fact list (supported + unsupported) from ``state["facts"]``.
+        repairs: ``GapFillFact`` rows from ``GapFillResult.facts`` — one per unsupported
+            fact, with ``fact_id``, ``search_queries`` (3 strings), ``gap_fill_explanation``.
 
-    Returns:
-        updated: Full facts list; repaired rows get ``search_queries`` and
-            ``gap_fill_explanation``; supported rows are copied unchanged.
-        queries: Flat list of all new search strings (fed to ``active_retrieval_queries``
-            on the next retrieval pass).
+    Output:
+        (updated_facts, queries):
+        - updated_facts: full list; unsupported rows get ``search_queries`` and
+          ``gap_fill_explanation``; supported rows copied unchanged.
+        - queries: flat concatenation of all repair ``search_queries`` → becomes
+          ``active_retrieval_queries`` for the next retrieval pass.
+
+    Validation:
+        Raises ``ValueError`` if repair fact_ids or fact text do not match unsupported
+        rows exactly (guards against LLM dropping or rewriting facts).
+
+    Does not call the LLM — pure merge after create_queries_for_unsupported_facts_node.
     """
 
     unsupported = unsupported_facts(facts)
@@ -266,31 +368,42 @@ def merge_gap_fill_into_facts(
 
 
 def needs_query_split(facts: list[dict[str, Any]]) -> bool:
-    """Route to query_splitter when >1 fact (per-fact retrieval strings)."""
+    """True when fact count > 1 → route to query_splitter for per-fact retrieval strings."""
 
     return len(facts) > 1
 
 
 def fact_texts(rows: list[dict[str, Any]]) -> list[str]:
-    """Ordered fact strings for LLM alignment checks (recall_check, gap_fill)."""
+    """Extract ordered non-empty ``fact`` strings for LLM alignment checks."""
 
     return [str(row.get("fact") or "").strip() for row in rows if str(row.get("fact") or "").strip()]
 
 
 def late_interaction_enabled() -> bool:
-    """ColBERT tier allowed only when flag and Jina key are both set."""
+    """True when ColBERT late-interaction tier is allowed (flag + Jina API key)."""
 
     return settings.use_late_interaction and bool(settings.jina_api_key.strip())
 
 
-def turn_scratch_reset() -> dict[str, Any]:
-    """Wipe per-turn scratch at ``/run`` start and after answer (checkpoint hygiene).
+def prepare_state_for_next_question(user_query: str) -> dict[str, Any]:
+    """Build the state patch for a new user turn before ``graph.ainvoke``.
 
-    ``Overwrite`` on list fields replaces accumulated docs/ids/trace for the new turn
-    instead of appending to stale values from a prior invoke on the same thread.
+    Appends one ``HumanMessage`` and wipes all per-turn scratch so a prior turn's facts,
+    retrieved corpus, and retry counters do not carry over on the same thread.
+
+    Uses ``Overwrite([])`` on list reducers so accumulated docs/ids are replaced rather
+    than appended to stale checkpoint values.
+
+    Args:
+        user_query: Raw user message text for this turn.
+
+    Returns:
+        State merge dict with ``messages`` plus empty scratch fields
+        (``normalized_query``, ``facts``, ``retrieved_documents``, etc.).
     """
 
     return {
+        "messages": [HumanMessage(content=user_query)],
         "normalized_query": "",
         "retrieval_strategy": "",
         "active_retrieval_queries": [],
@@ -299,7 +412,6 @@ def turn_scratch_reset() -> dict[str, Any]:
         "facts": [],
         "recall_sufficient": False,
         "retrieval_retry_count": 0,
-        "message_query": Overwrite(value=[]),
     }
 
 
@@ -310,13 +422,20 @@ def build_node_ai_message(
     raw: AIMessage | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> AIMessage:
-    """Store answer/partial_answer as JSON in ``messages`` for API parsing and checkpointing.
+    """Build an AIMessage storing FinalAnswer JSON for checkpoint and API parsing.
 
-    ``content`` is structured JSON (FinalAnswer schema); provider ids and usage live on
-    the AIMessage for observability. ``additional_kwargs['node']`` tags the writer node.
+    Input:
+        node_name: graph node id stored in ``AIMessage.name`` (``answer_node`` or
+            ``partial_answer_node``) — API uses this to pick the user-facing message.
+        payload: ``FinalAnswer.model_dump()`` dict (answer, sources, confidence).
+        raw: original AIMessage from structured LLM invoke (preserves token usage / ids).
+        extra_metadata: optional keys merged into ``additional_kwargs``.
+
+    Output:
+        AIMessage with JSON string ``content`` and ``additional_kwargs["node"]`` set.
     """
 
-    # Carry OpenAI/LangChain ids through checkpointing; tag which graph node wrote this turn.
+    # Preserve provider metadata from the raw AIMessage for Langfuse / debugging.
     additional_kwargs = dict(getattr(raw, "additional_kwargs", {}) or {})
     additional_kwargs["node"] = node_name
     if extra_metadata:
@@ -332,25 +451,38 @@ def build_node_ai_message(
     )
 
 
-# --- Graph builder and nodes ---
+# --- RetrievalGraph: LangGraph compile, nodes, routing, and public invoke API ---
 
 
 class RetrievalGraph:
-    """Compiles and runs the retrieval LangGraph with a shared :class:`~retriever.retriever.Retriever`.
+    """Compiles and runs the Factline retrieval LangGraph.
 
-    Pass a checkpointer from ``api.main`` lifespan (``InMemorySaver`` or ``AsyncPostgresSaver``).
+    Responsibilities:
+    - Own a shared :class:`~retriever.retriever.Retriever` (Qdrant + embeddings).
+    - Register all node callables on a :class:`langgraph.graph.StateGraph`.
+    - Expose ``run``, ``stream_run``, ``resume`` for ``api.main``.
+
+    Construction (``api.main`` lifespan):
+        graph = RetrievalGraph(InMemorySaver())  # or AsyncPostgresSaver checkpointer
+
+    Each ``/run`` call:
+        1. :func:`prepare_state_for_next_question` appends HumanMessage + clears scratch
+        2. ``graph.ainvoke`` executes until END
+        3. API reads final AIMessage from ``state["messages"]``
     """
 
-    def __init__(self, checkpointer: Any, postgres_context: Any | None = None) -> None:
+    def __init__(self, checkpointer: Any) -> None:
         """Store checkpointer, build compiled graph, and construct retriever.
 
         Args:
-            checkpointer: LangGraph saver for thread checkpoints.
-            postgres_context: Async context manager for Postgres saver teardown, if used.
+            checkpointer: LangGraph saver (InMemorySaver or AsyncPostgresSaver) keyed by
+                ``thread_id`` = API ``session_id``.
+
+        Side effects:
+            - Instantiates :class:`~retriever.retriever.Retriever` (Qdrant client, embedders).
+            - Calls :meth:`build_graph` and stores compiled graph on ``self.graph``.
         """
-        # postgres_context is only set when using AsyncPostgresSaver so close() can exit the conn ctx.
         self.checkpointer = checkpointer
-        self._postgres_context = postgres_context
         self.retriever = Retriever(settings)
         self.graph = self.build_graph()
 
@@ -361,9 +493,25 @@ class RetrievalGraph:
     async def query_normalisation_node(self, state: RetrievalState) -> dict[str, Any]:
         """Rewrite the latest user message into a standalone query using conversation context.
 
-        Reads: ``messages``, ``message_summary``.
-        Writes: ``normalized_query``, optional ``message_summary`` / ``messages`` RemoveMessage ops.
-        Routes to: ``query_complexity`` (fixed edge).
+        Purpose:
+            Multi-turn questions often use pronouns or omit entities. This node produces
+            ``normalized_query`` — a self-contained search/answer string for downstream nodes.
+
+        Reads:
+            ``messages`` — full checkpointed chat (HumanMessage + prior AIMessage JSON).
+            ``message_summary`` — optional rolled-up history (unused while truncation disabled).
+
+        Writes:
+            ``normalized_query`` — from ``QueryNormalisationResult`` or fallback to raw user text.
+            ``messages`` — optional ``RemoveMessage`` ops when truncation is enabled (currently []).
+            ``message_summary`` — updated summary when truncation is enabled (currently unchanged).
+
+        LLM:
+            Model: ``settings.query_normalisation_model``
+            Schema: ``QueryNormalisationResult`` (single ``normalized_query`` field).
+
+        Routes to:
+            ``fact_decomposition`` (fixed edge).
         """
 
         messages = state.get("messages", [])
@@ -419,11 +567,28 @@ class RetrievalGraph:
             "message_summary": summary,
             "normalized_query": normalized_query,
         }
-        merge.update(trace_row("query_normalisation", "normalisation", {}))
         return merge
 
     async def fact_decomposition_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Create stable required facts once from the normalized query before retrieval."""
+        """Decompose the normalized query into atomic required facts (information needs).
+
+        Purpose:
+            Split complex questions into verifiable sub-claims before retrieval. Each fact
+            becomes one row in ``state["facts"]`` with a stable ``fact_id`` for the turn.
+
+        Reads:
+            ``normalized_query``
+
+        Writes:
+            ``facts`` — via :func:`create_fact_list_with_metadata` (verification fields empty).
+
+        LLM:
+            Model: ``settings.query_decomposition_model``
+            Schema: ``RequiredFactsResult`` (ordered list of fact strings).
+
+        Routes to:
+            ``query_complexity`` (fixed edge).
+        """
 
         normalized_query = str(state.get("normalized_query") or "").strip()
         llm = get_llm_client(
@@ -444,7 +609,7 @@ class RetrievalGraph:
                     result = await llm.ainvoke(messages_for_llm)
                     update_llm_generation(gen, model=model, raw=result.get("raw"))
                 response = result["parsed"]
-                facts = build_facts_from_decomposition(response)
+                facts = create_fact_list_with_metadata(response)
                 node_span.update(
                     output={
                         "normalized_query": normalized_query,
@@ -454,24 +619,27 @@ class RetrievalGraph:
         else:
             result = await llm.ainvoke(messages_for_llm)
             response = result["parsed"]
-            facts = build_facts_from_decomposition(response)
+            facts = create_fact_list_with_metadata(response)
 
-        merge: dict[str, Any] = {"facts": facts}
-        merge.update(
-            trace_row(
-                "fact_decomposition",
-                "fact_decomposition",
-                {"fact_count": len(facts)},
-            )
-        )
-        return merge
+        return {"facts": facts}
 
     async def query_complexity_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Route by fact count and seed queries for the simple path.
+        """Classify retrieval complexity and seed the first retrieval pass.
 
-        Reads: ``normalized_query`` and ``facts``.
-        Writes: ``retrieval_strategy``, ``active_retrieval_queries``.
-        Routes via: ``route_after_complexity`` to retrieval or query_splitter.
+        Purpose:
+            Decide whether per-fact query splitting is needed (``needs_split``) and initialize
+            ``retrieval_strategy`` + ``active_retrieval_queries`` for the first retrieval.
+
+        Reads:
+            ``normalized_query``, ``facts``
+
+        Writes:
+            ``needs_split`` — stored in state for Langfuse only; routing uses :func:`needs_query_split`.
+            ``retrieval_strategy`` — always ``fast_bm25_retrieval`` on first pass.
+            ``active_retrieval_queries`` — ``[normalized_query]`` when query is non-empty.
+
+        Routes via:
+            :meth:`route_after_complexity` → ``retrieval`` (0–1 facts) or ``query_splitter`` (>1).
         """
 
         normalized_query = str(state.get("normalized_query") or "").strip()
@@ -496,26 +664,33 @@ class RetrievalGraph:
                     }
                 )
 
-        # First pass always starts at hybrid BM25+dense; repair loop may upgrade tier later.
-        merge = {
+        return {
             "needs_split": needs_split,
             "retrieval_strategy": "fast_bm25_retrieval",
             "active_retrieval_queries": [normalized_query] if normalized_query else [],
         }
-        merge.update(
-            trace_row(
-                "query_complexity",
-                "complexity",
-                {"needs_split": needs_split, "fact_count": fact_count},
-                notes=explanation,
-            )
-        )
-        return merge
 
     async def query_splitter_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Translate stable facts into focused retrieval strings.
+        """Translate each fact into a focused retrieval query string.
 
-        Writes: ``active_retrieval_queries``. Then fixed edge to ``retrieval``.
+        Purpose:
+            When a question decomposes into multiple facts, a single normalized query may
+            miss relevant passages for some sub-claims. This node emits one search string
+            per fact (or a small aligned set) for the retriever.
+
+        Reads:
+            ``normalized_query``, ``facts``
+
+        Writes:
+            ``active_retrieval_queries`` — non-empty list; falls back to ``normalized_query``
+            if the LLM returns no usable strings.
+
+        LLM:
+            Model: ``settings.query_decomposition_model``
+            Schema: ``QuerySplitResult`` (``queries: list[str]``).
+
+        Routes to:
+            ``retrieval`` (fixed edge).
         """
 
         normalized_query = str(state.get("normalized_query") or "").strip()
@@ -560,18 +735,36 @@ class RetrievalGraph:
             if not queries and normalized_query:
                 queries = [normalized_query]
 
-        merge = {"active_retrieval_queries": queries}
-        merge.update(trace_row("query_splitter", "query_prep", {"queries": queries}))
-        return merge
+        return {"active_retrieval_queries": queries}
 
     # --- Retrieval, recall check, and repair loop ---
 
     async def retrieval_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Retrieve using ``active_retrieval_queries`` and ``retrieval_strategy``; append docs.
+        """Retrieve passages from Qdrant using active queries and strategy; append to corpus.
 
-        Reads: ``active_retrieval_queries``, ``retrieval_strategy``, ``normalized_query`` (fallback).
-        Writes: ``retrieved_documents`` delta rows; LangGraph accumulates them for the turn.
-        Routes to: ``recall_check`` (fixed edge).
+        Purpose:
+            Fetch candidate chunks for recall_check and answer generation. During repair
+            loops, new queries run against the same collection but exclude already-seen
+            point ids (HasId must_not) so each pass adds fresh evidence.
+
+        Reads:
+            ``active_retrieval_queries`` — one or more search strings for this pass.
+            ``retrieval_strategy`` — Qdrant tier (BM25, hybrid, ColBERT late-interaction).
+            ``normalized_query`` — fallback when active queries are empty.
+            ``retrieved_point_ids`` — ids to exclude on repair passes.
+
+        Writes:
+            ``retrieved_documents`` — **delta** rows appended via ``operator.add`` reducer.
+            ``retrieved_point_ids`` — **delta** new ids appended for exclusion next pass.
+            ``retrieval_strategy`` — normalized/fallback tier actually used.
+            ``active_retrieval_queries`` — echo of queries used (for Langfuse / debugging).
+
+        Retriever:
+            ``self.retriever.retrieve(...)`` with ``top_k`` and candidate limits from settings.
+            Output slimmed by :func:`compact_documents_for_llm` before state merge.
+
+        Routes to:
+            ``recall_check`` (fixed edge).
         """
 
         raw_strategy = str(state.get("retrieval_strategy") or "").strip()
@@ -640,26 +833,12 @@ class RetrievalGraph:
             compact_document_rows, rows_to_add, new_point_ids = await run_retrieval()
             accumulated = list(state.get("retrieved_documents") or [])
 
-        # operator.add on retrieved_* appends only new rows/ids to the turn corpus.
-        merge: dict[str, Any] = {
+        return {
             "retrieved_documents": rows_to_add,
             "retrieved_point_ids": new_point_ids,
             "retrieval_strategy": strategy,
             "active_retrieval_queries": search_queries,
         }
-        merge.update(
-            trace_row(
-                "retrieval",
-                "retrieval",
-                {
-                    "queries": search_queries,
-                    "strategy": strategy,
-                    "rows_to_add_count": len(rows_to_add),
-                    "corpus_size_after": len(accumulated) + len(rows_to_add),
-                },
-            )
-        )
-        return merge
 
     # --- Recall / repair nodes ---
 
@@ -688,9 +867,8 @@ class RetrievalGraph:
             facts: list[dict] — same rows with verification fields set per fact.
             recall_sufficient: bool — ``True`` only when every fact has
                 ``verification_status`` true.
-            message_query: append-only trace row (via :func:`trace_row`).
 
-        Routes via: ``route_after_recall_check`` (answer | partial_answer | gap_fill).
+        Routes via: ``route_after_recall_check`` (answer | partial_answer | create_queries_for_unsupported_facts).
         """
 
         normalized_query = str(state.get("normalized_query") or "").strip()
@@ -705,12 +883,6 @@ class RetrievalGraph:
         ]
         docs_block = "\n".join(doc_lines) if doc_lines else "(none)"
 
-        verifier = get_llm_client(
-            model=settings.recall_check_model,
-            output_schema=VerifiedFact,
-            include_raw=True,
-        )
-
         if settings.langfuse_tracing_enabled:
             langfuse = get_langfuse_client()
             with langfuse.start_as_current_observation(as_type="span", name="recall_check") as node_span:
@@ -718,7 +890,6 @@ class RetrievalGraph:
                     facts,
                     normalized_query=normalized_query,
                     docs_block=docs_block,
-                    verifier=verifier,
                 )
                 unsupported = unsupported_facts(verified_facts)
                 recall_sufficient = all(row["verification_status"] for row in verified_facts)
@@ -736,32 +907,37 @@ class RetrievalGraph:
                 facts,
                 normalized_query=normalized_query,
                 docs_block=docs_block,
-                verifier=verifier,
             )
             unsupported = unsupported_facts(verified_facts)
             recall_sufficient = all(row["verification_status"] for row in verified_facts)
 
-        merge: dict[str, Any] = {
+        return {
             "facts": verified_facts,
             "recall_sufficient": recall_sufficient,
         }
-        merge.update(
-            trace_row(
-                "recall_check",
-                "recall_check",
-                {
-                    "recall_sufficient": recall_sufficient,
-                    "unsupported_facts": unsupported,
-                },
-            )
-        )
-        return merge
 
-    async def gap_fill_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Generate repair queries per unsupported fact and merge into the unified facts list.
+    async def create_queries_for_unsupported_facts_node(self, state: RetrievalState) -> dict[str, Any]:
+        """Generate targeted retrieval queries for facts that failed recall verification.
 
-        LLM sees unsupported facts + prior retrieval corpus; returns new ``search_queries``
-        per fact via :func:`merge_gap_fill_into_facts`. Next edge is ``strategy_upgrade``.
+        Purpose:
+            When recall_check marks some facts unsupported, this node asks the gap-fill LLM
+            to propose new search queries per unsupported fact. Queries are merged onto
+            fact rows and flattened into ``active_retrieval_queries`` for the next retrieval.
+
+        Reads:
+            ``facts`` (full list), ``normalized_query``, ``active_retrieval_queries``,
+            ``retrieved_documents`` (prior corpus for context).
+
+        Writes:
+            ``facts`` — unsupported rows get ``search_queries`` + ``gap_fill_explanation``.
+            ``active_retrieval_queries`` — flat list of all new query strings.
+
+        LLM:
+            Model: ``settings.gap_fill_model``
+            Schema: ``GapFillResult`` → merged by :func:`add_queries_for_unsupported_facts`.
+
+        Routes to:
+            ``strategy_upgrade`` (fixed edge).
         """
 
         unsupported = unsupported_facts(state.get("facts") or [])
@@ -788,12 +964,18 @@ class RetrievalGraph:
 
         if settings.langfuse_tracing_enabled:
             langfuse = get_langfuse_client()
-            with langfuse.start_as_current_observation(as_type="span", name="gap_fill") as node_span:
-                with langfuse.start_as_current_observation(as_type="generation", name="gap_fill-llm", model=model) as gen:
+            with langfuse.start_as_current_observation(
+                as_type="span", name="create_queries_for_unsupported_facts"
+            ) as node_span:
+                with langfuse.start_as_current_observation(
+                    as_type="generation",
+                    name="create_queries_for_unsupported_facts-llm",
+                    model=model,
+                ) as gen:
                     result = await llm.ainvoke(messages_for_llm)
                     update_llm_generation(gen, model=model, raw=result.get("raw"))
                 response = result["parsed"]
-                updated_facts, queries = merge_gap_fill_into_facts(
+                updated_facts, queries = add_queries_for_unsupported_facts(
                     list(state.get("facts") or []), list(response.facts)
                 )
                 node_span.update(
@@ -805,29 +987,34 @@ class RetrievalGraph:
         else:
             result = await llm.ainvoke(messages_for_llm)
             response = result["parsed"]
-            updated_facts, queries = merge_gap_fill_into_facts(
+            updated_facts, queries = add_queries_for_unsupported_facts(
                 list(state.get("facts") or []), list(response.facts)
             )
 
-        merge: dict[str, Any] = {
+        return {
             "facts": updated_facts,
             "active_retrieval_queries": queries,
         }
-        merge.update(
-            trace_row(
-                "gap_fill",
-                "gap_fill",
-                {
-                    "queries": queries,
-                    "repaired_fact_ids": [row.fact_id for row in response.facts],
-                },
-                notes="; ".join(row.gap_fill_explanation for row in response.facts),
-            )
-        )
-        return merge
 
     async def strategy_upgrade_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Set the next retrieval tier deterministically and increment retry count."""
+        """Escalate retrieval tier and increment the repair-loop retry counter.
+
+        Purpose:
+            After gap-fill produces new queries, bump ``retrieval_retry_count`` and optionally
+            switch from BM25-only to ColBERT late-interaction on later repair attempts.
+
+        Reads:
+            ``retrieval_retry_count`` (prior value; incremented by 1).
+
+        Writes:
+            ``retrieval_retry_count`` — +1 each repair pass.
+            ``retrieval_strategy`` — ``fast_bm25_retrieval`` by default; switches to
+                ``fast_bm25_late_interaction_retrieval`` when ColBERT is enabled and
+                ``retry_count >= settings.retrieval_loop_max_retries - 2``.
+
+        Routes to:
+            ``retrieval`` (fixed edge — starts another retrieval → recall_check cycle).
+        """
 
         retry_count = state.get("retrieval_retry_count", 0) + 1
         # Escalate to ColBERT on the last repair attempts (e.g. retry 2+ when max_retries=3).
@@ -851,32 +1038,33 @@ class RetrievalGraph:
                     }
                 )
 
-        merge: dict[str, Any] = {
+        return {
             "retrieval_strategy": strategy,
             "retrieval_retry_count": retry_count,
         }
-        merge.update(
-            trace_row(
-                "strategy_upgrade",
-                "strategy_upgrade",
-                {
-                    "retrieval_strategy": strategy,
-                    "retrieval_retry_count": retry_count,
-                    "late_threshold": late_threshold,
-                    "late_interaction_enabled": late_enabled,
-                },
-                notes=f"Retry {retry_count}: {strategy}.",
-            )
-        )
-        return merge
 
     # --- Answer and cleanup ---
 
     async def answer_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Emit grounded ``FinalAnswer`` JSON when recall is sufficient.
+        """Synthesize a grounded final answer when all facts passed recall verification.
 
-        Writes: ``messages`` with ``name=answer_node``. API parses this in ``get_api_response``.
-        Routes to: ``clear_turn_trace``.
+        Purpose:
+            Produce user-facing ``FinalAnswer`` JSON (answer text, sources, confidence)
+            from the accumulated retrieved corpus. Only reached when ``recall_sufficient`` is True.
+
+        Reads:
+            ``normalized_query``, ``retrieved_documents``
+
+        Writes:
+            ``messages`` — one AIMessage via :func:`build_node_ai_message` with
+            ``name="answer_node"``; API parses ``content`` JSON for the SSE ``final`` frame.
+
+        LLM:
+            Model: ``settings.final_answer_model``
+            Schema: ``FinalAnswer``
+
+        Routes to:
+            ``END`` (terminal node).
         """
 
         context = (
@@ -926,7 +1114,7 @@ class RetrievalGraph:
     async def partial_answer_node(self, state: RetrievalState) -> dict[str, Any]:
         """Emit grounded partial answer when retry budgets are exhausted.
 
-        Includes per-fact verification in the prompt. Routes to ``clear_turn_trace``.
+        Includes per-fact verification in the prompt. Routes to ``END``.
         """
 
         context = (
@@ -975,15 +1163,6 @@ class RetrievalGraph:
             ]
         }
 
-    async def clear_turn_trace_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Clear turn-local scratch so the checkpoint is clean after answer/partial_answer."""
-
-        if settings.langfuse_tracing_enabled:
-            langfuse = get_langfuse_client()
-            with langfuse.start_as_current_observation(as_type="span", name="clear_turn_trace") as node_span:
-                node_span.update(output={"cleared": True})
-        return turn_scratch_reset()
-
     # --- Conditional routing ---
 
     def route_after_complexity(self, state: RetrievalState) -> str:
@@ -998,23 +1177,23 @@ class RetrievalGraph:
 
         1. no unsupported facts → ``answer``
         2. retry budget exhausted → ``partial_answer``
-        3. unsupported facts remain and retries remain → ``gap_fill``
+        3. unsupported facts remain and retries remain → ``create_queries_for_unsupported_facts``
         """
 
         if state.get("recall_sufficient"):
             return "answer"
         if state.get("retrieval_retry_count", 0) >= settings.retrieval_loop_max_retries:
             return "partial_answer"
-        return "gap_fill"
+        return "create_queries_for_unsupported_facts"
 
     # --- Graph wiring ---
 
     def build_graph(self) -> Any:
         """Wire nodes and compile the LangGraph with a session checkpointer.
 
-        Repair loop: recall_check → gap_fill → strategy_upgrade → retrieval → recall_check.
-        Success exits: recall_check → answer → clear_turn_trace → END.
-        Budget exhausted: recall_check → partial_answer → clear_turn_trace → END.
+        Repair loop: recall_check → create_queries_for_unsupported_facts → strategy_upgrade → retrieval → recall_check.
+        Success exits: recall_check → answer → END.
+        Budget exhausted: recall_check → partial_answer → END.
         """
         builder = StateGraph(RetrievalState)
         # Node names must match strings returned by route_after_* for conditional_edges.
@@ -1024,11 +1203,13 @@ class RetrievalGraph:
         builder.add_node("query_splitter", self.query_splitter_node)
         builder.add_node("retrieval", self.retrieval_node)
         builder.add_node("recall_check", self.recall_check_node)
-        builder.add_node("gap_fill", self.gap_fill_node)
+        builder.add_node(
+            "create_queries_for_unsupported_facts",
+            self.create_queries_for_unsupported_facts_node,
+        )
         builder.add_node("strategy_upgrade", self.strategy_upgrade_node)
         builder.add_node("answer", self.answer_node)
         builder.add_node("partial_answer", self.partial_answer_node)
-        builder.add_node("clear_turn_trace", self.clear_turn_trace_node)
 
         builder.set_entry_point("query_normalisation")
         builder.add_edge("query_normalisation", "fact_decomposition")
@@ -1051,30 +1232,17 @@ class RetrievalGraph:
             {
                 "answer": "answer",
                 "partial_answer": "partial_answer",
-                "gap_fill": "gap_fill",
+                "create_queries_for_unsupported_facts": "create_queries_for_unsupported_facts",
             },
         )
-        builder.add_edge("gap_fill", "strategy_upgrade")
+        builder.add_edge("create_queries_for_unsupported_facts", "strategy_upgrade")
         builder.add_edge("strategy_upgrade", "retrieval")
-        builder.add_edge("answer", "clear_turn_trace")
-        builder.add_edge("partial_answer", "clear_turn_trace")
-        builder.add_edge("clear_turn_trace", END)
+        builder.add_edge("answer", END)
+        builder.add_edge("partial_answer", END)
         # Persists checkpoints keyed by thread_id (session_id from the API).
         return builder.compile(checkpointer=self.checkpointer)
 
     # --- Public invoke API (called from api.main) ---
-
-    @staticmethod
-    def turn_invoke_input(user_query: str) -> dict[str, Any]:
-        """Reset turn-local scratch and append one HumanMessage for a new /run or /run/stream.
-
-        ``message_query: Overwrite([])`` clears prior-turn audit rows at invoke start; the
-        terminal ``clear_turn_trace_node`` clears again after answer for checkpoint hygiene.
-        """
-        return {
-            "messages": [HumanMessage(content=user_query)],
-            **turn_scratch_reset(),
-        }
 
     def invoke_config(self, session_id: str) -> dict[str, Any]:
         """LangGraph run config: thread checkpoint key and safety limits."""
@@ -1091,9 +1259,6 @@ class RetrievalGraph:
     ) -> dict[str, Any]:
         """Run one user turn: append HumanMessage and reset turn-local scratch.
 
-        ``message_query: Overwrite([])`` at invoke start clears prior-turn audit rows.
-        ``clear_turn_trace_node`` clears again after answer so the checkpoint stays clean.
-
         Args:
             session_id: LangGraph ``thread_id``.
             user_query: New user message for this turn.
@@ -1103,7 +1268,7 @@ class RetrievalGraph:
         """
 
         config = self.invoke_config(session_id)
-        invoke_input = self.turn_invoke_input(user_query)
+        invoke_input = prepare_state_for_next_question(user_query)
 
         if not settings.langfuse_tracing_enabled:
             return await self.graph.ainvoke(invoke_input, config=config)
@@ -1129,7 +1294,7 @@ class RetrievalGraph:
         """
 
         config = self.invoke_config(session_id)
-        invoke_input = self.turn_invoke_input(user_query)
+        invoke_input = prepare_state_for_next_question(user_query)
 
         if not settings.langfuse_tracing_enabled:
             async for update in self.graph.astream(
@@ -1181,13 +1346,3 @@ class RetrievalGraph:
                     return await self.graph.ainvoke(Command(resume=value), config=config)
         finally:
             flush_langfuse()
-
-    def get_state(self, session_id: str) -> Any:
-        """Return the latest checkpoint snapshot for ``session_id`` without running the graph."""
-        return self.graph.get_state({"configurable": {"thread_id": session_id}})
-
-    async def close(self) -> None:
-        """Close Qdrant client and Postgres checkpointer context if configured."""
-        await self.retriever.qdrant.close()
-        if self._postgres_context is not None:
-            await self._postgres_context.__aexit__(None, None, None)

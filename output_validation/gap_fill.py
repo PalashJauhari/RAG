@@ -1,4 +1,4 @@
-"""Structured output for ``gap_fill_node`` (prompt: ``prompts/gap_fill.py``).
+"""Structured output for ``create_queries_for_unsupported_facts_node`` (prompt: ``prompts/gap_fill.py``).
 
 Repairs unsupported facts in place on the unified ``facts`` list; the graph flattens
 ``search_queries`` into ``active_retrieval_queries`` for retrieval.
