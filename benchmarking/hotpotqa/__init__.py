@@ -1,1 +1,1 @@
-"""HotpotQA fullwiki validation retrieval benchmark (retriever-only)."""
+"""HotpotQA distractor benchmark (download, upload, evaluate)."""

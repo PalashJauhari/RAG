@@ -16,7 +16,7 @@ High-level flow (see repository README and ``artifacts/langgraph.png``)::
         → retrieval
         → recall_check
         → [answer | create_queries_for_unsupported_facts → strategy_upgrade → retrieval]* 
-        → answer | partial_answer
+        → answer | partial_answer | error_answer
         → END
 
 Repair loop (``*``): runs while facts fail recall and ``retrieval_retry_count <
@@ -63,9 +63,10 @@ from typing import Annotated, Any, AsyncIterator, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 # LangGraph: StateGraph builder, END sentinel, and add_messages reducer for messages key.
+from langgraph.errors import NodeError
 from langgraph.graph import END, StateGraph, add_messages
 # Overwrite replaces list reducer accumulators on reset; Command resumes interrupted graphs.
-from langgraph.types import Command, Overwrite
+from langgraph.types import Command, Overwrite, RetryPolicy
 
 from config.settings import settings
 # Optional long-context compaction (summarize + RemoveMessage); disabled below in normalisation node.
@@ -160,6 +161,21 @@ class RetrievalState(TypedDict, total=False):
     retrieval_retry_count: int
     # Incremented by strategy_upgrade each repair pass. Compared against
     # settings.retrieval_loop_max_retries to gate partial_answer.
+
+    graph_failure: dict[str, Any]
+    # Node-level retry exhaustion context from ``handle_node_failure``.
+
+
+ERROR_ANSWER_USER_MESSAGE = "An error occurred while processing your request. Please try again."
+
+
+def handle_node_failure(state: RetrievalState, error: NodeError) -> Command:
+    """Route retry-exhausted node failures to deterministic ``error_answer`` output."""
+
+    return Command(
+        update={"graph_failure": {"failed_node": error.node, "detail": str(error.error)}},
+        goto="error_answer",
+    )
 
 
 # --- Fact and recall helpers ---
@@ -405,6 +421,7 @@ def prepare_state_for_next_question(user_query: str) -> dict[str, Any]:
         "needs_split": False,
         "recall_sufficient": False,
         "retrieval_retry_count": 0,
+        "graph_failure": {},
     }
 
 
@@ -1145,6 +1162,22 @@ class RetrievalGraph:
             ]
         }
 
+    async def error_answer_node(self, state: RetrievalState) -> dict[str, Any]:
+        """Emit deterministic user-facing fallback after node retries are exhausted."""
+
+        payload = FinalAnswer(answer=ERROR_ANSWER_USER_MESSAGE, sources=[], confidence="low").model_dump()
+        if settings.langfuse_tracing_enabled:
+            langfuse = get_langfuse_client()
+            with langfuse.start_as_current_observation(as_type="span", name="error_answer") as node_span:
+                node_span.update(
+                    output={
+                        "answer": payload["answer"][:200],
+                        "confidence": payload["confidence"],
+                        "graph_failure": state.get("graph_failure") or {},
+                    }
+                )
+        return {"messages": [build_node_ai_message(node_name="error_answer_node", payload=payload)]}
+
     # --- Conditional routing ---
 
     def route_after_complexity(self, state: RetrievalState) -> str:
@@ -1176,22 +1209,22 @@ class RetrievalGraph:
         Repair loop: recall_check → create_queries_for_unsupported_facts → strategy_upgrade → retrieval → recall_check.
         Success exits: recall_check → answer → END.
         Budget exhausted: recall_check → partial_answer → END.
+        Retry exhaustion on configured nodes: handle_node_failure → error_answer → END.
         """
         builder = StateGraph(RetrievalState)
+        node_retry = RetryPolicy(max_attempts=settings.graph_node_retry_max_attempts, initial_interval=1.0, backoff_factor=2.0)
         # Node names must match strings returned by route_after_* for conditional_edges.
-        builder.add_node("query_normalisation", self.query_normalisation_node)
-        builder.add_node("fact_decomposition", self.fact_decomposition_node)
+        builder.add_node("query_normalisation", self.query_normalisation_node, retry_policy=node_retry, error_handler=handle_node_failure)
+        builder.add_node("fact_decomposition", self.fact_decomposition_node, retry_policy=node_retry, error_handler=handle_node_failure)
         builder.add_node("query_complexity", self.query_complexity_node)
-        builder.add_node("query_splitter", self.query_splitter_node)
-        builder.add_node("retrieval", self.retrieval_node)
-        builder.add_node("recall_check", self.recall_check_node)
-        builder.add_node(
-            "create_queries_for_unsupported_facts",
-            self.create_queries_for_unsupported_facts_node,
-        )
+        builder.add_node("query_splitter", self.query_splitter_node, retry_policy=node_retry, error_handler=handle_node_failure)
+        builder.add_node("retrieval", self.retrieval_node, retry_policy=node_retry, error_handler=handle_node_failure)
+        builder.add_node("recall_check", self.recall_check_node, retry_policy=node_retry, error_handler=handle_node_failure)
+        builder.add_node("create_queries_for_unsupported_facts", self.create_queries_for_unsupported_facts_node, retry_policy=node_retry, error_handler=handle_node_failure)
         builder.add_node("strategy_upgrade", self.strategy_upgrade_node)
-        builder.add_node("answer", self.answer_node)
-        builder.add_node("partial_answer", self.partial_answer_node)
+        builder.add_node("answer", self.answer_node, retry_policy=node_retry)
+        builder.add_node("partial_answer", self.partial_answer_node, retry_policy=node_retry)
+        builder.add_node("error_answer", self.error_answer_node)
 
         builder.set_entry_point("query_normalisation")
         builder.add_edge("query_normalisation", "fact_decomposition")
@@ -1221,6 +1254,7 @@ class RetrievalGraph:
         builder.add_edge("strategy_upgrade", "retrieval")
         builder.add_edge("answer", END)
         builder.add_edge("partial_answer", END)
+        builder.add_edge("error_answer", END)
         # Persists checkpoints keyed by thread_id (session_id from the API).
         return builder.compile(checkpointer=self.checkpointer)
 

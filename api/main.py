@@ -278,9 +278,15 @@ def get_stream_event(
                 "retrieval_loop_count": retrieval_loop_count,
             }
         )
-    elif node_name in {"answer", "partial_answer"}:
+    elif node_name in {"answer", "partial_answer", "error_answer"}:
         # Final answer lives in messages as JSON; parse for the ``final`` SSE frame.
-        allowed = {"answer_node"} if node_name == "answer" else {"partial_answer_node"}
+        allowed = (
+            {"answer_node"}
+            if node_name == "answer"
+            else {"partial_answer_node"}
+            if node_name == "partial_answer"
+            else {"error_answer_node"}
+        )
         answer = final_answer_from_messages(
             list(payload.get("messages") or []),
             allowed_names=allowed,
@@ -288,7 +294,13 @@ def get_stream_event(
         event.update(
             {
                 "type": "final",
-                "label": "Answer ready" if node_name == "answer" else "Partial answer ready",
+                "label": (
+                    "Answer ready"
+                    if node_name == "answer"
+                    else "Partial answer ready"
+                    if node_name == "partial_answer"
+                    else "Error — try again"
+                ),
                 "answer": answer.answer,
                 "sources": answer.sources,
                 "confidence": answer.confidence,
@@ -308,7 +320,8 @@ def get_stream_event(
 def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
     """Normalize a completed graph invoke into the stable ``/run`` JSON shape.
 
-    Prefer ``AIMessage`` payloads from ``answer_node`` or ``partial_answer_node`` (by
+    Prefer ``AIMessage`` payloads from ``answer_node``, ``partial_answer_node``, or
+    ``error_answer_node`` (by
     ``message.name``). Fall back to the last AI message if parsing fails. Interrupt
     payloads surface ``interrupted`` and ``question`` for future ``/resume``.
 
@@ -337,7 +350,7 @@ def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
     messages = list(result.get("messages") or [])
     answer = final_answer_from_messages(
         list(reversed(messages)),
-        allowed_names={"answer_node", "partial_answer_node"},
+        allowed_names={"answer_node", "partial_answer_node", "error_answer_node"},
     )
     if not answer.answer:
         for message in reversed(messages):

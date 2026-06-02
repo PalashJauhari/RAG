@@ -65,6 +65,8 @@ class Settings(BaseSettings):
     graph_recursion_limit: int = 100
     graph_max_concurrency: int = 2
     retrieval_loop_max_retries: int = 3
+    # LangGraph RetryPolicy max attempts per node (transient failures; includes first run).
+    graph_node_retry_max_attempts: int = 3
 
     # --- Long-context summarization (optional; see middleware.context_editing) ---
     message_summary_token_threshold: int = 100000

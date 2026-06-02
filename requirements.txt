@@ -4,7 +4,7 @@ python-dotenv
 pydantic
 pydantic-settings
 openai
-langgraph
+langgraph>=1.2.2
 langchain
 langchain-core
 langchain-openai

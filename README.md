@@ -66,6 +66,7 @@ Copy `.env.example` to `.env`. Essential groups:
 | Qdrant | `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION_NAME` |
 | Retrieval | `RETRIEVAL_TOP_K`, `RETRIEVAL_CANDIDATE_DENSE_MMR`, `RETRIEVAL_CANDIDATE_BM25`, `RETRIEVAL_CANDIDATE_FOR_LATE_INTERACTION`, `RETRIEVAL_MMR_DIVERSITY` |
 | Repair | `RETRIEVAL_LOOP_MAX_RETRIES` (repair loops escalate to ColBERT late interaction when enabled; default starts at `fast_bm25_retrieval`) |
+| Node retries | `GRAPH_NODE_RETRY_MAX_ATTEMPTS` (LangGraph `RetryPolicy` on LLM/retrieval nodes for transient failures; separate from recall repair loop and routes to `error_answer` when exhausted) |
 | Models | `QUERY_NORMALISATION_MODEL`, `QUERY_DECOMPOSITION_MODEL`, `RECALL_CHECK_MODEL`, `GAP_FILL_MODEL`, `FINAL_ANSWER_MODEL` |
 | Observability | `LANGFUSE_TRACING_ENABLED` (+ Langfuse keys when true) |
 
