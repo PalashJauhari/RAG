@@ -11,7 +11,8 @@ benchmarking/hotpotqa/data/processed/*
 benchmarking/hotpotqa/data/results/*
 !benchmarking/hotpotqa/data/results/.gitkeep
 
-artifacts/
+artifacts/*
+!artifacts/README.md
 
 ingestion/raw_pdfs/*
 !ingestion/raw_pdfs/.gitkeep

@@ -167,7 +167,7 @@ data: {"type":"done","session_id":"demo","retrieved_doc_count":12}
 | `ui/` | Dash chat client |
 | `ingestion/` | Self-contained PMC pipeline: download, chunk stub, `.env`, embed, Qdrant upload |
 | `benchmarking/` | Optional offline retrieval / eval suite |
-| `artifacts/` | Graph topology diagram |
+| `artifacts/` | Graph topology (`langgraph.png`, `langgraph.mmd`); regenerate with `python scripts/plot_langgraph.py` |
 
 ## Observability
 
