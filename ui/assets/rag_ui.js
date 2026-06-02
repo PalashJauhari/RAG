@@ -165,7 +165,10 @@ function progressBoldRest(ev) {
     return { bold: boldName, rest: " — " + truncate(ev.normalized_query, 200) };
   }
   if (node === "query_complexity") {
-    const split = ev.needs_split ? "needs_split" : "simple_query";
+    const split =
+      ev.needs_split === true || (ev.fact_count != null && ev.fact_count > 1)
+        ? "needs_split"
+        : "simple_query";
     const ex = ev.explanation ? " — " + truncate(ev.explanation, 120) : "";
     return { bold: boldName, rest: ": " + split + ex };
   }

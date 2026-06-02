@@ -148,6 +148,9 @@ class RetrievalState(TypedDict, total=False):
     facts: list[dict[str, Any]]
     # Unified fact records from fact_decomposition; verification updated by recall_check.
 
+    needs_split: bool
+    # True when len(facts) > 1; set by query_complexity for routing and SSE/UI.
+
     recall_sufficient: bool
     # True when every fact has verification_status=True after recall_check.
     # Drives route_after_recall_check (answer vs repair vs partial_answer).
@@ -399,6 +402,7 @@ def prepare_state_for_next_question(user_query: str) -> dict[str, Any]:
         "retrieved_documents": Overwrite(value=[]),
         "retrieved_point_ids": Overwrite(value=[]),
         "facts": [],
+        "needs_split": False,
         "recall_sufficient": False,
         "retrieval_retry_count": 0,
     }
@@ -655,6 +659,8 @@ class RetrievalGraph:
 
         return {
             "needs_split": needs_split,
+            "explanation": explanation,
+            "fact_count": fact_count,
             "retrieval_strategy": "fast_bm25_retrieval",
             "active_retrieval_queries": [normalized_query] if normalized_query else [],
         }

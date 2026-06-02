@@ -227,6 +227,8 @@ def get_stream_event(
             {
                 "label": "Routing by fact count",
                 "needs_split": payload.get("needs_split"),
+                "fact_count": payload.get("fact_count"),
+                "explanation": payload.get("explanation"),
             }
         )
     elif node_name == "query_splitter":
