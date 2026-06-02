@@ -288,3 +288,116 @@ HOTPOTQA_EXPERIMENT_NAME=hotpot_fast_bm25_late python -m benchmarking.hotpotqa.r
 ```
 
 Or: `python -m benchmarking.hotpotqa.run_benchmark --strategy fast_retrieval --experiment-name hotpot_fast_retrieval`
+
+## Graph benchmark
+
+End-to-end evaluation of the production **Factline** LangGraph (`RetrievalGraph`). Each question runs the full pipeline (normalize → decompose → retrieve → recall check → repair → answer or partial answer). This is **not** retriever-only.
+
+### Overview
+
+| Step | Command | Output |
+|------|---------|--------|
+| Graph eval | `run_graph_benchmark` (step 1) | `graph_results.json`, `graph_run_metadata.json` |
+| RAGAS | (step 2) | `graph_ragas_results.json` |
+| Report | (step 3) | `graph_benchmark_report.md` |
+
+**Metrics:**
+
+- **RAGAS** (vanilla, `ragas.metrics.collections`): `ContextPrecision`, `ContextRecall`, `Faithfulness`, `AnswerCorrectness`
+- **Graph latency**: wall-clock of `RetrievalGraph.run()` per question — not RAGAS scoring time
+- **Partial answer %**: share of runs that exited via `partial_answer_node` (repair budget exhausted)
+
+**Partial answers and RAGAS:** Partial-answer rows are **included** in RAGAS means when scorable. Rows with empty `retrieved_contexts` skip context metrics and faithfulness; rows with empty `response` skip faithfulness and answer correctness.
+
+**Contexts for RAGAS:** `retrieved_contexts` are built from `final_state["retrieved_documents"]` after the graph completes — the same accumulated corpus passed to `answer_node` / `partial_answer_node` (not the enriched Qdrant embed string).
+
+### Prerequisites
+
+- Activate venv **`rag_env_1`** (all packages from repo root `requirements.txt`).
+- Same one-time setup as retriever benchmark: `hotpotqa_eval.json` and Qdrant upload completed.
+- **Two env files** must align on Qdrant collection and API keys:
+
+| File | Used for |
+|------|----------|
+| `benchmarking/hotpotqa/.env` | `HOTPOTQA_EXPERIMENT_NAME`, `HOTPOTQA_MAX_QUESTIONS`, `HOTPOTQA_RAGAS_MODEL`, dataset paths |
+| Repo root `.env` | Qdrant collection, graph LLM models (`config.settings` inside `RetrievalGraph`) |
+
+### Quick start
+
+```bash
+# From repo root
+source rag_env_1/bin/activate
+
+# One-time: prepare + upload (if not done)
+python -m benchmarking.hotpotqa.dataset.prepare_eval_data
+python -m benchmarking.hotpotqa.qdrant_upload.upload
+
+export HOTPOTQA_EXPERIMENT_NAME=hotpot_graph_v1
+python -m benchmarking.hotpotqa.run_graph_benchmark
+```
+
+Optional experiment override:
+
+```bash
+python -m benchmarking.hotpotqa.run_graph_benchmark --experiment-name hotpot_graph_v1
+```
+
+Start with a small `HOTPOTQA_MAX_QUESTIONS` (e.g. 20) before a full 500-question run. Disable `LANGFUSE_TRACING_ENABLED` for bulk eval unless you need traces.
+
+### Graph pipeline
+
+```mermaid
+flowchart TB
+  JSON[hotpotqa_eval.json]
+  JSON --> Eval[run_graph_eval]
+  Eval --> GR[graph_results.json]
+  Eval --> GM[graph_run_metadata.json]
+  GR --> RAGAS[ragas_graph_metrics]
+  RAGAS --> RR[graph_ragas_results.json]
+  GM --> Rep[build_graph_report]
+  RR --> Rep
+  GR --> Rep
+  Rep --> MD[graph_benchmark_report.md]
+  Qdrant[(Qdrant)] --> Eval
+```
+
+### Graph artifacts
+
+```text
+benchmarking/hotpotqa/data/results/{HOTPOTQA_EXPERIMENT_NAME}/
+  graph_results.json
+  graph_run_metadata.json
+  graph_ragas_results.json
+  graph_type_level_metrics.xlsx   # optional
+  graph_benchmark_report.md
+```
+
+### Graph metrics glossary
+
+| Metric | Meaning |
+|--------|---------|
+| Context precision | How useful retrieved passages are for answering (vs gold short answer) |
+| Context recall | Whether gold answer is supported by retrieved passages |
+| Faithfulness | Whether the generated answer is grounded in retrieved passages |
+| Answer correctness | Semantic/factual match vs HotpotQA `reference_answer` |
+| Graph latency | End-to-end `RetrievalGraph.run()` time per question |
+| Partial answer % | Runs that stopped at `partial_answer_node` |
+
+### Compare graph vs retrieval
+
+Run two experiments with the same `HOTPOTQA_MAX_QUESTIONS` and Qdrant collection; diff reports:
+
+| | Retriever (`run_benchmark`) | Graph (`run_graph_benchmark`) |
+|--|----------------------------|--------------------------------|
+| Invoke | `Retriever.retrieve()` once | Full `RetrievalGraph` |
+| Context corpus | Single retrieve top-k | Accumulated across repair passes |
+| Answer | None | `response` in `graph_results.json` |
+| Extra metrics | — | Faithfulness, answer correctness, partial % |
+
+```bash
+# Retriever (example)
+HOTPOTQA_EXPERIMENT_NAME=distractor_fast_bm25 python -m benchmarking.hotpotqa.run_benchmark --strategy fast_bm25_retrieval
+
+# Graph (same corpus, different folder)
+HOTPOTQA_EXPERIMENT_NAME=hotpot_graph_v1 python -m benchmarking.hotpotqa.run_graph_benchmark
+```

@@ -54,8 +54,28 @@ class HotpotQASettings(Settings):
 
     @property
     def benchmark_report_path(self) -> Path:
-        """Human-readable Markdown report aggregating all metrics."""
+        """Human-readable Markdown report aggregating retriever benchmark metrics."""
         return self.results_dir / "benchmark_report.md"
+
+    @property
+    def graph_results_path(self) -> Path:
+        """Per-experiment graph JSON written by the benchmark graph eval step."""
+        return self.results_dir / "graph_results.json"
+
+    @property
+    def graph_run_metadata_path(self) -> Path:
+        """Run metadata JSON from the benchmark graph eval step."""
+        return self.results_dir / "graph_run_metadata.json"
+
+    @property
+    def graph_ragas_results_path(self) -> Path:
+        """Per-experiment RAGAS scores JSON from the benchmark graph RAGAS step."""
+        return self.results_dir / "graph_ragas_results.json"
+
+    @property
+    def graph_benchmark_report_path(self) -> Path:
+        """Human-readable Markdown report aggregating graph benchmark metrics."""
+        return self.results_dir / "graph_benchmark_report.md"
 
     model_config = SettingsConfigDict(
         env_file=HOTPOTQA_ROOT / ".env",

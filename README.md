@@ -155,12 +155,6 @@ data: {"type":"final","node":"answer","status":"completed","label":"Answer ready
 data: {"type":"done","session_id":"demo","retrieved_doc_count":12}
 ```
 
-## Scripts
-
-```bash
-python check_settings.py          # list unused Settings fields (dev utility)
-```
-
 ## Project layout
 
 | Path | Role |
