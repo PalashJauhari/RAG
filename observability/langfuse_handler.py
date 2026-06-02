@@ -11,9 +11,8 @@ Langfuse children) and logs unsupported rows plus accumulated ``retrieved_docume
 ``create_queries_for_unsupported_facts`` logs repair queries. ``strategy_upgrade`` logs deterministic ``retrieval_strategy`` and
 ``retrieval_retry_count``.
 
-**Retrieval span** (``retrieval_node`` in :mod:`graph.graph`): ``output`` includes ``strategy``,
-``queries``, ``retrieval_retry_count``, HasId exclusion count, candidate count, ``rows_to_add``,
-full accumulated ``retrieved_documents`` after the pass, and before/after corpus sizes.
+**Retrieval span** (``retrieval_node`` in :mod:`graph.graph`): ``output`` includes ``retrieval_strategy``,
+``active_retrieval_queries``, ``documents_to_add``, and full ``retrieved_documents`` after the pass.
 """
 
 from __future__ import annotations

@@ -176,7 +176,7 @@ def unsupported_facts(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     Used by:
         - create_queries_for_unsupported_facts_node (LLM prompt context)
-        - add_queries_for_unsupported_facts (alignment checks)
+        - add_queries_for_unsupported_facts (filters suggestions by unsupported fact_id)
         - recall_check Langfuse output
     """
 
@@ -313,70 +313,59 @@ def create_fact_list_with_metadata(response: RequiredFactsResult) -> list[dict[s
 
 def add_queries_for_unsupported_facts(
     facts: list[dict[str, Any]],
-    repairs: list[Any],
+    llm_suggested_gap_fill_queries: list[Any],
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Merge gap-fill LLM repairs onto unsupported facts; collect flat query list.
+    """Merge gap-fill LLM suggestions onto unsupported facts; collect flat query list.
 
     Input:
         facts: **full** fact list (supported + unsupported) from ``state["facts"]``.
-        repairs: ``GapFillFact`` rows from ``GapFillResult.facts`` — one per unsupported
-            fact, with ``fact_id``, ``search_queries`` (3 strings), ``gap_fill_explanation``.
+        llm_suggested_gap_fill_queries: ``GapFillFact`` rows from ``GapFillResult.facts`` —
+            one per unsupported fact, with ``fact_id``, ``search_queries`` (3 strings),
+            ``gap_fill_explanation``.
 
     Output:
         (updated_facts, queries):
-        - updated_facts: full list; unsupported rows get ``search_queries`` and
-          ``gap_fill_explanation``; supported rows copied unchanged.
-        - queries: flat concatenation of all repair ``search_queries`` → becomes
-          ``active_retrieval_queries`` for the next retrieval pass.
+        - updated_facts: full list; unsupported rows with a matching LLM suggestion get
+          ``search_queries`` and ``gap_fill_explanation``; others unchanged.
+        - queries: flat concatenation of suggested ``search_queries`` for matched ids.
 
-    Validation:
-        Raises ``ValueError`` if repair fact_ids or fact text do not match unsupported
-        rows exactly (guards against LLM dropping or rewriting facts).
-
-    Does not call the LLM — pure merge after create_queries_for_unsupported_facts_node.
+    Only suggestions whose ``fact_id`` appears in the current unsupported facts are applied;
+    extra or unknown ids from the LLM are ignored (no error).
     """
 
+    # Subset of facts that recall_check marked verification_status=False.
     unsupported = unsupported_facts(facts)
-    expected_ids = [row["fact_id"] for row in unsupported]
-    repair_ids = [item.fact_id for item in repairs]
-    # Repair rows must align 1:1 with unsupported facts (same ids, same order).
-    if repair_ids != expected_ids:
-        raise ValueError("Gap-fill fact_id values must match unsupported facts by order and id")
-    if [item.fact for item in repairs] != fact_texts(unsupported):
-        raise ValueError("Gap-fill fact text must match unsupported facts by order and text")
+    unsupported_expected_ids = [row["fact_id"] for row in unsupported]
 
-    repair_by_id = {item.fact_id: item for item in repairs}
+    # Index LLM gap-fill rows by fact_id; ignore ids not in unsupported_expected_ids.
+    gap_fill_by_fact_id = {
+        item.fact_id: item
+        for item in llm_suggested_gap_fill_queries
+        if item.fact_id in unsupported_expected_ids
+    }
+
     updated: list[dict[str, Any]] = []
-    queries: list[str] = []
+    queries: list[str] = []  # fed to state["active_retrieval_queries"] on the next retrieval pass
+
     for row in facts:
         fact_id = row.get("fact_id")
-        repair = repair_by_id.get(fact_id)
-        if repair is None:
-            # Already verified (or unknown id): keep row as-is.
+        gap_fill = gap_fill_by_fact_id.get(fact_id)
+
+        if gap_fill is None:
+            # Supported fact, or unsupported with no matching LLM row: leave row unchanged.
             updated.append(row)
-            continue
-        # Unsupported fact: attach targeted queries for strategy_upgrade → retrieval.
-        updated.append(
-            {
-                **row,
-                "search_queries": list(repair.search_queries),
-                "gap_fill_explanation": repair.gap_fill_explanation,
-            }
-        )
-        queries.extend(repair.search_queries)
+        else:
+            # Unsupported fact with gap-fill: attach new search strings for strategy_upgrade.
+            updated.append(
+                {
+                    **row,
+                    "search_queries": list(gap_fill.search_queries),
+                    "gap_fill_explanation": gap_fill.gap_fill_explanation,
+                }
+            )
+            queries.extend(gap_fill.search_queries)
+
     return updated, queries
-
-
-def needs_query_split(facts: list[dict[str, Any]]) -> bool:
-    """True when fact count > 1 → route to query_splitter for per-fact retrieval strings."""
-
-    return len(facts) > 1
-
-
-def fact_texts(rows: list[dict[str, Any]]) -> list[str]:
-    """Extract ordered non-empty ``fact`` strings for LLM alignment checks."""
-
-    return [str(row.get("fact") or "").strip() for row in rows if str(row.get("fact") or "").strip()]
 
 
 def late_interaction_enabled() -> bool:
@@ -634,7 +623,7 @@ class RetrievalGraph:
             ``normalized_query``, ``facts``
 
         Writes:
-            ``needs_split`` — stored in state for Langfuse only; routing uses :func:`needs_query_split`.
+            ``needs_split`` — ``len(facts) > 1``; also used by Langfuse span output.
             ``retrieval_strategy`` — always ``fast_bm25_retrieval`` on first pass.
             ``active_retrieval_queries`` — ``[normalized_query]`` when query is non-empty.
 
@@ -645,7 +634,7 @@ class RetrievalGraph:
         normalized_query = str(state.get("normalized_query") or "").strip()
         facts = state.get("facts") or []
         fact_count = len(facts)
-        needs_split = needs_query_split(facts)
+        needs_split = fact_count > 1
         explanation = (
             f"{fact_count} facts → split retrieval per fact."
             if needs_split
@@ -695,7 +684,6 @@ class RetrievalGraph:
 
         normalized_query = str(state.get("normalized_query") or "").strip()
         facts = state.get("facts") or []
-        needs_split = needs_query_split(facts)
         llm = get_llm_client(
             model=settings.query_decomposition_model,
             output_schema=QuerySplitResult,
@@ -703,7 +691,6 @@ class RetrievalGraph:
         )
         context = (
             f"## Normalized query\n{normalized_query}\n\n"
-            f"## Needs split\n{needs_split}\n\n"
             "## Facts\n"
             f"{json.dumps(facts, ensure_ascii=False)}"
         )
@@ -799,42 +786,35 @@ class RetrievalGraph:
             )
             # Slim payloads (raw_text, id, score) for LLM nodes; dedup vs checkpoint seen_ids.
             compact_document_rows = compact_documents_for_llm(ranked_hits)
-            rows_to_add: list[dict[str, Any]] = []
+            documents_to_add: list[dict[str, Any]] = []
             new_point_ids: list[str] = []
             for row in compact_document_rows:
                 point_id = str(row.get("id") or "").strip()
                 if point_id and point_id not in seen_ids:
-                    rows_to_add.append(row)
+                    documents_to_add.append(row)
                     seen_ids.add(point_id)
                     new_point_ids.append(point_id)
-            return compact_document_rows, rows_to_add, new_point_ids
+            return compact_document_rows, documents_to_add, new_point_ids
 
         if settings.langfuse_tracing_enabled:
             langfuse = get_langfuse_client()
             with langfuse.start_as_current_observation(as_type="span", name="retrieval") as node_span:
-                compact_document_rows, rows_to_add, new_point_ids = await run_retrieval()
-                accumulated = list(state.get("retrieved_documents") or [])
-                corpus_after = accumulated + rows_to_add
+                _, documents_to_add, new_point_ids = await run_retrieval()
+                already_available_documents = list(state.get("retrieved_documents") or [])
                 node_span.update(
                     output={
-                        "strategy": strategy,
-                        "queries": search_queries,
+                        "retrieval_strategy": strategy,
+                        "active_retrieval_queries": search_queries,
                         "late_interaction_enabled": late_interaction_enabled(),
-                        "exclude_point_id_count": len(exclude_ids or []),
-                        "candidate_doc_count": len(compact_document_rows),
-                        "rows_to_add": rows_to_add,
-                        "rows_to_add_count": len(rows_to_add),
-                        "corpus_size_before": len(accumulated),
-                        "corpus_size_after": len(corpus_after),
-                        "retrieved_documents": corpus_after,
+                        "documents_to_add": documents_to_add,
+                        "retrieved_documents": already_available_documents + documents_to_add,
                     }
                 )
         else:
-            compact_document_rows, rows_to_add, new_point_ids = await run_retrieval()
-            accumulated = list(state.get("retrieved_documents") or [])
+            _, documents_to_add, new_point_ids = await run_retrieval()
 
         return {
-            "retrieved_documents": rows_to_add,
+            "retrieved_documents": documents_to_add,
             "retrieved_point_ids": new_point_ids,
             "retrieval_strategy": strategy,
             "active_retrieval_queries": search_queries,
@@ -964,19 +944,14 @@ class RetrievalGraph:
 
         if settings.langfuse_tracing_enabled:
             langfuse = get_langfuse_client()
-            with langfuse.start_as_current_observation(
-                as_type="span", name="create_queries_for_unsupported_facts"
-            ) as node_span:
-                with langfuse.start_as_current_observation(
-                    as_type="generation",
-                    name="create_queries_for_unsupported_facts-llm",
-                    model=model,
-                ) as gen:
+            with langfuse.start_as_current_observation(as_type="span", name="create_queries_for_unsupported_facts") as node_span:
+                with langfuse.start_as_current_observation(as_type="generation", name="create_queries_for_unsupported_facts-llm", model=model) as gen:
                     result = await llm.ainvoke(messages_for_llm)
                     update_llm_generation(gen, model=model, raw=result.get("raw"))
                 response = result["parsed"]
                 updated_facts, queries = add_queries_for_unsupported_facts(
-                    list(state.get("facts") or []), list(response.facts)
+                    list(state.get("facts") or []),
+                    list(response.facts),
                 )
                 node_span.update(
                     output={
@@ -988,7 +963,8 @@ class RetrievalGraph:
             result = await llm.ainvoke(messages_for_llm)
             response = result["parsed"]
             updated_facts, queries = add_queries_for_unsupported_facts(
-                list(state.get("facts") or []), list(response.facts)
+                list(state.get("facts") or []),
+                list(response.facts),
             )
 
         return {
@@ -1168,7 +1144,7 @@ class RetrievalGraph:
     def route_after_complexity(self, state: RetrievalState) -> str:
         """Route to query_splitter when multiple facts need per-fact queries."""
 
-        if needs_query_split(state.get("facts") or []):
+        if len(state.get("facts") or []) > 1:
             return "query_splitter"
         return "retrieval"
 
