@@ -1,22 +1,23 @@
-"""PDF partition and chunking via Unstructured On-Demand Jobs API.
+"""PMC PDF partition and chunking via Unstructured On-Demand Jobs API.
 
 Run::
 
     python -m ingestion.unstructured_pipeline
     python -m ingestion.unstructured_pipeline --dry-run
 
-Reads ``manifest.json`` from :envvar:`RAW_PDFS_DIR`, submits PDF batches to
-Unstructured, and writes raw chunked elements to :envvar:`CHUNKS_OUTPUT_PATH`.
-
-Phase 2 (embed + Qdrant) is :mod:`ingestion.qdrant_upload`.
+Reads ``manifest.json``, submits PDFs to Unstructured (hi_res layout + chunk_by_title),
+post-processes ``orig_elements``, and writes ``chunks.json``.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import copy
 import json
 import mimetypes
 import time
+import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -25,8 +26,98 @@ from unstructured_client import UnstructuredClient
 from unstructured_client.models.operations import CreateJobRequest, DownloadJobOutputRequest
 from unstructured_client.models.shared import BodyCreateJob, InputFiles
 
-from ingestion.chunk_postprocess import normalize_file_result
-from ingestion.settings import INGESTION_ROOT, IngestionSettings, settings
+from ingestion.ingestion_config import INGESTION_ROOT, IngestionConfig, load_ingestion_config
+
+
+def decode_orig_elements(encoded: str) -> list[dict[str, Any]]:
+    """Decode Unstructured ``metadata.orig_elements`` (base64 zlib JSON)."""
+
+    if not str(encoded or "").strip():
+        return []
+    decoded = base64.b64decode(encoded)
+    decompressed = zlib.decompress(decoded)
+    payload = json.loads(decompressed.decode("utf-8"))
+    if not isinstance(payload, list):
+        raise ValueError("orig_elements must decode to a JSON array")
+    return payload
+
+
+def extract_images_from_orig_elements(
+    orig_elements: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Pull base64 Image blocks from decoded orig_elements."""
+
+    images: list[dict[str, Any]] = []
+    for element in orig_elements:
+        if element.get("type") != "Image":
+            continue
+        metadata = element.get("metadata") or {}
+        base64_data = metadata.get("image_base64")
+        if not base64_data:
+            continue
+        image: dict[str, Any] = {
+            "element_id": element.get("element_id"),
+            "mime_type": metadata.get("image_mime_type") or "image/png",
+            "base64": base64_data,
+        }
+        page_number = metadata.get("page_number")
+        if page_number is not None:
+            image["page_number"] = page_number
+        images.append(image)
+    return images
+
+
+def strip_image_base64_from_orig_elements(
+    orig_elements: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Remove bulky image bytes from Image metadata after extraction."""
+
+    stripped: list[dict[str, Any]] = []
+    for element in orig_elements:
+        item = copy.deepcopy(element)
+        if item.get("type") == "Image":
+            metadata = item.get("metadata")
+            if isinstance(metadata, dict):
+                metadata.pop("image_base64", None)
+                metadata.pop("image_mime_type", None)
+        stripped.append(item)
+    return stripped
+
+
+def normalize_chunk_element(element: dict[str, Any]) -> dict[str, Any]:
+    """Decode orig_elements, extract images, and strip duplicated base64."""
+
+    normalized = copy.deepcopy(element)
+    metadata = normalized.get("metadata")
+    if not isinstance(metadata, dict):
+        return normalized
+
+    orig_elements = metadata.get("orig_elements")
+    if not isinstance(orig_elements, str):
+        return normalized
+
+    decoded = decode_orig_elements(orig_elements)
+    images = extract_images_from_orig_elements(decoded)
+    metadata["orig_elements"] = strip_image_base64_from_orig_elements(decoded)
+    if images:
+        metadata["images"] = images
+    else:
+        metadata.pop("images", None)
+    return normalized
+
+
+def normalize_file_result(file_result: dict[str, Any]) -> dict[str, Any]:
+    """Normalize every chunk element in one PDF file result."""
+
+    normalized = copy.deepcopy(file_result)
+    elements = normalized.get("elements")
+    if not isinstance(elements, list):
+        return normalized
+    normalized["elements"] = [
+        normalize_chunk_element(element) if isinstance(element, dict) else element
+        for element in elements
+    ]
+    return normalized
 
 
 def normalize_job_status(status: Any) -> str:
@@ -43,22 +134,19 @@ def normalize_job_status(status: Any) -> str:
 
 
 def run_pipeline(
-    pipeline_settings: IngestionSettings | None = None,
+    config: IngestionConfig | None = None,
     *,
     manifest_path: Path | None = None,
     output_path: Path | None = None,
     dry_run: bool = False,
 ) -> list[dict[str, Any]]:
-    """Partition and chunk downloaded PMC PDFs; write raw Unstructured output."""
+    """Partition and chunk downloaded PMC PDFs; write Unstructured output to chunks.json."""
 
-    pipeline_settings = pipeline_settings or settings
-    raw_pdfs_dir = pipeline_settings.resolve_path(pipeline_settings.raw_pdfs_dir)
-    manifest_file = manifest_path or (raw_pdfs_dir / "manifest.json")
-    chunks_file = output_path or pipeline_settings.resolve_path(
-        pipeline_settings.chunks_output_path
-    )
+    config = config or load_ingestion_config()
+    manifest_file = manifest_path or config.manifest_path
+    chunks_file = output_path or config.chunks_path
 
-    if not pipeline_settings.unstructured_api_key.strip() and not dry_run:
+    if not config.unstructured_api_key.strip() and not dry_run:
         raise ValueError("UNSTRUCTURED_API_KEY is required (set in ingestion/.env)")
 
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
@@ -70,17 +158,17 @@ def run_pipeline(
 
     pdf_paths: list[Path] = []
     for row in papers:
-        pdf_path = pipeline_settings.resolve_path(str(row["pdf_path"]))
+        pdf_path = config.resolve_path(str(row["pdf_path"]))
         if not pdf_path.is_file():
             print(f"Skip missing file: {pdf_path}")
             continue
         size = pdf_path.stat().st_size
-        if size > pipeline_settings.unstructured_job_max_file_bytes:
+        if size > config.unstructured_job_max_file_bytes:
             print(f"Skip oversized ({size} bytes): {pdf_path.name}")
             continue
         pdf_paths.append(pdf_path)
 
-    batch_size = min(10, max(1, pipeline_settings.unstructured_job_batch_size))
+    batch_size = min(10, max(1, config.unstructured_job_batch_size))
     batches: list[list[Path]] = [
         pdf_paths[index : index + batch_size]
         for index in range(0, len(pdf_paths), batch_size)
@@ -95,14 +183,14 @@ def run_pipeline(
             print(f"  batch {batch_index}: {names}")
         return []
 
-    client_kwargs: dict[str, Any] = {"api_key_auth": pipeline_settings.unstructured_api_key}
-    if pipeline_settings.unstructured_api_url.strip():
-        client_kwargs["server_url"] = pipeline_settings.unstructured_api_url.strip()
+    client_kwargs: dict[str, Any] = {"api_key_auth": config.unstructured_api_key}
+    if config.unstructured_api_url.strip():
+        client_kwargs["server_url"] = config.unstructured_api_url.strip()
 
-    request_data = pipeline_settings.job_request_data()
+    request_data = config.job_request_data()
     results: list[dict[str, Any]] = []
     max_workers = min(
-        pipeline_settings.unstructured_job_max_concurrent,
+        config.unstructured_job_max_concurrent,
         max(1, len(batches)),
     )
 
@@ -143,7 +231,7 @@ def run_pipeline(
 
                 status = normalize_job_status(job.status)
                 if status in {"SCHEDULED", "IN_PROGRESS"}:
-                    time.sleep(pipeline_settings.unstructured_job_poll_seconds)
+                    time.sleep(config.unstructured_job_poll_seconds)
                     continue
                 if status != "COMPLETED":
                     raise RuntimeError(f"Job {job_id} ended with status {status!r}")
@@ -180,7 +268,7 @@ def run_pipeline(
         futures = []
         for batch_index, batch in enumerate(batches):
             if batch_index > 0:
-                time.sleep(pipeline_settings.unstructured_job_create_interval_seconds)
+                time.sleep(config.unstructured_job_create_interval_seconds)
             futures.append(executor.submit(process_batch, batch))
 
         for future in as_completed(futures):
@@ -189,7 +277,7 @@ def run_pipeline(
             except Exception as exc:
                 print(f"Job batch failed: {exc}")
 
-    if pipeline_settings.unstructured_include_orig_elements:
+    if config.unstructured_include_orig_elements:
         results = [normalize_file_result(file_result) for file_result in results]
 
     chunks_file.parent.mkdir(parents=True, exist_ok=True)
@@ -199,6 +287,8 @@ def run_pipeline(
 
 
 def main() -> None:
+    """CLI entry for the Unstructured partition + chunk pipeline."""
+
     parser = argparse.ArgumentParser(
         description="Partition and chunk PMC PDFs via Unstructured Jobs API.",
     )

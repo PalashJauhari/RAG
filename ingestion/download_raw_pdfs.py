@@ -1,18 +1,4 @@
-"""Download open-access PDFs from PubMed Central into ``ingestion/raw_pdfs/``.
-
-Each run clears the output directory first (except ``.gitkeep``), searches PMC via
-NCBI Entrez, resolves OA links through the PMC OA service, and writes
-``manifest.json``.
-
-PMC legacy FTP paths returned by the OA service are rewritten to
-``/pub/pmc/deprecated/...`` (NLM moved OA files there in 2026). PDFs are fetched
-via FTP; when only a ``tgz`` package exists, the first PDF inside is extracted.
-
-Run::
-
-    python -m ingestion.download_data --max-results 150
-    python -m ingestion.download_data --query "semaglutide AND open access[filter]" --max-results 20
-"""
+"""Download open-access PMC PDFs into ``ingestion/raw_pdfs/`` and write ``manifest.json``."""
 
 from __future__ import annotations
 
@@ -33,6 +19,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from ingestion.ingestion_config import INGESTION_ROOT, load_ingestion_config
+
 DEFAULT_QUERY = (
     "(GLP-1 OR semaglutide OR tirzepatide) "
     "AND (obesity OR pharmacology) "
@@ -44,8 +32,6 @@ ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 OA_URL = "https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi"
 PMC_FTP_HOST = "ftp.ncbi.nlm.nih.gov"
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-INGESTION_ROOT = Path(__file__).resolve().parent
 REQUEST_TIMEOUT_SECONDS = 60
 PMC_REQUEST_DELAY_SECONDS = 0.4
 NCBI_TOOL = "factline-rag"
@@ -404,11 +390,11 @@ def run_download(
     return manifest
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse CLI arguments."""
+def main() -> None:
+    """CLI entry for PMC PDF download."""
 
     parser = argparse.ArgumentParser(
-        description="Download PMC open-access PDFs into ingestion/raw_pdfs/ (clears output dir each run).",
+        description="Download PMC open-access PDFs into ingestion/raw_pdfs/",
     )
     parser.add_argument(
         "--query",
@@ -424,15 +410,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         default="raw_pdfs",
-        help="Download destination under ingestion/ (default: ingestion/raw_pdfs).",
+        help="Download destination under ingestion/ (default: raw_pdfs).",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
 
-
-def main() -> None:
-    """Entry point for ``python -m ingestion.download_data``."""
-
-    args = parse_args()
     output_dir = Path(args.output_dir)
     if not output_dir.is_absolute():
         output_dir = INGESTION_ROOT / output_dir

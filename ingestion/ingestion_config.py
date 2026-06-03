@@ -1,4 +1,4 @@
-"""Ingestion-only settings loaded from ``ingestion/.env``."""
+"""Ingestion settings loaded from ``ingestion/.env`` only."""
 
 from __future__ import annotations
 
@@ -6,17 +6,22 @@ import json
 from pathlib import Path
 from typing import Any
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 INGESTION_ROOT = Path(__file__).resolve().parent
 
 
-class IngestionSettings(BaseSettings):
-    """Configuration for PMC ingestion (separate from app and benchmark env)."""
+class IngestionConfig(BaseSettings):
+    """PMC ingestion: Unstructured, Qdrant, OpenAI, Jina (standalone from app/benchmark)."""
 
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dimensions: int = 1536
+    ingestion_enrichment_model: str = Field(
+        default="gpt-4o-mini",
+        alias="INGESTION_ENRICHMENT_MODEL",
+    )
 
     qdrant_url: str = ""
     qdrant_api_key: str = ""
@@ -35,7 +40,7 @@ class IngestionSettings(BaseSettings):
     jina_multi_vector_url: str = "https://api.jina.ai/v1/multi-vector"
 
     request_timeout_seconds: int = 60
-    ingestion_upload_batch_size: int = 64
+    ingestion_upload_batch_size: int = 16
 
     unstructured_api_key: str = ""
     unstructured_api_url: str = ""
@@ -77,6 +82,7 @@ class IngestionSettings(BaseSettings):
         env_file=INGESTION_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     def resolve_path(self, relative: str) -> Path:
@@ -84,6 +90,14 @@ class IngestionSettings(BaseSettings):
 
         path = Path(relative)
         return path if path.is_absolute() else INGESTION_ROOT / path
+
+    @property
+    def manifest_path(self) -> Path:
+        return self.resolve_path(self.raw_pdfs_dir) / "manifest.json"
+
+    @property
+    def chunks_path(self) -> Path:
+        return self.resolve_path(self.chunks_output_path)
 
     def build_job_nodes(self) -> list[dict[str, Any]]:
         """Build Unstructured on-demand job DAG from env settings."""
@@ -168,4 +182,7 @@ class IngestionSettings(BaseSettings):
         return json.dumps({"job_nodes": self.build_job_nodes()})
 
 
-settings = IngestionSettings()
+def load_ingestion_config() -> IngestionConfig:
+    """Load settings from ``ingestion/.env``."""
+
+    return IngestionConfig()
