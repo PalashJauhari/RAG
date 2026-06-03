@@ -19,13 +19,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from ingestion.ingestion_config import INGESTION_ROOT, load_ingestion_config
-
-DEFAULT_QUERY = (
-    "(GLP-1 OR semaglutide OR tirzepatide) "
-    "AND (obesity OR pharmacology) "
-    "AND open access[filter]"
-)
+from ingestion.ingestion_config import INGESTION_ROOT
 
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
@@ -36,6 +30,15 @@ REQUEST_TIMEOUT_SECONDS = 60
 PMC_REQUEST_DELAY_SECONDS = 0.4
 NCBI_TOOL = "factline-rag"
 SEARCH_OVERFETCH_FACTOR = 3
+
+
+def validate_pmc_query(query: str) -> str:
+    """Normalize and validate a required PMC Entrez ``--query`` value."""
+
+    key = (query or "").strip()
+    if not key:
+        raise ValueError("--query is required and must be non-empty")
+    return key
 
 
 def clear_output_dir(output_dir: Path) -> None:
@@ -398,8 +401,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--query",
-        default=DEFAULT_QUERY,
-        help="PMC Entrez search query (include open access[filter] for OA PDFs).",
+        required=True,
+        help=(
+            "PMC Entrez search query (required). "
+            "Include open access[filter] for OA PDFs, e.g. "
+            "'(diabetes) AND open access[filter]'."
+        ),
     )
     parser.add_argument(
         "--max-results",
@@ -413,13 +420,14 @@ def main() -> None:
         help="Download destination under ingestion/ (default: raw_pdfs).",
     )
     args = parser.parse_args()
+    query = validate_pmc_query(args.query)
 
     output_dir = Path(args.output_dir)
     if not output_dir.is_absolute():
         output_dir = INGESTION_ROOT / output_dir
 
     run_download(
-        query=args.query.strip(),
+        query=query,
         max_results=args.max_results,
         output_dir=output_dir,
     )

@@ -15,7 +15,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, field_validator, model_validator
 from qdrant_client import AsyncQdrantClient, models
 
-from benchmarking.hotpotqa.benchmark_config import load_benchmark_config
+from benchmarking.hotpotqa.benchmark_config import load_benchmark_env
 from config.settings import settings
 from middleware.llm_client import get_llm_client
 
@@ -415,7 +415,7 @@ async def upsert_chunks(
 async def run_upload(do_enrich: bool) -> None:
     """Load JSON, optionally enrich, recreate collection, upsert all contexts."""
 
-    config = load_benchmark_config()
+    config = load_benchmark_env()
     records = json.loads(config.processed_dataset_path.read_text(encoding="utf-8"))
 
     if do_enrich:

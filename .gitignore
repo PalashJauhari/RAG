@@ -1,3 +1,5 @@
+.DS_Store
+
 .env
 ingestion/.env
 __pycache__/

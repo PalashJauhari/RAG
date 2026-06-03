@@ -15,8 +15,10 @@ Run all commands from the **repo root**.
 ## Steps
 
 ```bash
-# 1. Download PMC open-access PDFs
-python -m ingestion.download_raw_pdfs --max-results 150
+# 1. Download PMC open-access PDFs (--query is required)
+python -m ingestion.download_raw_pdfs \
+  --max-results 150 \
+  --query "(your topic) AND open access[filter]"
 
 # 2. Unstructured pipeline (layout + chunk → chunks.json)
 python -m ingestion.unstructured_pipeline

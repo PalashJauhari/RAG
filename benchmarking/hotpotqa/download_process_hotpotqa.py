@@ -10,7 +10,7 @@ from typing import Any
 
 from datasets import load_dataset
 
-from benchmarking.hotpotqa.benchmark_config import BenchmarkConfig, load_benchmark_config
+from benchmarking.hotpotqa.benchmark_config import load_benchmark_env
 
 DATASET_NAME = "hotpotqa/hotpot_qa"
 DATASET_CONFIG = "distractor"
@@ -98,7 +98,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    config = load_benchmark_config()
+    config = load_benchmark_env()
     max_questions = args.max_questions if args.max_questions is not None else config.hotpotqa_max_questions
 
     dataset = load_dataset(DATASET_NAME, DATASET_CONFIG, split=SPLIT)

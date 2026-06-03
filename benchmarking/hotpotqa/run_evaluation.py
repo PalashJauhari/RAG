@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -24,7 +23,12 @@ from ragas.metrics.collections import (
     Faithfulness,
 )
 
-from benchmarking.hotpotqa.benchmark_config import HOTPOTQA_ROOT, load_benchmark_config
+from benchmarking.hotpotqa.benchmark_config import (
+    HOTPOTQA_ROOT,
+    BenchmarkRunConfig,
+    load_benchmark_config,
+    validate_experiment_name,
+)
 from config.settings import settings
 from graph import RetrievalGraph
 from output_validation.final_answer import FinalAnswer
@@ -675,17 +679,25 @@ def write_benchmark_report(config, mode: str, metadata: dict[str, Any]) -> None:
     print(f"Wrote benchmark report to {config.benchmark_report_path}")
 
 
+def assert_experiment_results_dir_available(config: BenchmarkRunConfig) -> None:
+    """Refuse to overwrite an existing experiment results directory."""
+
+    if config.results_dir.exists():
+        raise SystemExit(
+            f"Experiment {config.hotpotqa_experiment_name!r} already exists at "
+            f"{config.results_dir}. Choose a new --experiment-name or remove that folder."
+        )
+
+
 async def run_evaluation(
     mode: str,
     strategy: str | None,
-    experiment_name: str | None,
+    experiment_name: str,
 ) -> None:
     """Full pipeline: eval → RAGAS → report."""
 
-    if experiment_name:
-        os.environ["HOTPOTQA_EXPERIMENT_NAME"] = experiment_name
     config = load_benchmark_config(experiment_name)
-
+    assert_experiment_results_dir_available(config)
     config.results_dir.mkdir(parents=True, exist_ok=True)
 
     if mode == "retrieval":
@@ -723,10 +735,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--experiment-name",
-        default=None,
-        help="Override HOTPOTQA_EXPERIMENT_NAME",
+        required=True,
+        help="Unique run id; writes under data/results/<name>/ (required for retrieval and graph)",
     )
     args = parser.parse_args()
+    validate_experiment_name(args.experiment_name)
     asyncio.run(
         run_evaluation(
             args.mode,
