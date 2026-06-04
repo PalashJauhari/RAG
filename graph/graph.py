@@ -83,7 +83,7 @@ from observability.langfuse_handler import (
 from output_validation.fact_decomposition import RequiredFactsResult
 from output_validation.final_answer import FinalAnswer
 from output_validation.gap_fill import GapFillResult
-from output_validation.recall_check import VerifiedFact
+from output_validation.recall_check import RecallVerifyResult, VerifiedFact
 from output_validation.query_normalisation import QueryNormalisationResult
 from output_validation.query_splitter import QuerySplitResult
 from output_validation.retrieval_strategy import RetrievalStrategy
@@ -91,7 +91,7 @@ from output_validation.retrieval_strategy import RetrievalStrategy
 from prompts.final_answer import SYSTEM_PROMPT as FINAL_ANSWER_PROMPT
 from prompts.gap_fill import SYSTEM_PROMPT as GAP_FILL_PROMPT
 from prompts.fact_decomposition import SYSTEM_PROMPT as FACT_DECOMPOSITION_PROMPT
-from prompts.recall_check import VERIFY_SINGLE_FACT_PROMPT
+from prompts.recall_check import VERIFY_ALL_FACTS_PROMPT, VERIFY_SINGLE_FACT_PROMPT
 from prompts.partial_answer import SYSTEM_PROMPT as PARTIAL_ANSWER_PROMPT
 from prompts.query_normalisation import SYSTEM_PROMPT as QUERY_NORMALISATION_PROMPT
 from prompts.query_splitter import SYSTEM_PROMPT as QUERY_SPLITTER_PROMPT
@@ -180,7 +180,7 @@ def handle_node_failure(state: RetrievalState, error: NodeError) -> Command:
 
 # --- Fact and recall helpers ---
 #
-# Pure functions (except verify_single_fact / run_verification which call the LLM).
+# Pure functions (except verify_all_facts / verify_single_fact / run_verification which call the LLM).
 # Called from graph nodes and kept at module level for clarity and testability.
 
 
@@ -273,6 +273,8 @@ async def run_verification(
 ) -> list[dict[str, Any]]:
     """Verify all facts in parallel via :func:`verify_single_fact`; preserve order.
 
+    Alternate to :func:`verify_all_facts` (one batched call). Kept for comparison or fallback.
+
     Input:
         facts: full list from ``state["facts"]`` (typically all rows need verification).
         normalized_query: passed through to each verify_single_fact call.
@@ -299,6 +301,65 @@ async def run_verification(
             ]
         )
     )
+
+
+async def verify_all_facts(
+    facts: list[dict[str, Any]],
+    *,
+    normalized_query: str,
+    docs_block: str,
+) -> list[dict[str, Any]]:
+    """Verify every fact in one batched recall-check LLM call.
+
+    Uses ``RecallVerifyResult`` and merges verdicts onto input rows by ``fact_id``.
+    Parallel alternative: :func:`run_verification`.
+    """
+
+    if not facts:
+        raise ValueError("verify_all_facts requires at least one fact")
+
+    verifier = get_llm_client(
+        model=settings.recall_check_model,
+        output_schema=RecallVerifyResult,
+        include_raw=True,
+    )
+    facts_for_prompt = [
+        {"fact_id": row.get("fact_id"), "fact": row.get("fact")} for row in facts
+    ]
+    human_content = (
+        f"## Normalized query\n{normalized_query}\n\n"
+        f"## Facts to verify\n"
+        f"{json.dumps(facts_for_prompt, ensure_ascii=False)}\n\n"
+        f"## Retrieved documents\n{docs_block}"
+    )
+    messages_for_llm = [
+        SystemMessage(content=VERIFY_ALL_FACTS_PROMPT),
+        HumanMessage(content=human_content),
+    ]
+    llm_response = await verifier.ainvoke(messages_for_llm)
+    verdicts = llm_response["parsed"].facts
+
+    verdict_by_id = {
+        verdict.fact_id: verdict for verdict in verdicts if verdict.fact_id is not None
+    }
+
+    updated: list[dict[str, Any]] = []
+    for row in facts:
+        fact_id = row.get("fact_id")
+        verdict = verdict_by_id.get(fact_id)
+        if verdict is None:
+            raise ValueError(
+                f"recall_check batch output missing verification for fact_id={fact_id!r}"
+            )
+        updated.append(
+            {
+                **row,
+                "verification_status": verdict.verification_status,
+                "verification_report": verdict.verification_report,
+                "evidence_documents": list(verdict.evidence_documents),
+            }
+        )
+    return updated
 
 
 def create_fact_list_with_metadata(response: RequiredFactsResult) -> list[dict[str, Any]]:
@@ -846,7 +907,7 @@ class RetrievalGraph:
     # --- Recall / repair nodes ---
 
     async def recall_check_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Verify each fact in parallel against retrieved passages; update verification in place.
+        """Verify all facts in one batched LLM call against retrieved passages; update in place.
 
         Input (from ``state``):
             normalized_query: str — standalone query for this turn.
@@ -889,7 +950,7 @@ class RetrievalGraph:
         if settings.langfuse_tracing_enabled:
             langfuse = get_langfuse_client()
             with langfuse.start_as_current_observation(as_type="span", name="recall_check") as node_span:
-                verified_facts = await run_verification(
+                verified_facts = await verify_all_facts(
                     facts,
                     normalized_query=normalized_query,
                     docs_block=docs_block,
@@ -906,7 +967,7 @@ class RetrievalGraph:
                     }
                 )
         else:
-            verified_facts = await run_verification(
+            verified_facts = await verify_all_facts(
                 facts,
                 normalized_query=normalized_query,
                 docs_block=docs_block,

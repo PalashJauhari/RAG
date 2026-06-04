@@ -58,7 +58,7 @@ class VerifiedFact(BaseModel):
 
 
 class RecallVerifyResult(BaseModel):
-    """Batch verification result (legacy). ``recall_check_node`` uses :class:`VerifiedFact` per call."""
+    """Batch verification result for one recall-check LLM call (all facts)."""
 
     facts: list[VerifiedFact] = Field(
         description="Verification result for every fact in the unified facts list.",
