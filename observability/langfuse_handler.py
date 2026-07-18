@@ -1,18 +1,15 @@
 """Langfuse tracing for the Factline graph.
 
 One root span per ``run`` / ``stream_run`` / ``resume``; inline node spans and nested
-``{node}-llm`` generation spans: ``model`` plus input/output token counts on ``update``. Gated by
-``LANGFUSE_TRACING_ENABLED`` in :mod:`config.settings`. No ``CallbackHandler`` or ``@observe``.
+``{node}-llm`` generation spans. Gated by ``LANGFUSE_TRACING_ENABLED`` in
+:mod:`config.settings`. No ``CallbackHandler`` or ``@observe``.
 
-**Fact / recall spans**: ``fact_decomposition`` logs the normalized query and unified ``facts``
-before retrieval. ``query_complexity`` is deterministic (``len(facts) > 1`` routing; no LLM span).
-``recall_check`` runs one batched LLM verification call under a single node span and logs
-unsupported rows plus accumulated ``retrieved_documents``.
-``create_queries_for_unsupported_facts`` logs repair queries. ``strategy_upgrade`` logs deterministic ``retrieval_strategy`` and
-``retrieval_retry_count``.
+**Node spans**: each graph node sets ``input`` / ``output`` from state (or already-computed
+locals) — full ``document_catalog``, facts, queries, answers, etc. Latency comes from the
+observation context duration.
 
-**Retrieval span** (``retrieval_node`` in :mod:`graph.graph`): ``output`` includes ``retrieval_strategy``,
-``active_retrieval_queries``, ``documents_to_add``, and full ``retrieved_documents`` after the pass.
+**Generation spans** (``{node}-llm``): ``update_llm_generation`` sets model plus input/output
+token counts; latency from context duration.
 """
 
 from __future__ import annotations
@@ -61,6 +58,15 @@ def flush_langfuse() -> None:
     if not settings.langfuse_tracing_enabled:
         return
     get_client().flush()
+
+
+def messages_for_langfuse(messages: list[Any] | None) -> list[dict[str, Any]]:
+    """Serialize LangChain messages to JSON-safe role/content dicts for node span input."""
+
+    return [
+        {"role": type(message).__name__, "content": getattr(message, "content", "")}
+        for message in (messages or [])
+    ]
 
 
 def llm_token_counts(raw: AIMessage | None) -> tuple[int | None, int | None]:

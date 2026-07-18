@@ -47,7 +47,7 @@ async def test_answer_node_sets_mode_and_cited_ids(monkeypatch) -> None:
         "document_catalog": {
             "doc-1": {"text": "evidence", "source": "hotpotqa", "score": 0.9},
         },
-        "cited_id_feedback": "",
+        "cited_id_check_feedback": "",
         "faithfulness_feedback": "",
     }
     result = await graph.answer_node(state)
@@ -69,7 +69,7 @@ async def test_answer_node_includes_ai_feedback_messages(monkeypatch) -> None:
     state = {
         "normalized_query": "q",
         "document_catalog": {"doc-1": {"text": "t", "source": "", "score": 1}},
-        "cited_id_feedback": "Cited document id validation failed.",
+        "cited_id_check_feedback": "Cited document id validation failed.",
         "faithfulness_feedback": "Faithfulness check failed.",
     }
     await graph.answer_node(state)
@@ -91,11 +91,11 @@ async def test_validate_cited_ids_increments_and_feedback(monkeypatch) -> None:
     state = {
         "document_catalog": {"a": {"text": "t", "source": "", "score": 1}},
         "cited_document_ids": ["missing"],
-        "cited_id_retry_count": 0,
+        "cited_id_check_retry_count": 0,
     }
     result = await graph.validate_cited_ids_node(state)
-    assert result["cited_id_retry_count"] == 1
-    assert "not in document_catalog" in result["cited_id_feedback"]
+    assert result["cited_id_check_retry_count"] == 1
+    assert "not in document_catalog" in result["cited_id_check_feedback"]
     assert "final_sources" not in result
 
 
@@ -107,10 +107,10 @@ async def test_validate_cited_ids_exhausted_sets_empty_sources(monkeypatch) -> N
     state = {
         "document_catalog": {"a": {"text": "t", "source": "", "score": 1}},
         "cited_document_ids": ["missing"],
-        "cited_id_retry_count": 0,
+        "cited_id_check_retry_count": 0,
     }
     result = await graph.validate_cited_ids_node(state)
-    assert result["cited_id_retry_count"] == 1
+    assert result["cited_id_check_retry_count"] == 1
     assert result["final_sources"] == []
 
 
@@ -137,7 +137,7 @@ async def test_faithfulness_pass_fills_sources(monkeypatch) -> None:
             "doc-1": {"text": "X is true", "source": "hotpotqa", "score": 0.8},
         },
         "messages": [answer_msg],
-        "answer_retry_count": 0,
+        "faithfulness_answer_retry_count": 0,
     }
     result = await graph.faithfulness_node(state)
     assert result["faithfulness_ok"] is True
@@ -170,10 +170,10 @@ async def test_faithfulness_fail_increments_answer_retry(monkeypatch) -> None:
             "doc-1": {"text": "other", "source": "pmc", "score": 0.2},
         },
         "messages": [answer_msg],
-        "answer_retry_count": 0,
+        "faithfulness_answer_retry_count": 0,
     }
     result = await graph.faithfulness_node(state)
     assert result["faithfulness_ok"] is False
-    assert result["answer_retry_count"] == 1
+    assert result["faithfulness_answer_retry_count"] == 1
     assert "unsupported claim" in result["faithfulness_feedback"]
     assert "final_sources" not in result

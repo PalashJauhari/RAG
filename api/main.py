@@ -297,7 +297,7 @@ def get_stream_event(
         event.update(
             {
                 "label": "Validating cited document ids",
-                "cited_id_retry_count": payload.get("cited_id_retry_count"),
+                "cited_id_check_retry_count": payload.get("cited_id_check_retry_count"),
             }
         )
     elif node_name == "faithfulness":
@@ -305,7 +305,7 @@ def get_stream_event(
             {
                 "label": "Checking faithfulness",
                 "faithfulness_ok": payload.get("faithfulness_ok"),
-                "answer_retry_count": payload.get("answer_retry_count"),
+                "faithfulness_answer_retry_count": payload.get("faithfulness_answer_retry_count"),
             }
         )
     elif node_name == "error_answer":

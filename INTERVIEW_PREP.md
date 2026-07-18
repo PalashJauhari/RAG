@@ -143,8 +143,7 @@ Created once by `fact_decomposition`, mutated in place by `recall_check` and
   "fact_id": 1,
   "fact": "Whether Enterprise tier has a published refund policy",
   "verification_status": false,
-  "verification_report": "",
-  "evidence_documents": [],
+  "evidence_document_ids": [],
   "search_queries": [],
   "gap_fill_explanation": ""
 }
@@ -162,8 +161,9 @@ handle insufficient context?").
 1. `recall_check` runs **one batched LLM call** (`verify_all_facts`) that, for every fact, asks:
    *"do the retrieved passages ALONE let a diligent reader infer this fact, without outside
    knowledge or guessing? Multi-hop chaining is only allowed if the bridge is explicit in the
-   text."* Each fact gets `verification_status` (bool), `verification_report` (rationale), and
-   `evidence_documents` (verbatim excerpts — schema-enforced non-empty iff supported).
+   text."* Each fact gets `verification_status` (bool) and `evidence_document_ids` (catalog
+   point ids — schema-enforced non-empty iff supported; membership checked against
+   `document_catalog` after the LLM returns).
 2. `route_after_recall_check` is a **first-match-wins** decision:
    - all facts supported → `answer`
    - `retrieval_retry_count >= RETRIEVAL_LOOP_MAX_RETRIES` (default 3) → `partial_answer`
@@ -277,9 +277,10 @@ Key validation logic worth knowing:
   because downstream code matches facts by exact text equality in a couple of places, duplicates
   would silently corrupt merges.
 - `VerifiedFact` enforces a **coupling rule** at the Pydantic level:
-  `verification_status=True` ⟺ `evidence_documents` non-empty. This means the LLM literally
-  cannot claim "supported" with no evidence, or "evidence exists" while claiming unsupported —
+  `verification_status=True` ⟺ `evidence_document_ids` non-empty. This means the LLM literally
+  cannot claim "supported" with no evidence ids, or cite ids while claiming unsupported —
   validation raises and the whole `ainvoke` fails (triggering the node's `RetryPolicy`).
+  After merge, code also raises if any evidence id is missing from `document_catalog`.
 - `GapFillFact.ensure_three_search_queries` deterministically pads to exactly 3 queries using
   fallback templates (`fact`, `"{fact} documents passages"`, `"{fact} keyword search"`, then
   numbered "alternate phrasing N") if the LLM returns fewer than 3 — so the contract "exactly 3
@@ -475,9 +476,9 @@ LLMs are unreliable self-graders under generation pressure — once they're mid-
 plausible-sounding completions are easy to produce even from thin evidence. Separating verification
 (a smaller, focused judgment: "is this one fact supported, yes/no, cite evidence") from generation
 (open-ended synthesis) produces a harder gate. The Pydantic-level coupling
-(`verification_status=True ⟺ evidence_documents non-empty`) removes an entire class of "claimed
-supported but didn't actually cite anything" failures at the schema layer, before the value even
-reaches application code.
+(`verification_status=True ⟺ evidence_document_ids non-empty`, plus catalog membership checks)
+removes an entire class of "claimed supported but didn't cite a real passage" failures at the
+schema/application layer, before the value is treated as verified.
 
 **Q: Why fixed top-k every pass instead of progressively widening it?**
 Stated explicitly in the README: "Retrieval limits are fixed every pass. Repair loops rely on new
@@ -579,26 +580,7 @@ These are candid observations from reading the code closely — some are genuine
 just inconsistencies or dead code worth cleaning up, all are good to have opinions on if asked.
 No changes were made to any of these; this is a punch list for you to pick from.
 
-1. **README/doc mismatch on recall verification.** The root `README.md` (§"How it works", step 5)
-   says: *"Verify recall with **one parallel LLM call per fact**."* But the actual
-   `recall_check_node` calls `verify_all_facts`, which is **one batched call for all facts**, not
-   parallel per-fact calls. The parallel path (`verify_single_fact` / `run_verification` in
-   `graph/graph.py`) exists in the code and is fully implemented, but is **never called** from any
-   graph node today — it's dead code kept "for comparison or fallback" per its own docstring. The
-   module-level docstring inside `graph/graph.py` and `observability/langfuse_handler.py` both
-   correctly describe the batched behavior — only the root README is stale. Worth deciding: update
-   the README, or actually switch to the parallel path (which would trade one big prompt for N
-   small concurrent ones — likely faster wall-clock, higher token overhead from repeated context).
-
-2. **`sources` field is permanently empty.** Both `prompts/final_answer.py` and
-   `prompts/partial_answer.py` explicitly instruct the LLM: *"Do not cite sources yet. The
-   `sources` field MUST be []."* So every `/run` response's `sources` array is `[]` by design,
-   every time. This looks like a half-shipped citation feature. If a source-attribution UI is
-   expected, this is the place to pick it back up. If it's intentionally deferred, it'd be worth a
-   one-line comment in the schema/prompt saying so isn't already implied strongly enough for future
-   maintainers.
-
-3. **`answer_node` / `partial_answer_node` have no `error_handler`.** In
+1. **`answer_node` / `partial_answer_node` have no `error_handler`.** In
    `RetrievalGraph.build_graph`, every LLM/retrieval node registers
    `error_handler=handle_node_failure` **except** `answer` and `partial_answer` (they only get a
    `retry_policy`). If the final-answer LLM call fails repeatedly (retries exhausted), the

@@ -18,7 +18,7 @@ def test_route_after_validate_valid_goes_to_faithfulness(monkeypatch) -> None:
     state = {
         "document_catalog": {"a": {"text": "t", "source": "", "score": 1}},
         "cited_document_ids": ["a"],
-        "cited_id_retry_count": 0,
+        "cited_id_check_retry_count": 0,
         "answer_mode": "full",
     }
     assert graph.route_after_validate_cited_ids(state) == "faithfulness"
@@ -30,7 +30,7 @@ def test_route_after_validate_invalid_retries_same_mode(monkeypatch) -> None:
     state = {
         "document_catalog": {"a": {"text": "t", "source": "", "score": 1}},
         "cited_document_ids": ["missing"],
-        "cited_id_retry_count": 1,
+        "cited_id_check_retry_count": 1,
         "answer_mode": "partial",
     }
     assert graph.route_after_validate_cited_ids(state) == "partial_answer"
@@ -42,7 +42,7 @@ def test_route_after_validate_exhausted_ends(monkeypatch) -> None:
     state = {
         "document_catalog": {"a": {"text": "t", "source": "", "score": 1}},
         "cited_document_ids": ["missing"],
-        "cited_id_retry_count": 2,
+        "cited_id_check_retry_count": 2,
         "answer_mode": "full",
     }
     assert graph.route_after_validate_cited_ids(state) == "end"
@@ -51,7 +51,7 @@ def test_route_after_validate_exhausted_ends(monkeypatch) -> None:
 def test_route_after_faithfulness_pass_ends(monkeypatch) -> None:
     monkeypatch.setattr(settings_module.settings, "answer_retry_max", 5)
     graph = make_graph()
-    assert graph.route_after_faithfulness({"faithfulness_ok": True, "answer_retry_count": 0}) == "end"
+    assert graph.route_after_faithfulness({"faithfulness_ok": True, "faithfulness_answer_retry_count": 0}) == "end"
 
 
 def test_route_after_faithfulness_fail_retries_mode(monkeypatch) -> None:
@@ -59,7 +59,7 @@ def test_route_after_faithfulness_fail_retries_mode(monkeypatch) -> None:
     graph = make_graph()
     state = {
         "faithfulness_ok": False,
-        "answer_retry_count": 1,
+        "faithfulness_answer_retry_count": 1,
         "answer_mode": "full",
     }
     assert graph.route_after_faithfulness(state) == "answer"

@@ -39,7 +39,7 @@ Optional Dash UI (port 8050): `python ui/dash_app.py`
 2. **Decompose** into an ordered `facts` list (`fact_id`, verification shell).
 3. **Route** on fact count: one fact → retrieve with the normalized query; multiple facts → split into focused queries.
 4. **Retrieve** with hybrid Qdrant search; repair passes exclude already-seen point ids (HasId) and dedupe by id.
-5. **Verify recall** with one parallel LLM call per fact against retrieved passages; update verification in place on the same `facts` list.
+5. **Verify recall** with one batched LLM call for all facts against retrieved passages; update verification in place on the same `facts` list.
 6. **Repair** unsupported facts via `create_queries_for_unsupported_facts` → `strategy_upgrade` → retrieval (until retries exhausted).
 7. **Answer** (or partial answer) with `cited_document_ids` from `document_catalog`.
 8. **Validate cited ids** (retry answer up to `CITED_ID_RETRY_MAX`), then **faithfulness** (retry up to `ANSWER_RETRY_MAX`); code fills `sources` from catalog.
@@ -51,8 +51,7 @@ Unified fact record:
   "fact_id": 1,
   "fact": "Whether Enterprise tier has a published refund policy",
   "verification_status": false,
-  "verification_report": "",
-  "evidence_documents": [],
+  "evidence_document_ids": [],
   "search_queries": [],
   "gap_fill_explanation": ""
 }

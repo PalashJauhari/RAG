@@ -18,13 +18,10 @@ class VerifiedFact(BaseModel):
     verification_status: bool = Field(
         description="True when retrieved passages alone support this fact.",
     )
-    verification_report: str = Field(
-        description="Brief rationale explaining why the fact is or is not supported.",
-    )
-    evidence_documents: list[str] = Field(
+    evidence_document_ids: list[str] = Field(
         default_factory=list,
         description=(
-            "Supporting excerpts copied from retrieved documents. Empty when "
+            "Catalog point ids that support this fact. Empty when "
             "verification_status is false."
         ),
     )
@@ -32,27 +29,25 @@ class VerifiedFact(BaseModel):
     @model_validator(mode="after")
     def validate_evidence_fields(self) -> "VerifiedFact":
         fact = self.fact.strip()
-        report = self.verification_report.strip()
-        evidence_documents = [
-            excerpt.strip() for excerpt in self.evidence_documents if excerpt and excerpt.strip()
+        evidence_document_ids = [
+            point_id.strip()
+            for point_id in self.evidence_document_ids
+            if point_id and str(point_id).strip()
         ]
         if not fact:
             raise ValueError("fact must be a non-empty string")
-        if not report:
-            raise ValueError("verification_report must be a non-empty string")
-        if self.verification_status and not evidence_documents:
+        if self.verification_status and not evidence_document_ids:
             raise ValueError(
-                "evidence_documents must be non-empty when verification_status is true"
+                "evidence_document_ids must be non-empty when verification_status is true"
             )
-        if not self.verification_status and evidence_documents:
+        if not self.verification_status and evidence_document_ids:
             raise ValueError(
-                "evidence_documents must be empty when verification_status is false"
+                "evidence_document_ids must be empty when verification_status is false"
             )
         return self.model_copy(
             update={
                 "fact": fact,
-                "verification_report": report,
-                "evidence_documents": evidence_documents,
+                "evidence_document_ids": evidence_document_ids,
             }
         )
 

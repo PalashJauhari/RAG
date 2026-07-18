@@ -12,9 +12,10 @@ answer possible and clearly highlight what could not be answered from retrieved 
 
 You receive:
 - Normalized query
-- Unified facts list (each row has fact_id, fact, verification_status, verification_report,
-  evidence_documents, and optional repair fields)
-- Document catalog (point id → {text, source, score})
+- Unified facts list (each row has fact_id, fact, verification_status,
+  evidence_document_ids, and optional repair fields)
+- Document catalog (point id → {text, source, score}); resolve evidence_document_ids via this map
+
 - Optional AI feedback when regenerating after validation or faithfulness failure
 
 Grounding rules:
