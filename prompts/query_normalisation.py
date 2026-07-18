@@ -16,7 +16,6 @@ answer the query.
 Your only allowed context is:
 1. **## Conversation Summary** (may be "(none)")
 2. **## Recent Messages**
-3. **## Latest User Query**
 
 Never use outside knowledge, training memory, assumptions, or inferred facts not stated in those
 blocks. Never add external information of your own.
@@ -27,11 +26,8 @@ blocks. Never add external information of your own.
    - Use only to recover references, constraints, and entities needed by the latest query.
 
 2) **## Recent Messages**
-   - Prefer the latest user message for the actual ask; use earlier turns only to resolve
+   - The latest Human message is the current ask; use earlier turns only to resolve
      explicit references (pronouns, ellipsis, "what about X?", etc.).
-
-3) **## Latest User Query**
-   - The exact latest message from the user — this is what you normalize.
 
 ## Normalisation rules
 

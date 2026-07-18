@@ -363,8 +363,9 @@ window.dash_clientside.rag_ui.submit_message = async function (
       const sources = data.sources || [];
       if (sources.length)
         content += "\n\nSources: " + sources.map(String).join(", ");
-      const rd = data.retrieved_docs || [];
-      if (rd.length) content += "\n\nRetrieved " + rd.length + " passages.";
+      const catalog = data.document_catalog || {};
+      const catalogCount = Object.keys(catalog).length;
+      if (catalogCount) content += "\n\nRetrieved " + catalogCount + " passages.";
       content = appendTimeTakenFooter(content, elapsedResume);
       chat.push({ role: "assistant", content: content });
       return [chat, false, "", ""];

@@ -211,12 +211,18 @@ def graph_run_response(session_id: str, final_state: dict[str, Any]) -> dict[str
                 answer = FinalAnswer(answer=content, sources=[], confidence="low")
                 break
 
+    if "final_sources" in final_state:
+        sources = list(final_state.get("final_sources") or [])
+    else:
+        sources = list(answer.sources)
+
     return {
         "session_id": session_id,
         "answer": answer.answer,
-        "sources": answer.sources,
+        "sources": sources,
         "confidence": answer.confidence,
-        "retrieved_docs": list(final_state.get("retrieved_documents") or []),
+        "document_catalog": dict(final_state.get("document_catalog") or {}),
+        "cited_document_ids": list(final_state.get("cited_document_ids") or []),
     }
 
 
@@ -230,10 +236,13 @@ def is_partial_answer(final_state: dict[str, Any]) -> bool:
 
 
 def retrieved_contexts_from_state(final_state: dict[str, Any]) -> list[str]:
-    """Extract raw passage strings from retrieved_documents."""
+    """Extract raw passage strings from document_catalog values."""
 
     contexts: list[str] = []
-    for row in final_state.get("retrieved_documents") or []:
+    catalog = final_state.get("document_catalog") or {}
+    if not isinstance(catalog, dict):
+        return contexts
+    for row in catalog.values():
         if not isinstance(row, dict):
             continue
         text = str(row.get("text") or "").strip()
@@ -333,7 +342,7 @@ async def run_graph_eval(config) -> tuple[list[dict[str, Any]], dict[str, Any]]:
 
             api = graph_run_response(session_id, final_state)
             retrieved_contexts = retrieved_contexts_from_state(final_state)
-            retrieved_documents = list(final_state.get("retrieved_documents") or [])
+            document_catalog = dict(final_state.get("document_catalog") or {})
 
             reference_contexts = [
                 context["text"] for context in record["contexts"] if context["is_supporting"]
@@ -358,9 +367,9 @@ async def run_graph_eval(config) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                     "graph_latency_ms": round(elapsed_ms, 3),
                     "retrieved_contexts": retrieved_contexts,
                     "retrieved_context_ids": [
-                        str(row.get("id") or "").strip()
-                        for row in retrieved_documents
-                        if isinstance(row, dict) and str(row.get("id") or "").strip()
+                        str(point_id).strip()
+                        for point_id in document_catalog.keys()
+                        if str(point_id).strip()
                     ],
                     "recall_sufficient": final_state.get("recall_sufficient"),
                     "retrieval_retry_count": final_state.get("retrieval_retry_count", 0),

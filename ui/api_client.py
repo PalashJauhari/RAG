@@ -33,7 +33,7 @@ class RagApiClient:
         """Blocking invoke: ``POST /run``.
 
         Returns:
-            Normalized response dict (answer, confidence, retrieved_docs, etc.).
+            Normalized response dict (answer, confidence, document_catalog, etc.).
         """
         return self.post_json(
             "/run",
@@ -109,5 +109,6 @@ class RagApiClient:
         data.setdefault("answer", None)
         data.setdefault("sources", [])
         data.setdefault("confidence", None)
-        data.setdefault("retrieved_docs", [])
+        data.setdefault("cited_document_ids", [])
+        data.setdefault("document_catalog", {})
         return data

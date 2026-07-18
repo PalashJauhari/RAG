@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     final_answer_model: str = "gpt-5.1"
     query_decomposition_model: str = "gpt-5-mini"
     gap_fill_model: str = "gpt-5-mini"
+    faithfulness_model: str = "gpt-5.4-mini"
 
     # --- Qdrant collection and vector names ---
     qdrant_url: str = ""
@@ -67,6 +68,10 @@ class Settings(BaseSettings):
     retrieval_loop_max_retries: int = 3
     # LangGraph RetryPolicy max attempts per node (transient failures; includes first run).
     graph_node_retry_max_attempts: int = 3
+    # Answer ↔ faithfulness repair budget (separate from retrieval_loop_max_retries).
+    answer_retry_max: int = 5
+    # cited_document_ids must ⊆ document_catalog keys; regenerate answer until this max.
+    cited_id_retry_max: int = 10
 
     # --- Long-context summarization (optional; see middleware.context_editing) ---
     message_summary_token_threshold: int = 100000

@@ -278,29 +278,45 @@ def get_stream_event(
                 "retrieval_loop_count": retrieval_loop_count,
             }
         )
-    elif node_name in {"answer", "partial_answer", "error_answer"}:
-        # Final answer lives in messages as JSON; parse for the ``final`` SSE frame.
-        allowed = (
-            {"answer_node"}
-            if node_name == "answer"
-            else {"partial_answer_node"}
-            if node_name == "partial_answer"
-            else {"error_answer_node"}
-        )
+    elif node_name in {"answer", "partial_answer"}:
+        allowed = {"answer_node"} if node_name == "answer" else {"partial_answer_node"}
         answer = final_answer_from_messages(
             list(payload.get("messages") or []),
             allowed_names=allowed,
         )
         event.update(
             {
+                "label": "Drafting answer" if node_name == "answer" else "Drafting partial answer",
+                "answer": answer.answer,
+                "cited_document_ids": answer.cited_document_ids,
+                "confidence": answer.confidence,
+                "retrieved_doc_count": retrieved_doc_count or 0,
+            }
+        )
+    elif node_name == "validate_cited_ids":
+        event.update(
+            {
+                "label": "Validating cited document ids",
+                "cited_id_retry_count": payload.get("cited_id_retry_count"),
+            }
+        )
+    elif node_name == "faithfulness":
+        event.update(
+            {
+                "label": "Checking faithfulness",
+                "faithfulness_ok": payload.get("faithfulness_ok"),
+                "answer_retry_count": payload.get("answer_retry_count"),
+            }
+        )
+    elif node_name == "error_answer":
+        answer = final_answer_from_messages(
+            list(payload.get("messages") or []),
+            allowed_names={"error_answer_node"},
+        )
+        event.update(
+            {
                 "type": "final",
-                "label": (
-                    "Answer ready"
-                    if node_name == "answer"
-                    else "Partial answer ready"
-                    if node_name == "partial_answer"
-                    else "Error — try again"
-                ),
+                "label": "Error — try again",
                 "answer": answer.answer,
                 "sources": answer.sources,
                 "confidence": answer.confidence,
@@ -320,17 +336,8 @@ def get_stream_event(
 def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
     """Normalize a completed graph invoke into the stable ``/run`` JSON shape.
 
-    Prefer ``AIMessage`` payloads from ``answer_node``, ``partial_answer_node``, or
-    ``error_answer_node`` (by
-    ``message.name``). Fall back to the last AI message if parsing fails. Interrupt
-    payloads surface ``interrupted`` and ``question`` for future ``/resume``.
-
-    Args:
-        session_id: Thread id echoed in the response.
-        result: Final state dict from ``RetrievalGraph.run`` or ``resume``.
-
-    Returns:
-        Dict with ``answer``, ``sources``, ``confidence``, and ``retrieved_docs``.
+    Prefer ``AIMessage`` payloads from answer/partial/error nodes.
+    ``sources`` use ``final_sources`` from state when present.
     """
 
     interrupts = result.get("__interrupt__") or []
@@ -344,7 +351,8 @@ def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
             "answer": None,
             "sources": [],
             "confidence": None,
-            "retrieved_docs": [],
+            "cited_document_ids": [],
+            "document_catalog": {},
         }
 
     messages = list(result.get("messages") or [])
@@ -356,19 +364,30 @@ def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
         for message in reversed(messages):
             content = message_content(message)
             if content:
-                answer = FinalAnswer(answer=content, sources=[], confidence="low")
+                answer = FinalAnswer(
+                    answer=content,
+                    cited_document_ids=[],
+                    sources=[],
+                    confidence="low",
+                )
                 break
 
-    retrieved_docs = list(result.get("retrieved_documents") or [])
+    if "final_sources" in result:
+        sources = list(result.get("final_sources") or [])
+    else:
+        sources = list(answer.sources)
 
     return {
         "session_id": session_id,
         "interrupted": False,
         "question": None,
         "answer": answer.answer,
-        "sources": answer.sources,
+        "sources": sources,
         "confidence": answer.confidence,
-        "retrieved_docs": retrieved_docs,
+        "cited_document_ids": list(
+            result.get("cited_document_ids") or answer.cited_document_ids or []
+        ),
+        "document_catalog": dict(result.get("document_catalog") or {}),
     }
 
 
@@ -393,6 +412,9 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
         # Map each LangGraph stream chunk to SSE; expose counts only to keep UI payloads light.
         retrieved_doc_count = 0
         retrieval_loop_count = 0
+        last_answer = ""
+        last_confidence = "low"
+        last_sources: list[str] = []
         try:
             async for update in app.state.retrieval_graph.stream_run(
                 request.session_id,
@@ -407,18 +429,65 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
                             payload.get("retrieval_retry_count", retrieval_loop_count)
                         )
                     if node_name == "retrieval":
-                        docs = payload.get("retrieved_documents") or []
-                        new_doc_count = len(docs) if isinstance(docs, list) else 0
-                        retrieved_doc_count += new_doc_count
-                yield encode_sse_frame(
-                    get_stream_event(
-                        request.session_id,
-                        update,
-                        retrieved_doc_count=retrieved_doc_count,
-                        new_doc_count=new_doc_count,
-                        retrieval_loop_count=retrieval_loop_count,
-                    )
+                        catalog = payload.get("document_catalog") or {}
+                        catalog_size = len(catalog) if isinstance(catalog, dict) else 0
+                        new_doc_count = max(0, catalog_size - retrieved_doc_count)
+                        retrieved_doc_count = catalog_size
+                    if node_name in {"answer", "partial_answer", "error_answer"}:
+                        allowed = (
+                            {"answer_node"}
+                            if node_name == "answer"
+                            else {"partial_answer_node"}
+                            if node_name == "partial_answer"
+                            else {"error_answer_node"}
+                        )
+                        parsed = final_answer_from_messages(
+                            list(payload.get("messages") or []),
+                            allowed_names=allowed,
+                        )
+                        if parsed.answer:
+                            last_answer = parsed.answer
+                            last_confidence = parsed.confidence
+                            last_sources = list(parsed.sources or [])
+                event = get_stream_event(
+                    request.session_id,
+                    update,
+                    retrieved_doc_count=retrieved_doc_count,
+                    new_doc_count=new_doc_count,
+                    retrieval_loop_count=retrieval_loop_count,
                 )
+                # Emit user-facing final only after validate/faithfulness settle (or error_answer).
+                if isinstance(update, dict) and update:
+                    node_name = next(iter(update))
+                    payload = update.get(node_name) or {}
+                    if node_name == "faithfulness":
+                        if payload.get("faithfulness_ok") or payload.get("final_sources") is not None:
+                            last_sources = list(payload.get("final_sources") or [])
+                            event = {
+                                "type": "final",
+                                "session_id": request.session_id,
+                                "node": node_name,
+                                "status": "completed",
+                                "label": "Answer ready",
+                                "answer": last_answer,
+                                "sources": last_sources,
+                                "confidence": last_confidence,
+                                "retrieved_doc_count": retrieved_doc_count,
+                            }
+                    elif node_name == "validate_cited_ids" and payload.get("final_sources") is not None:
+                        last_sources = []
+                        event = {
+                            "type": "final",
+                            "session_id": request.session_id,
+                            "node": node_name,
+                            "status": "completed",
+                            "label": "Answer ready",
+                            "answer": last_answer,
+                            "sources": [],
+                            "confidence": last_confidence,
+                            "retrieved_doc_count": retrieved_doc_count,
+                        }
+                yield encode_sse_frame(event)
             yield encode_sse_frame(
                 {
                     "type": "done",

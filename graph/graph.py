@@ -15,21 +15,23 @@ High-level flow (see repository README and ``artifacts/langgraph.png``)::
         → (optional) query_splitter
         → retrieval
         → recall_check
-        → [answer | create_queries_for_unsupported_facts → strategy_upgrade → retrieval]* 
-        → answer | partial_answer | error_answer
+        → [create_queries_for_unsupported_facts → strategy_upgrade → retrieval]*
+        → answer | partial_answer
+        → validate_cited_ids → faithfulness
         → END
 
 Repair loop (``*``): runs while facts fail recall and ``retrieval_retry_count <
 RETRIEVAL_LOOP_MAX_RETRIES``. Each repair pass uses new gap-fill queries and Qdrant
-HasId exclusion — not widened top-k.
+HasId exclusion via ``document_catalog`` keys — not widened top-k.
+
+After answer/partial: validate cited ids (retry up to CITED_ID_RETRY_MAX), then
+faithfulness (retry up to ANSWER_RETRY_MAX). error_answer skips both and ends.
 
 Checkpointing
 -----------
 - ``messages`` and ``message_summary`` persist on the thread between turns.
-- Turn scratch (``facts``, ``retrieved_documents``, etc.) is wiped via
+- Turn scratch (``facts``, ``document_catalog``, etc.) is wiped via
   :func:`prepare_state_for_next_question` at each ``/run`` / ``/run/stream`` invoke start.
-- ``retrieved_documents`` / ``retrieved_point_ids`` use ``operator.add`` reducers during
-  a turn so multiple retrieval passes accumulate; ``Overwrite`` clears them on reset.
 
 Unified fact record (in ``state["facts"]``)::
 
@@ -43,9 +45,9 @@ Unified fact record (in ``state["facts"]``)::
         "gap_fill_explanation": "",
     }
 
-Compact retrieved doc (in ``state["retrieved_documents"]`` during a turn)::
+Document catalog (in ``state["document_catalog"]`` during a turn)::
 
-    {"id": "<qdrant_point_id>", "score": float, "text": "<raw_text>"}
+    {"<qdrant_point_id>": {"text": "<raw_text>", "source": "<source or empty>", "score": float}}
 
 Module layout
 -------------
@@ -58,15 +60,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import operator
 from typing import Annotated, Any, AsyncIterator, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 # LangGraph: StateGraph builder, END sentinel, and add_messages reducer for messages key.
 from langgraph.errors import NodeError
 from langgraph.graph import END, StateGraph, add_messages
-# Overwrite replaces list reducer accumulators on reset; Command resumes interrupted graphs.
-from langgraph.types import Command, Overwrite, RetryPolicy
+# Command resumes interrupted graphs.
+from langgraph.types import Command, RetryPolicy
 
 from config.settings import settings
 # Optional long-context compaction (summarize + RemoveMessage); disabled below in normalisation node.
@@ -81,6 +82,7 @@ from observability.langfuse_handler import (
 )
 # Pydantic structured-output schemas — one per LLM step in the graph.
 from output_validation.fact_decomposition import RequiredFactsResult
+from output_validation.faithfulness import FaithfulnessResult
 from output_validation.final_answer import FinalAnswer
 from output_validation.gap_fill import GapFillResult
 from output_validation.recall_check import RecallVerifyResult, VerifiedFact
@@ -89,6 +91,7 @@ from output_validation.query_splitter import QuerySplitResult
 from output_validation.retrieval_strategy import RetrievalStrategy
 # System prompts (imported as *_PROMPT constants to avoid shadowing node method names).
 from prompts.final_answer import SYSTEM_PROMPT as FINAL_ANSWER_PROMPT
+from prompts.faithfulness import SYSTEM_PROMPT as FAITHFULNESS_PROMPT
 from prompts.gap_fill import SYSTEM_PROMPT as GAP_FILL_PROMPT
 from prompts.fact_decomposition import SYSTEM_PROMPT as FACT_DECOMPOSITION_PROMPT
 from prompts.recall_check import VERIFY_ALL_FACTS_PROMPT, VERIFY_SINGLE_FACT_PROMPT
@@ -97,7 +100,7 @@ from prompts.query_normalisation import SYSTEM_PROMPT as QUERY_NORMALISATION_PRO
 from prompts.query_splitter import SYSTEM_PROMPT as QUERY_SPLITTER_PROMPT
 from retriever.retriever import Retriever
 from tool_wrappers.prompt_plain import messages_to_plain_context
-from tool_wrappers.retrieval_payload import compact_documents_for_llm
+from tool_wrappers.retrieval_payload import catalog_entries_from_retriever_hits
 
 
 class RetrievalState(TypedDict, total=False):
@@ -105,11 +108,8 @@ class RetrievalState(TypedDict, total=False):
 
     Keys marked with reducers behave specially on merge:
     - ``messages``: ``add_messages`` — append HumanMessage / AIMessage; supports RemoveMessage.
-    - ``retrieved_documents``: ``operator.add`` — append new doc rows each retrieval pass.
-    - ``retrieved_point_ids``: ``operator.add`` — append seen Qdrant ids for HasId exclusion.
 
-    All other keys are replaced by the latest node output unless ``Overwrite`` is used in
-    :func:`prepare_state_for_next_question`.
+    All other keys are replaced by the latest node output.
     """
 
     # --- Conversation (persists across turns on the thread) ---
@@ -137,12 +137,8 @@ class RetrievalState(TypedDict, total=False):
     # normalized_query or query_splitter; replaced by create_queries_for_unsupported_facts
     # on repair.
 
-    retrieved_documents: Annotated[list[dict[str, Any]], operator.add]
-    # Turn-local corpus of compact docs ``{id, score, text}`` where text is raw_text.
-    # Accumulates across retrieval passes until the next invoke's prepare_state_for_next_question.
-
-    retrieved_point_ids: Annotated[list[str], operator.add]
-    # All Qdrant point ids seen this turn; fed to HasId must_not on subsequent retrieval.
+    document_catalog: dict[str, dict[str, Any]]
+    # Turn-local map point_id → {text, source, score}; merged across retrieval passes.
 
     # --- Fact scratch (reset each /run; recall_check mutates verification fields) ---
 
@@ -164,6 +160,26 @@ class RetrievalState(TypedDict, total=False):
 
     graph_failure: dict[str, Any]
     # Node-level retry exhaustion context from ``handle_node_failure``.
+
+    # --- Answer / citation / faithfulness scratch ---
+
+    cited_document_ids: list[str]
+    # Point ids returned by answer/partial_answer for grounding.
+
+    cited_id_retry_count: int
+    # Increments when cited ids are not in document_catalog.
+
+    answer_mode: str
+    # ``full`` or ``partial`` — faithfulness/validate retries return to the same mode.
+
+    answer_retry_count: int
+    # Increments when faithfulness fails (separate from retrieval_retry_count).
+
+    faithfulness_ok: bool
+    faithfulness_feedback: str
+    cited_id_feedback: str
+    final_sources: list[str]
+    # Code-built source labels after faithfulness pass (non-empty catalog.source only).
 
 
 ERROR_ANSWER_USER_MESSAGE = "An error occurred while processing your request. Please try again."
@@ -454,21 +470,133 @@ def late_interaction_enabled() -> bool:
     return settings.use_late_interaction and bool(settings.jina_api_key.strip())
 
 
+def merge_document_catalog(
+    existing: dict[str, dict[str, Any]] | None,
+    new_rows: dict[str, dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    """Merge catalog maps; existing keys win on id collision."""
+
+    merged = dict(existing or {})
+    for point_id, row in (new_rows or {}).items():
+        key = str(point_id).strip()
+        if not key or key in merged:
+            continue
+        merged[key] = row
+    return merged
+
+
+def catalog_texts_for_prompt(catalog: dict[str, dict[str, Any]] | None) -> list[str]:
+    """Return non-empty catalog passage texts for gap-fill prompts."""
+
+    texts: list[str] = []
+    for row in (catalog or {}).values():
+        text = str((row or {}).get("text") or "").strip()
+        if text:
+            texts.append(text)
+    return texts
+
+
+def catalog_docs_block(catalog: dict[str, dict[str, Any]] | None) -> str:
+    """Numbered passage block from document_catalog for recall/answer prompts."""
+
+    lines: list[str] = []
+    for index, (point_id, row) in enumerate((catalog or {}).items(), start=1):
+        row = row or {}
+        text = str(row.get("text") or "")
+        score = row.get("score")
+        lines.append(f"[{index}] (id={point_id}, score={score}) {text}")
+    return "\n".join(lines) if lines else "(none)"
+
+
+def build_sources_from_catalog(
+    catalog: dict[str, dict[str, Any]] | None,
+    cited_ids: list[str] | None,
+) -> list[str]:
+    """Collect non-empty source labels for cited ids (skip missing / empty source)."""
+
+    catalog = catalog or {}
+    sources: list[str] = []
+    seen: set[str] = set()
+    for point_id in cited_ids or []:
+        key = str(point_id).strip()
+        row = catalog.get(key) or {}
+        source = str(row.get("source") or "").strip()
+        if not source or source in seen:
+            continue
+        seen.add(source)
+        sources.append(source)
+    return sources
+
+
+def cited_ids_valid(
+    cited_ids: list[str] | None,
+    catalog: dict[str, dict[str, Any]] | None,
+) -> tuple[bool, list[str]]:
+    """Return (ok, invalid_ids) for cited_document_ids against catalog keys."""
+
+    keys = set((catalog or {}).keys())
+    invalid: list[str] = []
+    for point_id in cited_ids or []:
+        key = str(point_id).strip()
+        if not key or key not in keys:
+            invalid.append(str(point_id))
+    return (len(invalid) == 0, invalid)
+
+
+def answer_feedback_messages(state: RetrievalState) -> list[Any]:
+    """Build AIMessage feedback blocks for answer/partial regeneration."""
+
+    messages: list[Any] = []
+    cited_feedback = str(state.get("cited_id_feedback") or "").strip()
+    if cited_feedback:
+        messages.append(AIMessage(content=cited_feedback))
+    faithfulness_feedback = str(state.get("faithfulness_feedback") or "").strip()
+    if faithfulness_feedback:
+        messages.append(AIMessage(content=faithfulness_feedback))
+    return messages
+
+
+def patch_answer_message_sources(
+    messages: list[Any],
+    *,
+    allowed_names: set[str],
+    sources: list[str],
+) -> list[AIMessage]:
+    """Return a replacement AIMessage for the latest matching answer with sources filled."""
+
+    for message in reversed(messages or []):
+        name = getattr(message, "name", None) if not isinstance(message, dict) else message.get("name")
+        if name not in allowed_names:
+            continue
+        content = getattr(message, "content", None) if not isinstance(message, dict) else message.get("content")
+        try:
+            payload = json.loads(content) if isinstance(content, str) else {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payload = {**payload, "sources": list(sources)}
+        return [
+            build_node_ai_message(
+                node_name=str(name),
+                payload=payload,
+                raw=message if isinstance(message, AIMessage) else None,
+            )
+        ]
+    return []
+
+
 def prepare_state_for_next_question(user_query: str) -> dict[str, Any]:
     """Build the state patch for a new user turn before ``graph.ainvoke``.
 
     Appends one ``HumanMessage`` and wipes all per-turn scratch so a prior turn's facts,
-    retrieved corpus, and retry counters do not carry over on the same thread.
-
-    Uses ``Overwrite([])`` on list reducers so accumulated docs/ids are replaced rather
-    than appended to stale checkpoint values.
+    catalog, and retry counters do not carry over on the same thread.
 
     Args:
         user_query: Raw user message text for this turn.
 
     Returns:
-        State merge dict with ``messages`` plus empty scratch fields
-        (``normalized_query``, ``facts``, ``retrieved_documents``, etc.).
+        State merge dict with ``messages`` plus empty scratch fields.
     """
 
     return {
@@ -476,13 +604,20 @@ def prepare_state_for_next_question(user_query: str) -> dict[str, Any]:
         "normalized_query": "",
         "retrieval_strategy": "",
         "active_retrieval_queries": [],
-        "retrieved_documents": Overwrite(value=[]),
-        "retrieved_point_ids": Overwrite(value=[]),
+        "document_catalog": {},
         "facts": [],
         "needs_split": False,
         "recall_sufficient": False,
         "retrieval_retry_count": 0,
         "graph_failure": {},
+        "cited_document_ids": [],
+        "cited_id_retry_count": 0,
+        "answer_mode": "",
+        "answer_retry_count": 0,
+        "faithfulness_ok": False,
+        "faithfulness_feedback": "",
+        "cited_id_feedback": "",
+        "final_sources": [],
     }
 
 
@@ -603,9 +738,7 @@ class RetrievalGraph:
             "## Conversation Summary\n"
             f"{summary or '(none)'}\n\n"
             "## Recent Messages\n"
-            f"{messages_to_plain_context(kept_messages)}\n\n"
-            "## Latest User Query\n"
-            f"{latest_user_query}"
+            f"{messages_to_plain_context(kept_messages)}"
         )
         # Structured LLM output → QueryNormalisationResult (standalone query).
         llm = get_llm_client(
@@ -811,35 +944,26 @@ class RetrievalGraph:
     # --- Retrieval, recall check, and repair loop ---
 
     async def retrieval_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Retrieve passages from Qdrant using active queries and strategy; append to corpus.
+        """Retrieve passages from Qdrant; merge into document_catalog.
 
         Purpose:
             Fetch candidate chunks for recall_check and answer generation. During repair
-            loops, new queries run against the same collection but exclude already-seen
-            point ids (HasId must_not) so each pass adds fresh evidence.
+            loops, new queries exclude already-seen point ids (HasId must_not) from
+            ``document_catalog`` keys so each pass adds fresh evidence.
 
         Reads:
-            ``active_retrieval_queries`` — one or more search strings for this pass.
-            ``retrieval_strategy`` — Qdrant tier (BM25, hybrid, ColBERT late-interaction).
-            ``normalized_query`` — fallback when active queries are empty.
-            ``retrieved_point_ids`` — ids to exclude on repair passes.
+            ``active_retrieval_queries``, ``retrieval_strategy``, ``normalized_query``,
+            ``document_catalog``
 
         Writes:
-            ``retrieved_documents`` — **delta** rows appended via ``operator.add`` reducer.
-            ``retrieved_point_ids`` — **delta** new ids appended for exclusion next pass.
-            ``retrieval_strategy`` — normalized/fallback tier actually used.
-            ``active_retrieval_queries`` — echo of queries used (for Langfuse / debugging).
-
-        Retriever:
-            ``self.retriever.retrieve(...)`` with ``top_k`` and candidate limits from settings.
-            Output slimmed by :func:`compact_documents_for_llm` before state merge.
+            ``document_catalog`` — merged map of new point ids.
+            ``retrieval_strategy``, ``active_retrieval_queries``
 
         Routes to:
             ``recall_check`` (fixed edge).
         """
 
         raw_strategy = str(state.get("retrieval_strategy") or "").strip()
-        # Unknown or empty tier → safe hybrid default for this pass.
         strategy: RetrievalStrategy = raw_strategy if raw_strategy in {"fast_retrieval", "fast_bm25_retrieval", "keyword", "fast_bm25_late_interaction_retrieval"} else "fast_bm25_retrieval"
         if strategy == "fast_bm25_late_interaction_retrieval" and not late_interaction_enabled():
             strategy = "fast_bm25_retrieval"
@@ -853,12 +977,10 @@ class RetrievalGraph:
             fallback = str(state.get("normalized_query") or "").strip()
             search_queries = [fallback] if fallback else []
 
-        # HasId exclusion: Qdrant skips chunks already retrieved this turn (repair loops).
-        exclude_ids = list(state.get("retrieved_point_ids") or []) or None
-        seen_ids = set(state.get("retrieved_point_ids") or [])
+        existing_catalog = dict(state.get("document_catalog") or {})
+        exclude_ids = list(existing_catalog.keys()) or None
 
-        async def run_retrieval() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-            # Retriever may run multiple sub-queries; merge/dedup happens inside Retriever.
+        async def run_retrieval() -> dict[str, dict[str, Any]]:
             ranked_hits = await self.retriever.retrieve(
                 search_queries,
                 strategy=strategy,
@@ -868,38 +990,26 @@ class RetrievalGraph:
                 late_interaction_limit=settings.retrieval_candidate_for_late_interaction,
                 exclude_point_ids=exclude_ids,
             )
-            # Slim payloads (raw_text, id, score) for LLM nodes; dedup vs checkpoint seen_ids.
-            compact_document_rows = compact_documents_for_llm(ranked_hits)
-            documents_to_add: list[dict[str, Any]] = []
-            new_point_ids: list[str] = []
-            for row in compact_document_rows:
-                point_id = str(row.get("id") or "").strip()
-                if point_id and point_id not in seen_ids:
-                    documents_to_add.append(row)
-                    seen_ids.add(point_id)
-                    new_point_ids.append(point_id)
-            return compact_document_rows, documents_to_add, new_point_ids
+            new_entries = catalog_entries_from_retriever_hits(ranked_hits)
+            return merge_document_catalog(existing_catalog, new_entries)
 
         if settings.langfuse_tracing_enabled:
             langfuse = get_langfuse_client()
             with langfuse.start_as_current_observation(as_type="span", name="retrieval") as node_span:
-                _, documents_to_add, new_point_ids = await run_retrieval()
-                already_available_documents = list(state.get("retrieved_documents") or [])
+                merged_catalog = await run_retrieval()
                 node_span.update(
                     output={
                         "retrieval_strategy": strategy,
                         "active_retrieval_queries": search_queries,
                         "late_interaction_enabled": late_interaction_enabled(),
-                        "documents_to_add": documents_to_add,
-                        "retrieved_documents": already_available_documents + documents_to_add,
+                        "document_catalog_size": len(merged_catalog),
                     }
                 )
         else:
-            _, documents_to_add, new_point_ids = await run_retrieval()
+            merged_catalog = await run_retrieval()
 
         return {
-            "retrieved_documents": documents_to_add,
-            "retrieved_point_ids": new_point_ids,
+            "document_catalog": merged_catalog,
             "retrieval_strategy": strategy,
             "active_retrieval_queries": search_queries,
         }
@@ -923,9 +1033,7 @@ class RetrievalGraph:
                     "gap_fill_explanation": "",
                 }
 
-            retrieved_documents: list[dict] — compact corpus from retrieval, e.g.::
-
-                {"id": "...", "score": 0.9, "text": "<raw passage>"}
+            document_catalog: map of point id → {text, source, score}.
 
         Output (state merge):
             facts: list[dict] — same rows with verification fields set per fact.
@@ -940,12 +1048,8 @@ class RetrievalGraph:
         if not facts:
             raise ValueError("recall_check requires facts from fact_decomposition")
 
-        retrieved_docs = list(state.get("retrieved_documents") or [])
-        doc_lines = [
-            f"[{i}] (id={row.get('id')}, score={row.get('score')}) {row.get('text') or ''}"
-            for i, row in enumerate(retrieved_docs, start=1)
-        ]
-        docs_block = "\n".join(doc_lines) if doc_lines else "(none)"
+        catalog = dict(state.get("document_catalog") or {})
+        docs_block = catalog_docs_block(catalog)
 
         if settings.langfuse_tracing_enabled:
             langfuse = get_langfuse_client()
@@ -963,7 +1067,7 @@ class RetrievalGraph:
                         "unsupported_facts": unsupported,
                         "unsupported_fact_count": len(unsupported),
                         "recall_sufficient": recall_sufficient,
-                        "retrieved_documents": retrieved_docs,
+                        "document_catalog_size": len(catalog),
                     }
                 )
         else:
@@ -990,7 +1094,7 @@ class RetrievalGraph:
 
         Reads:
             ``facts`` (full list), ``normalized_query``, ``active_retrieval_queries``,
-            ``retrieved_documents`` (prior corpus for context).
+            ``document_catalog`` (prior corpus texts only in the prompt).
 
         Writes:
             ``facts`` — unsupported rows get ``search_queries`` + ``gap_fill_explanation``.
@@ -1012,8 +1116,8 @@ class RetrievalGraph:
             f"{json.dumps(unsupported, ensure_ascii=False)}\n\n"
             "## Prior active retrieval queries\n"
             f"{json.dumps(state.get('active_retrieval_queries') or [], ensure_ascii=False)}\n\n"
-            "## Retrieved documents\n"
-            f"{json.dumps(state.get('retrieved_documents') or [], ensure_ascii=False)}"
+            "## Retrieved document texts\n"
+            f"{json.dumps(catalog_texts_for_prompt(state.get('document_catalog') or {}), ensure_ascii=False)}"
         )
         llm = get_llm_client(
             model=settings.gap_fill_model,
@@ -1108,30 +1212,16 @@ class RetrievalGraph:
     async def answer_node(self, state: RetrievalState) -> dict[str, Any]:
         """Synthesize a grounded final answer when all facts passed recall verification.
 
-        Purpose:
-            Produce user-facing ``FinalAnswer`` JSON (answer text, sources, confidence)
-            from the accumulated retrieved corpus. Only reached when ``recall_sufficient`` is True.
-
-        Reads:
-            ``normalized_query``, ``retrieved_documents``
-
-        Writes:
-            ``messages`` — one AIMessage via :func:`build_node_ai_message` with
-            ``name="answer_node"``; API parses ``content`` JSON for the SSE ``final`` frame.
-
-        LLM:
-            Model: ``settings.final_answer_model``
-            Schema: ``FinalAnswer``
-
-        Routes to:
-            ``END`` (terminal node).
+        Writes ``answer_mode=full``, ``cited_document_ids``, and an AIMessage JSON payload.
+        Routes to ``validate_cited_ids``.
         """
 
+        catalog = dict(state.get("document_catalog") or {})
         context = (
             "## Normalized query\n"
             f"{state.get('normalized_query') or ''}\n\n"
-            "## Retrieved documents\n"
-            f"{json.dumps(state.get('retrieved_documents') or [], ensure_ascii=False)}"
+            "## Document catalog\n"
+            f"{json.dumps(catalog, ensure_ascii=False)}"
         )
         llm = get_llm_client(
             model=settings.final_answer_model,
@@ -1140,6 +1230,7 @@ class RetrievalGraph:
         )
         messages_for_llm = [
             SystemMessage(content=FINAL_ANSWER_PROMPT),
+            *answer_feedback_messages(state),
             HumanMessage(content=context),
         ]
         model = settings.final_answer_model
@@ -1152,12 +1243,14 @@ class RetrievalGraph:
                 response = result["parsed"]
                 raw = result["raw"]
                 answer = response.model_dump()
+                answer["sources"] = []
                 preview = (answer.get("answer") or "")[:200]
                 node_span.update(
                     output={
                         "confidence": answer.get("confidence"),
                         "answer": preview,
-                        "retrieved_documents": state.get("retrieved_documents") or [],
+                        "cited_document_ids": answer.get("cited_document_ids") or [],
+                        "document_catalog_size": len(catalog),
                     }
                 )
         else:
@@ -1165,25 +1258,31 @@ class RetrievalGraph:
             response = result["parsed"]
             raw = result["raw"]
             answer = response.model_dump()
+            answer["sources"] = []
         return {
+            "answer_mode": "full",
+            "cited_document_ids": list(answer.get("cited_document_ids") or []),
+            "cited_id_feedback": "",
+            "faithfulness_feedback": "",
             "messages": [
                 build_node_ai_message(node_name="answer_node", payload=answer, raw=raw)
-            ]
+            ],
         }
 
     async def partial_answer_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Emit grounded partial answer when retry budgets are exhausted.
+        """Emit grounded partial answer when retrieval retry budgets are exhausted.
 
-        Includes per-fact verification in the prompt. Routes to ``END``.
+        Writes ``answer_mode=partial`` and routes to ``validate_cited_ids``.
         """
 
+        catalog = dict(state.get("document_catalog") or {})
         context = (
             "## Normalized query\n"
             f"{state.get('normalized_query') or ''}\n\n"
             "## Facts\n"
             f"{json.dumps(state.get('facts') or [], ensure_ascii=False)}\n\n"
-            "## Retrieved documents\n"
-            f"{json.dumps(state.get('retrieved_documents') or [], ensure_ascii=False)}"
+            "## Document catalog\n"
+            f"{json.dumps(catalog, ensure_ascii=False)}"
         )
         llm = get_llm_client(
             model=settings.final_answer_model,
@@ -1192,6 +1291,7 @@ class RetrievalGraph:
         )
         messages_for_llm = [
             SystemMessage(content=PARTIAL_ANSWER_PROMPT),
+            *answer_feedback_messages(state),
             HumanMessage(content=context),
         ]
         model = settings.final_answer_model
@@ -1204,12 +1304,14 @@ class RetrievalGraph:
                 response = result["parsed"]
                 raw = result["raw"]
                 answer = response.model_dump()
+                answer["sources"] = []
                 preview = (answer.get("answer") or "")[:200]
                 node_span.update(
                     output={
                         "confidence": answer.get("confidence"),
                         "answer": preview,
-                        "retrieved_documents": state.get("retrieved_documents") or [],
+                        "cited_document_ids": answer.get("cited_document_ids") or [],
+                        "document_catalog_size": len(catalog),
                     }
                 )
         else:
@@ -1217,16 +1319,29 @@ class RetrievalGraph:
             response = result["parsed"]
             raw = result["raw"]
             answer = response.model_dump()
+            answer["sources"] = []
         return {
+            "answer_mode": "partial",
+            "cited_document_ids": list(answer.get("cited_document_ids") or []),
+            "cited_id_feedback": "",
+            "faithfulness_feedback": "",
             "messages": [
                 build_node_ai_message(node_name="partial_answer_node", payload=answer, raw=raw)
-            ]
+            ],
         }
 
     async def error_answer_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Emit deterministic user-facing fallback after node retries are exhausted."""
+        """Emit deterministic user-facing fallback after node retries are exhausted.
 
-        payload = FinalAnswer(answer=ERROR_ANSWER_USER_MESSAGE, sources=[], confidence="low").model_dump()
+        Skips validate_cited_ids and faithfulness (routes straight to END).
+        """
+
+        payload = FinalAnswer(
+            answer=ERROR_ANSWER_USER_MESSAGE,
+            cited_document_ids=[],
+            sources=[],
+            confidence="low",
+        ).model_dump()
         if settings.langfuse_tracing_enabled:
             langfuse = get_langfuse_client()
             with langfuse.start_as_current_observation(as_type="span", name="error_answer") as node_span:
@@ -1237,7 +1352,144 @@ class RetrievalGraph:
                         "graph_failure": state.get("graph_failure") or {},
                     }
                 )
-        return {"messages": [build_node_ai_message(node_name="error_answer_node", payload=payload)]}
+        return {
+            "cited_document_ids": [],
+            "final_sources": [],
+            "messages": [build_node_ai_message(node_name="error_answer_node", payload=payload)],
+        }
+
+    async def validate_cited_ids_node(self, state: RetrievalState) -> dict[str, Any]:
+        """Ensure cited_document_ids are keys in document_catalog (no LLM).
+
+        Invalid ids: increment cited_id_retry_count and set AI feedback for answer retry.
+        Exhausted: set final_sources=[] and route to END via router.
+        """
+
+        catalog = dict(state.get("document_catalog") or {})
+        cited_ids = list(state.get("cited_document_ids") or [])
+        ok, invalid = cited_ids_valid(cited_ids, catalog)
+        if ok:
+            return {
+                "cited_id_feedback": "",
+            }
+
+        retry_count = int(state.get("cited_id_retry_count") or 0) + 1
+        feedback = (
+            "Cited document id validation failed. These ids are not in document_catalog: "
+            f"{json.dumps(invalid, ensure_ascii=False)}. "
+            "Regenerate the answer using only valid catalog point ids. sources must stay []."
+        )
+        merge: dict[str, Any] = {
+            "cited_id_retry_count": retry_count,
+            "cited_id_feedback": feedback,
+        }
+        if retry_count >= settings.cited_id_retry_max:
+            merge["final_sources"] = []
+        if settings.langfuse_tracing_enabled:
+            langfuse = get_langfuse_client()
+            with langfuse.start_as_current_observation(as_type="span", name="validate_cited_ids") as node_span:
+                node_span.update(
+                    output={
+                        "valid": False,
+                        "invalid_ids": invalid,
+                        "cited_id_retry_count": retry_count,
+                        "exhausted": retry_count >= settings.cited_id_retry_max,
+                    }
+                )
+        return merge
+
+    async def faithfulness_node(self, state: RetrievalState) -> dict[str, Any]:
+        """Verify the answer is grounded in cited catalog passages only.
+
+        On pass: fill sources from catalog and patch the answer AIMessage.
+        On fail: increment answer_retry_count and set faithfulness_feedback for retry.
+        """
+
+        catalog = dict(state.get("document_catalog") or {})
+        cited_ids = [str(point_id).strip() for point_id in (state.get("cited_document_ids") or []) if str(point_id).strip()]
+        answer_mode = str(state.get("answer_mode") or "full")
+        allowed_names = {"answer_node"} if answer_mode == "full" else {"partial_answer_node"}
+
+        answer_text = ""
+        for message in reversed(state.get("messages") or []):
+            name = getattr(message, "name", None)
+            if name not in allowed_names:
+                continue
+            content = getattr(message, "content", None)
+            try:
+                payload = json.loads(content) if isinstance(content, str) else {}
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(payload, dict):
+                answer_text = str(payload.get("answer") or "")
+            break
+
+        cited_passages = {
+            point_id: {
+                "text": (catalog.get(point_id) or {}).get("text"),
+                "source": (catalog.get(point_id) or {}).get("source"),
+            }
+            for point_id in cited_ids
+            if point_id in catalog
+        }
+        human_content = (
+            f"## Answer\n{answer_text}\n\n"
+            f"## Cited passages\n{json.dumps(cited_passages, ensure_ascii=False)}"
+        )
+        llm = get_llm_client(
+            model=settings.faithfulness_model,
+            output_schema=FaithfulnessResult,
+            include_raw=True,
+        )
+        messages_for_llm = [
+            SystemMessage(content=FAITHFULNESS_PROMPT),
+            HumanMessage(content=human_content),
+        ]
+        model = settings.faithfulness_model
+
+        if settings.langfuse_tracing_enabled:
+            langfuse = get_langfuse_client()
+            with langfuse.start_as_current_observation(as_type="span", name="faithfulness") as node_span:
+                with langfuse.start_as_current_observation(as_type="generation", name="faithfulness-llm", model=model) as gen:
+                    result = await llm.ainvoke(messages_for_llm)
+                    update_llm_generation(gen, model=model, raw=result.get("raw"))
+                parsed = result["parsed"]
+                node_span.update(output={"passed": parsed.passed, "reason": parsed.reason})
+        else:
+            result = await llm.ainvoke(messages_for_llm)
+            parsed = result["parsed"]
+
+        if parsed.passed:
+            sources = build_sources_from_catalog(catalog, cited_ids)
+            patched = patch_answer_message_sources(
+                list(state.get("messages") or []),
+                allowed_names=allowed_names,
+                sources=sources,
+            )
+            merge: dict[str, Any] = {
+                "faithfulness_ok": True,
+                "faithfulness_feedback": "",
+                "final_sources": sources,
+            }
+            if patched:
+                merge["messages"] = patched
+            return merge
+
+        retry_count = int(state.get("answer_retry_count") or 0) + 1
+        feedback = (
+            "Faithfulness check failed. The answer is not fully supported by the cited "
+            f"passages. Reason: {parsed.reason.strip()}. "
+            "Regenerate a grounded answer. cited_document_ids must be valid catalog ids; "
+            "sources must stay []."
+        )
+        merge = {
+            "faithfulness_ok": False,
+            "faithfulness_feedback": feedback,
+            "answer_retry_count": retry_count,
+        }
+        if retry_count >= settings.answer_retry_max:
+            merge["final_sources"] = []
+        return merge
 
     # --- Conditional routing ---
 
@@ -1262,19 +1514,48 @@ class RetrievalGraph:
             return "partial_answer"
         return "create_queries_for_unsupported_facts"
 
+    def route_after_validate_cited_ids(self, state: RetrievalState) -> str:
+        """Route after cited-id validation."""
+
+        catalog = dict(state.get("document_catalog") or {})
+        ok, _invalid = cited_ids_valid(state.get("cited_document_ids") or [], catalog)
+        if ok:
+            return "faithfulness"
+        if int(state.get("cited_id_retry_count") or 0) >= settings.cited_id_retry_max:
+            return "end"
+        if str(state.get("answer_mode") or "") == "partial":
+            return "partial_answer"
+        return "answer"
+
+    def route_after_faithfulness(self, state: RetrievalState) -> str:
+        """Route after faithfulness check."""
+
+        if state.get("faithfulness_ok"):
+            return "end"
+        if int(state.get("answer_retry_count") or 0) >= settings.answer_retry_max:
+            return "end"
+        if str(state.get("answer_mode") or "") == "partial":
+            return "partial_answer"
+        return "answer"
+
+    def route_answer_mode(self, state: RetrievalState) -> str:
+        """Return answer or partial_answer from answer_mode (unused helper for tests)."""
+
+        if str(state.get("answer_mode") or "") == "partial":
+            return "partial_answer"
+        return "answer"
+
     # --- Graph wiring ---
 
     def build_graph(self) -> Any:
         """Wire nodes and compile the LangGraph with a session checkpointer.
 
         Repair loop: recall_check → create_queries_for_unsupported_facts → strategy_upgrade → retrieval → recall_check.
-        Success exits: recall_check → answer → END.
-        Budget exhausted: recall_check → partial_answer → END.
+        Answer path: answer|partial_answer → validate_cited_ids → faithfulness → END (with retries).
         Retry exhaustion on configured nodes: handle_node_failure → error_answer → END.
         """
         builder = StateGraph(RetrievalState)
         node_retry = RetryPolicy(max_attempts=settings.graph_node_retry_max_attempts, initial_interval=1.0, backoff_factor=2.0)
-        # Node names must match strings returned by route_after_* for conditional_edges.
         builder.add_node("query_normalisation", self.query_normalisation_node, retry_policy=node_retry, error_handler=handle_node_failure)
         builder.add_node("fact_decomposition", self.fact_decomposition_node, retry_policy=node_retry, error_handler=handle_node_failure)
         builder.add_node("query_complexity", self.query_complexity_node)
@@ -1285,12 +1566,13 @@ class RetrievalGraph:
         builder.add_node("strategy_upgrade", self.strategy_upgrade_node)
         builder.add_node("answer", self.answer_node, retry_policy=node_retry)
         builder.add_node("partial_answer", self.partial_answer_node, retry_policy=node_retry)
+        builder.add_node("validate_cited_ids", self.validate_cited_ids_node)
+        builder.add_node("faithfulness", self.faithfulness_node, retry_policy=node_retry, error_handler=handle_node_failure)
         builder.add_node("error_answer", self.error_answer_node)
 
         builder.set_entry_point("query_normalisation")
         builder.add_edge("query_normalisation", "fact_decomposition")
         builder.add_edge("fact_decomposition", "query_complexity")
-        # Dict keys must equal route_after_complexity return values (retrieval | query_splitter).
         builder.add_conditional_edges(
             "query_complexity",
             self.route_after_complexity,
@@ -1300,7 +1582,6 @@ class RetrievalGraph:
             },
         )
         builder.add_edge("query_splitter", "retrieval")
-        # Post-retrieval: verify corpus covers facts; repair or answer.
         builder.add_edge("retrieval", "recall_check")
         builder.add_conditional_edges(
             "recall_check",
@@ -1313,10 +1594,28 @@ class RetrievalGraph:
         )
         builder.add_edge("create_queries_for_unsupported_facts", "strategy_upgrade")
         builder.add_edge("strategy_upgrade", "retrieval")
-        builder.add_edge("answer", END)
-        builder.add_edge("partial_answer", END)
+        builder.add_edge("answer", "validate_cited_ids")
+        builder.add_edge("partial_answer", "validate_cited_ids")
+        builder.add_conditional_edges(
+            "validate_cited_ids",
+            self.route_after_validate_cited_ids,
+            {
+                "faithfulness": "faithfulness",
+                "answer": "answer",
+                "partial_answer": "partial_answer",
+                "end": END,
+            },
+        )
+        builder.add_conditional_edges(
+            "faithfulness",
+            self.route_after_faithfulness,
+            {
+                "answer": "answer",
+                "partial_answer": "partial_answer",
+                "end": END,
+            },
+        )
         builder.add_edge("error_answer", END)
-        # Persists checkpoints keyed by thread_id (session_id from the API).
         return builder.compile(checkpointer=self.checkpointer)
 
     # --- Public invoke API (called from api.main) ---
