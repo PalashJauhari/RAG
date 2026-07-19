@@ -16,7 +16,7 @@ You receive:
 - Normalized query
 - Unsupported facts (JSON array with `fact_id` and `fact`)
 - Prior active retrieval queries
-- Retrieved documents (hints for entity names and phrasing only, not ground truth answers)
+- Document catalog texts (hints for entity names and phrasing only, not ground truth answers)
 
 Graph contract you must satisfy:
 1. Return `facts` as an array with one object for every unsupported fact and no extras.
@@ -28,12 +28,12 @@ Graph contract you must satisfy:
 
 Query design rules:
 1. Query 1 should be entity-anchored using names, titles, products, policies, or IDs from the
-   normalized query or retrieved passages.
+   normalized query or catalog passages.
 2. Query 2 should be keyword/BM25-friendly using exact terms, policy names, dates, codes, titles,
    or quoted phrases likely to appear in the corpus.
 3. Query 3 should use an alternative phrasing, synonym, acronym, or narrower sub-aspect.
 4. Preserve entities, timeframe, comparison side, and constraints from the normalized query.
-5. Use retrieved documents only as phrasing hints. Do not treat them as ground-truth answers.
+5. Use catalog texts only as phrasing hints. Do not treat them as ground-truth answers.
 6. Do not repeat prior active retrieval queries verbatim.
 7. Do not write answer-like queries that assert the missing value; write searchable queries.
 

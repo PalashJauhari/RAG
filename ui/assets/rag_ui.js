@@ -200,6 +200,24 @@ function progressBoldRest(ev) {
     const q = (ev.active_retrieval_queries || []).join(" · ");
     return { bold: boldName, rest: q ? " — " + truncate(q, 160) : "" };
   }
+  if (node === "answer" || node === "partial_answer") {
+    const n = (ev.cited_document_ids || []).length;
+    const conf = ev.confidence ? " · " + ev.confidence : "";
+    return {
+      bold: boldName,
+      rest: n ? " (" + n + " cited ids)" + conf : conf || (ev.label ? " — " + truncate(ev.label, 120) : ""),
+    };
+  }
+  if (node === "faithfulness") {
+    const status =
+      ev.faithfulness_ok === true ? "ok" : ev.faithfulness_ok === false ? "retry" : "";
+    const retries =
+      ev.faithfulness_retry_count != null ? " · attempt " + ev.faithfulness_retry_count : "";
+    return { bold: boldName, rest: (status ? ": " + status : "") + retries };
+  }
+  if (node === "error_answer") {
+    return { bold: boldName, rest: ev.label ? " — " + truncate(ev.label, 120) : "" };
+  }
 
   const label = ev.label || "";
   return { bold: boldName, rest: label ? " — " + truncate(label, 120) : "" };
@@ -363,8 +381,9 @@ window.dash_clientside.rag_ui.submit_message = async function (
       const sources = data.sources || [];
       if (sources.length)
         content += "\n\nSources: " + sources.map(String).join(", ");
-      const rd = data.retrieved_docs || [];
-      if (rd.length) content += "\n\nRetrieved " + rd.length + " passages.";
+      const catalog = data.document_catalog || {};
+      const catalogCount = Object.keys(catalog).length;
+      if (catalogCount) content += "\n\nRetrieved " + catalogCount + " passages.";
       content = appendTimeTakenFooter(content, elapsedResume);
       chat.push({ role: "assistant", content: content });
       return [chat, false, "", ""];

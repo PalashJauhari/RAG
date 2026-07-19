@@ -20,3 +20,5 @@ ragas
 pandas
 openpyxl
 unstructured-client
+pytest
+pytest-asyncio

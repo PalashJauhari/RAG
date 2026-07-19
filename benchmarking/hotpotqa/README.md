@@ -52,7 +52,9 @@ Under `benchmarking/hotpotqa/data/results/<experiment-name>/`:
 | Faithfulness | — | yes |
 | Answer correctness | — | yes |
 
-Partial graph answers are included in RAGAS when scorable.
+Graph mode reads `document_catalog` for RAGAS contexts and `final_sources` for reported sources
+(after the in-graph faithfulness gate). Partial answers (`answer_mode=partial`) are included in
+RAGAS when scorable.
 
 ## Environment
 
