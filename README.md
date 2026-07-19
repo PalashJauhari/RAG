@@ -42,7 +42,7 @@ Optional Dash UI (port 8050): `python ui/dash_app.py`
 5. **Verify recall** with one batched LLM call for all facts against retrieved passages; update verification in place on the same `facts` list.
 6. **Repair** unsupported facts via `create_queries_for_unsupported_facts` → `strategy_upgrade` → retrieval (until retries exhausted).
 7. **Answer** (or partial answer) with `cited_document_ids` from `document_catalog`.
-8. **Validate cited ids** (retry answer up to `CITED_ID_RETRY_MAX`), then **faithfulness** (retry up to `ANSWER_RETRY_MAX`); code fills `sources` from catalog.
+8. **Faithfulness** checks cited ids against `document_catalog`, then LLM grounding (retry up to `ANSWER_RETRY_MAX`); code fills `sources` from catalog.
 
 Unified fact record:
 
@@ -117,7 +117,7 @@ download_data  →  unstructured_pipeline  →  chunks.json  →  qdrant_upload 
 | Graph `document_catalog` (during turn) | `{id: {text, source, score}}` | **`raw_text`** + `additional_metadata.source` |
 | API `/run` `document_catalog` | same map | Corpus from the completed turn (reset on the next `/run`) |
 
-Catalog build: `tool_wrappers/retrieval_payload.py` (`catalog_entries_from_retriever_hits`). After answer: `validate_cited_ids` → `faithfulness`; `sources` filled from catalog by code.
+Catalog build: `tool_wrappers/retrieval_payload.py` (`catalog_entries_from_retriever_hits`). After answer: `faithfulness` (cited-id check + grounding); `sources` filled from catalog by code.
 
 After changing the contract, **re-upload** your Qdrant collection (e.g. `python -m benchmarking.hotpotqa.qdrant_upload.upload` for benchmarks).
 
@@ -131,7 +131,7 @@ After changing the contract, **re-upload** your Qdrant collection (e.g. `python 
 
 **`/run` response:** Turn-local scratch (including `document_catalog`) is reset at the start of the next `/run`. `sources` are code-filled from catalog after faithfulness (non-empty `source` labels only).
 
-**`/run/stream`:** Node events expose retrieval **counts** (not passage text). Final frame is emitted after faithfulness (or cited-id retry exhaustion). `done` includes `retrieved_doc_count`.
+**`/run/stream`:** Node events expose retrieval **counts** (not passage text). Final frame is emitted when ``faithfulness_ok`` is true (pass or forced pass after ``ANSWER_RETRY_MAX``). `done` includes `retrieved_doc_count`.
 
 Example `/run` JSON shape:
 

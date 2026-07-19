@@ -119,6 +119,7 @@ def env_snapshot() -> dict[str, Any]:
         "retrieval_candidate_bm25": settings.retrieval_candidate_bm25,
         "retrieval_candidate_for_late_interaction": settings.retrieval_candidate_for_late_interaction,
         "retrieval_loop_max_retries": settings.retrieval_loop_max_retries,
+        "answer_retry_max": settings.answer_retry_max,
         "qdrant_collection_name": settings.qdrant_collection_name,
     }
 
@@ -197,12 +198,12 @@ def final_answer_from_messages(
 
 
 def graph_run_response(session_id: str, final_state: dict[str, Any]) -> dict[str, Any]:
-    """Normalize graph final state into answer + retrieved docs."""
+    """Normalize graph final state into API-shaped answer + document_catalog."""
 
     messages = list(final_state.get("messages") or [])
     answer = final_answer_from_messages(
         list(reversed(messages)),
-        allowed_names={"answer_node", "partial_answer_node"},
+        allowed_names={"answer_node", "partial_answer_node", "error_answer_node"},
     )
     if not answer.answer:
         for message in reversed(messages):
@@ -222,13 +223,19 @@ def graph_run_response(session_id: str, final_state: dict[str, Any]) -> dict[str
         "sources": sources,
         "confidence": answer.confidence,
         "document_catalog": dict(final_state.get("document_catalog") or {}),
-        "cited_document_ids": list(final_state.get("cited_document_ids") or []),
+        "cited_document_ids": list(
+            final_state.get("cited_document_ids") or answer.cited_document_ids or []
+        ),
+        "faithfulness_ok": bool(final_state.get("faithfulness_ok")),
+        "answer_mode": str(final_state.get("answer_mode") or ""),
     }
 
 
 def is_partial_answer(final_state: dict[str, Any]) -> bool:
-    """True when the graph ended at partial_answer_node."""
+    """True when the turn used partial_answer (answer_mode or message name)."""
 
+    if str(final_state.get("answer_mode") or "") == "partial":
+        return True
     for message in reversed(final_state.get("messages") or []):
         if message_name(message) == "partial_answer_node":
             return True
@@ -236,7 +243,7 @@ def is_partial_answer(final_state: dict[str, Any]) -> bool:
 
 
 def retrieved_contexts_from_state(final_state: dict[str, Any]) -> list[str]:
-    """Extract raw passage strings from document_catalog values."""
+    """Extract raw passage strings from document_catalog values ({text, source, score})."""
 
     contexts: list[str] = []
     catalog = final_state.get("document_catalog") or {}
@@ -363,7 +370,13 @@ async def run_graph_eval(config) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                     "response": api.get("answer") or "",
                     "confidence": api.get("confidence"),
                     "sources": api.get("sources") or [],
+                    "cited_document_ids": api.get("cited_document_ids") or [],
                     "is_partial": is_partial_answer(final_state),
+                    "answer_mode": api.get("answer_mode") or "",
+                    "faithfulness_ok": api.get("faithfulness_ok"),
+                    "faithfulness_retry_count": int(
+                        final_state.get("faithfulness_retry_count") or 0
+                    ),
                     "graph_latency_ms": round(elapsed_ms, 3),
                     "retrieved_contexts": retrieved_contexts,
                     "retrieved_context_ids": [
@@ -371,6 +384,7 @@ async def run_graph_eval(config) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                         for point_id in document_catalog.keys()
                         if str(point_id).strip()
                     ],
+                    "document_catalog_size": len(document_catalog),
                     "recall_sufficient": final_state.get("recall_sufficient"),
                     "retrieval_retry_count": final_state.get("retrieval_retry_count", 0),
                 }

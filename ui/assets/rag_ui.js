@@ -200,6 +200,24 @@ function progressBoldRest(ev) {
     const q = (ev.active_retrieval_queries || []).join(" · ");
     return { bold: boldName, rest: q ? " — " + truncate(q, 160) : "" };
   }
+  if (node === "answer" || node === "partial_answer") {
+    const n = (ev.cited_document_ids || []).length;
+    const conf = ev.confidence ? " · " + ev.confidence : "";
+    return {
+      bold: boldName,
+      rest: n ? " (" + n + " cited ids)" + conf : conf || (ev.label ? " — " + truncate(ev.label, 120) : ""),
+    };
+  }
+  if (node === "faithfulness") {
+    const status =
+      ev.faithfulness_ok === true ? "ok" : ev.faithfulness_ok === false ? "retry" : "";
+    const retries =
+      ev.faithfulness_retry_count != null ? " · attempt " + ev.faithfulness_retry_count : "";
+    return { bold: boldName, rest: (status ? ": " + status : "") + retries };
+  }
+  if (node === "error_answer") {
+    return { bold: boldName, rest: ev.label ? " — " + truncate(ev.label, 120) : "" };
+  }
 
   const label = ev.label || "";
   return { bold: boldName, rest: label ? " — " + truncate(label, 120) : "" };

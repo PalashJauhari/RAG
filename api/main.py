@@ -293,19 +293,12 @@ def get_stream_event(
                 "retrieved_doc_count": retrieved_doc_count or 0,
             }
         )
-    elif node_name == "validate_cited_ids":
-        event.update(
-            {
-                "label": "Validating cited document ids",
-                "cited_id_check_retry_count": payload.get("cited_id_check_retry_count"),
-            }
-        )
     elif node_name == "faithfulness":
         event.update(
             {
                 "label": "Checking faithfulness",
                 "faithfulness_ok": payload.get("faithfulness_ok"),
-                "faithfulness_answer_retry_count": payload.get("faithfulness_answer_retry_count"),
+                "faithfulness_retry_count": payload.get("faithfulness_retry_count"),
             }
         )
     elif node_name == "error_answer":
@@ -456,26 +449,12 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
                     new_doc_count=new_doc_count,
                     retrieval_loop_count=retrieval_loop_count,
                 )
-                # Emit user-facing final only after validate/faithfulness settle (or error_answer).
+                # Emit user-facing final only after faithfulness settles (or error_answer).
                 if isinstance(update, dict) and update:
                     node_name = next(iter(update))
                     payload = update.get(node_name) or {}
-                    if node_name == "faithfulness":
-                        if payload.get("faithfulness_ok") or payload.get("final_sources") is not None:
-                            last_sources = list(payload.get("final_sources") or [])
-                            event = {
-                                "type": "final",
-                                "session_id": request.session_id,
-                                "node": node_name,
-                                "status": "completed",
-                                "label": "Answer ready",
-                                "answer": last_answer,
-                                "sources": last_sources,
-                                "confidence": last_confidence,
-                                "retrieved_doc_count": retrieved_doc_count,
-                            }
-                    elif node_name == "validate_cited_ids" and payload.get("final_sources") is not None:
-                        last_sources = []
+                    if node_name == "faithfulness" and payload.get("faithfulness_ok"):
+                        last_sources = list(payload.get("final_sources") or [])
                         event = {
                             "type": "final",
                             "session_id": request.session_id,
@@ -483,7 +462,7 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
                             "status": "completed",
                             "label": "Answer ready",
                             "answer": last_answer,
-                            "sources": [],
+                            "sources": last_sources,
                             "confidence": last_confidence,
                             "retrieved_doc_count": retrieved_doc_count,
                         }

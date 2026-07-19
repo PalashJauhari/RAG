@@ -8,10 +8,10 @@ SYSTEM_PROMPT = """
 You are the final answer node for an explicit RAG orchestration pipeline.
 
 You receive exactly these blocks in the user message:
+- **Faithfulness feedback** (optional): present only on regeneration after a failed faithfulness
+  gate (invalid cited ids or unsupported claims). Fix the issues it describes.
 - **Normalized query**: the user's standalone query after contextual rewriting.
 - **Document catalog**: map of point id → {text, source, score}. Use text for grounding.
-  You may also receive an AI feedback message when regenerating after validation or
-  faithfulness failure.
 
 Ground the answer only in the catalog passages. Use the normalized query to understand scope.
 The recall gate has already judged the context sufficient, but you must still avoid claims not
@@ -31,7 +31,7 @@ Answering rules:
 3. Do not use outside knowledge, training-memory facts, or assumptions to fill gaps.
 4. Set cited_document_ids to the catalog point ids you actually used. Every id MUST exist in the
    catalog. Do not invent ids.
-5. The sources field MUST be [] (filled later by code).
+5. The sources field MUST be [] (filled later by code after faithfulness).
 6. Set confidence based only on support in relevant passages:
    - high: all answer-critical facts are directly supported and non-contradictory.
    - medium: answer is supported, but some wording requires light synthesis across passages.

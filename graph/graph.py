@@ -17,15 +17,15 @@ High-level flow (see repository README and ``artifacts/langgraph.png``)::
         → recall_check
         → [create_queries_for_unsupported_facts → strategy_upgrade → retrieval]*
         → answer | partial_answer
-        → validate_cited_ids → faithfulness
+        → faithfulness
         → END
 
 Repair loop (``*``): runs while facts fail recall and ``retrieval_retry_count <
 RETRIEVAL_LOOP_MAX_RETRIES``. Each repair pass uses new gap-fill queries and Qdrant
 HasId exclusion via ``document_catalog`` keys — not widened top-k.
 
-After answer/partial: validate cited ids (retry up to CITED_ID_RETRY_MAX), then
-faithfulness (retry up to ANSWER_RETRY_MAX). error_answer skips both and ends.
+After answer/partial: one faithfulness gate checks cited ids then LLM grounding
+(retry up to ``ANSWER_RETRY_MAX``). ``error_answer`` skips faithfulness and ends.
 
 Checkpointing
 -----------
@@ -163,25 +163,28 @@ class RetrievalState(TypedDict, total=False):
     graph_failure: dict[str, Any]
     # Node-level retry exhaustion context from ``handle_node_failure``.
 
-    # --- Answer / citation / faithfulness scratch ---
+    # --- Answer / faithfulness scratch ---
 
     cited_document_ids: list[str]
     # Point ids returned by answer/partial_answer for grounding.
 
-    cited_id_check_retry_count: int
-    # Increments when cited ids are not in document_catalog.
+    answer_text: str
+    # Latest answer/partial text; faithfulness reads this (no message scraping).
 
     answer_mode: str
-    # ``full`` or ``partial`` — faithfulness/validate retries return to the same mode.
+    # ``full`` or ``partial`` — faithfulness retries return to the same mode.
 
-    faithfulness_answer_retry_count: int
-    # Increments when faithfulness fails (separate from retrieval_retry_count).
+    faithfulness_retry_count: int
+    # Increments on each faithfulness failure (id check or LLM grounding).
 
     faithfulness_ok: bool
+    # True when the answer may end (pass or forced pass after retry exhaustion).
+
     faithfulness_feedback: str
-    cited_id_check_feedback: str
+    # Retry hint for answer/partial; empty string means omit from the LLM prompt.
+
     final_sources: list[str]
-    # Code-built source labels after faithfulness pass (non-empty catalog.source only).
+    # Code-built source labels after faithfulness (non-empty catalog.source only).
 
 
 ERROR_ANSWER_USER_MESSAGE = "An error occurred while processing your request. Please try again."
@@ -277,7 +280,7 @@ async def verify_all_facts(
         f"## Normalized query\n{normalized_query}\n\n"
         f"## Facts to verify\n"
         f"{json.dumps(facts_for_prompt, ensure_ascii=False)}\n\n"
-        f"## Retrieved documents\n{catalog_docs_block(catalog)}"
+        f"## Document catalog\n{catalog_docs_block(catalog)}"
     )
     messages_for_llm = [
         SystemMessage(content=VERIFY_ALL_FACTS_PROMPT),
@@ -473,49 +476,6 @@ def cited_ids_valid(
     return (len(invalid) == 0, invalid)
 
 
-def answer_feedback_messages(state: RetrievalState) -> list[Any]:
-    """Build AIMessage feedback blocks for answer/partial regeneration."""
-
-    messages: list[Any] = []
-    cited_feedback = str(state.get("cited_id_check_feedback") or "").strip()
-    if cited_feedback:
-        messages.append(AIMessage(content=cited_feedback))
-    faithfulness_feedback = str(state.get("faithfulness_feedback") or "").strip()
-    if faithfulness_feedback:
-        messages.append(AIMessage(content=faithfulness_feedback))
-    return messages
-
-
-def patch_answer_message_sources(
-    messages: list[Any],
-    *,
-    allowed_names: set[str],
-    sources: list[str],
-) -> list[AIMessage]:
-    """Return a replacement AIMessage for the latest matching answer with sources filled."""
-
-    for message in reversed(messages or []):
-        name = getattr(message, "name", None) if not isinstance(message, dict) else message.get("name")
-        if name not in allowed_names:
-            continue
-        content = getattr(message, "content", None) if not isinstance(message, dict) else message.get("content")
-        try:
-            payload = json.loads(content) if isinstance(content, str) else {}
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        payload = {**payload, "sources": list(sources)}
-        return [
-            build_node_ai_message(
-                node_name=str(name),
-                payload=payload,
-                raw=message if isinstance(message, AIMessage) else None,
-            )
-        ]
-    return []
-
-
 def prepare_state_for_next_question(user_query: str) -> dict[str, Any]:
     """Build the state patch for a new user turn before ``graph.ainvoke``.
 
@@ -542,12 +502,11 @@ def prepare_state_for_next_question(user_query: str) -> dict[str, Any]:
         "retrieval_retry_count": 0,
         "graph_failure": {},
         "cited_document_ids": [],
-        "cited_id_check_retry_count": 0,
+        "answer_text": "",
         "answer_mode": "",
-        "faithfulness_answer_retry_count": 0,
+        "faithfulness_retry_count": 0,
         "faithfulness_ok": False,
         "faithfulness_feedback": "",
-        "cited_id_check_feedback": "",
         "final_sources": [],
     }
 
@@ -1014,7 +973,7 @@ class RetrievalGraph:
             f"{json.dumps(unsupported, ensure_ascii=False)}\n\n"
             "## Prior active retrieval queries\n"
             f"{json.dumps(state.get('active_retrieval_queries') or [], ensure_ascii=False)}\n\n"
-            "## Retrieved document texts\n"
+            "## Document catalog texts\n"
             f"{json.dumps(catalog_texts_for_prompt(state.get('document_catalog') or {}), ensure_ascii=False)}"
         )
         llm = get_llm_client(
@@ -1101,16 +1060,19 @@ class RetrievalGraph:
         """Synthesize a grounded final answer when all facts passed recall verification.
 
         Writes ``answer_mode=full``, ``cited_document_ids``, and an AIMessage JSON payload.
-        Routes to ``validate_cited_ids``.
+        Routes to ``faithfulness``.
         """
 
         catalog = dict(state.get("document_catalog") or {})
+        feedback = str(state.get("faithfulness_feedback") or "").strip()
         context = (
             "## Normalized query\n"
             f"{state.get('normalized_query') or ''}\n\n"
             "## Document catalog\n"
             f"{json.dumps(catalog, ensure_ascii=False)}"
         )
+        if feedback:
+            context = f"## Faithfulness feedback\n{feedback}\n\n{context}"
         llm = get_llm_client(
             model=settings.final_answer_model,
             output_schema=FinalAnswer,
@@ -1118,7 +1080,6 @@ class RetrievalGraph:
         )
         messages_for_llm = [
             SystemMessage(content=FINAL_ANSWER_PROMPT),
-            *answer_feedback_messages(state),
             HumanMessage(content=context),
         ]
         model = settings.final_answer_model
@@ -1141,8 +1102,8 @@ class RetrievalGraph:
             answer["sources"] = []
         return {
             "answer_mode": "full",
+            "answer_text": str(answer.get("answer") or ""),
             "cited_document_ids": list(answer.get("cited_document_ids") or []),
-            "cited_id_check_feedback": "",
             "faithfulness_feedback": "",
             "messages": [
                 build_node_ai_message(node_name="answer_node", payload=answer, raw=raw)
@@ -1152,10 +1113,11 @@ class RetrievalGraph:
     async def partial_answer_node(self, state: RetrievalState) -> dict[str, Any]:
         """Emit grounded partial answer when retrieval retry budgets are exhausted.
 
-        Writes ``answer_mode=partial`` and routes to ``validate_cited_ids``.
+        Writes ``answer_mode=partial`` and routes to ``faithfulness``.
         """
 
         catalog = dict(state.get("document_catalog") or {})
+        feedback = str(state.get("faithfulness_feedback") or "").strip()
         context = (
             "## Normalized query\n"
             f"{state.get('normalized_query') or ''}\n\n"
@@ -1164,6 +1126,8 @@ class RetrievalGraph:
             "## Document catalog\n"
             f"{json.dumps(catalog, ensure_ascii=False)}"
         )
+        if feedback:
+            context = f"## Faithfulness feedback\n{feedback}\n\n{context}"
         llm = get_llm_client(
             model=settings.final_answer_model,
             output_schema=FinalAnswer,
@@ -1171,7 +1135,6 @@ class RetrievalGraph:
         )
         messages_for_llm = [
             SystemMessage(content=PARTIAL_ANSWER_PROMPT),
-            *answer_feedback_messages(state),
             HumanMessage(content=context),
         ]
         model = settings.final_answer_model
@@ -1194,8 +1157,8 @@ class RetrievalGraph:
             answer["sources"] = []
         return {
             "answer_mode": "partial",
+            "answer_text": str(answer.get("answer") or ""),
             "cited_document_ids": list(answer.get("cited_document_ids") or []),
-            "cited_id_check_feedback": "",
             "faithfulness_feedback": "",
             "messages": [
                 build_node_ai_message(node_name="partial_answer_node", payload=answer, raw=raw)
@@ -1205,7 +1168,7 @@ class RetrievalGraph:
     async def error_answer_node(self, state: RetrievalState) -> dict[str, Any]:
         """Emit deterministic user-facing fallback after node retries are exhausted.
 
-        Skips validate_cited_ids and faithfulness (routes straight to END).
+        Skips faithfulness (routes straight to END).
         """
 
         payload = FinalAnswer(
@@ -1224,82 +1187,74 @@ class RetrievalGraph:
             "messages": [build_node_ai_message(node_name="error_answer_node", payload=payload)],
         }
 
-    async def validate_cited_ids_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Ensure cited_document_ids are keys in document_catalog (no LLM).
+    async def faithfulness_node(self, state: RetrievalState) -> dict[str, Any]:
+        """Gate the answer before END: cited ids must exist, then LLM grounding.
 
-        Invalid ids: increment cited_id_check_retry_count and set AI feedback for answer retry.
-        Exhausted: set final_sources=[] and route to END via router.
+        Purpose:
+            After ``answer`` / ``partial_answer``, decide whether the turn can finish.
+            Code checks cited ids against ``document_catalog``; if valid, an LLM checks
+            that ``answer_text`` is supported by those cited passages alone.
+            On failure, set feedback and retry the same answer mode until
+            ``ANSWER_RETRY_MAX``, then force-pass with sources from valid cited ids.
+            API reads sources from ``final_sources`` (message JSON keeps ``sources: []``).
+
+        Input (state):
+            answer_text, cited_document_ids, document_catalog, faithfulness_retry_count,
+            answer_mode (used by ``route_after_faithfulness``).
+
+        Output (state merge):
+            faithfulness_ok, faithfulness_feedback, faithfulness_retry_count,
+            final_sources (on pass / force-pass).
+
+        Routes via: ``route_after_faithfulness`` (END | answer | partial_answer).
         """
 
         catalog = dict(state.get("document_catalog") or {})
-        cited_ids = list(state.get("cited_document_ids") or [])
-        ok, invalid = cited_ids_valid(cited_ids, catalog)
-        if ok:
-            merge: dict[str, Any] = {"cited_id_check_feedback": ""}
-            span_output = {
-                "valid": True,
-                "invalid_ids": [],
-                "cited_id_check_retry_count": int(state.get("cited_id_check_retry_count") or 0),
-                "exhausted": False,
-            }
-        else:
-            retry_count = int(state.get("cited_id_check_retry_count") or 0) + 1
+        cited_ids = [
+            str(point_id).strip()
+            for point_id in (state.get("cited_document_ids") or [])
+            if str(point_id).strip()
+        ]
+        answer_text = str(state.get("answer_text") or "")
+
+        # --- Step 1: code gate — every cited id must be a catalog key (no LLM) ---
+        ids_ok, invalid_ids = cited_ids_valid(cited_ids, catalog)
+        if not ids_ok:
             feedback = (
                 "Cited document id validation failed. These ids are not in document_catalog: "
-                f"{json.dumps(invalid, ensure_ascii=False)}. "
+                f"{json.dumps(invalid_ids, ensure_ascii=False)}. "
                 "Regenerate the answer using only valid catalog point ids. sources must stay []."
             )
-            merge = {
-                "cited_id_check_retry_count": retry_count,
-                "cited_id_check_feedback": feedback,
-            }
-            if retry_count >= settings.cited_id_retry_max:
-                merge["final_sources"] = []
-            span_output = {
-                "valid": False,
-                "invalid_ids": invalid,
-                "cited_id_check_retry_count": retry_count,
-                "exhausted": retry_count >= settings.cited_id_retry_max,
-            }
-        if settings.langfuse_tracing_enabled:
-            langfuse = get_langfuse_client()
-            with langfuse.start_as_current_observation(as_type="span", name="validate_cited_ids") as node_span:
-                node_span.update(input={"cited_document_ids": cited_ids, "document_catalog": catalog}, output=span_output)
-        return merge
+            retry_count = int(state.get("faithfulness_retry_count") or 0) + 1
+            if retry_count >= settings.answer_retry_max:
+                # Budget exhausted: ship last answer; sources only from ids that exist.
+                valid_cited = [point_id for point_id in cited_ids if point_id in catalog]
+                merge: dict[str, Any] = {
+                    "faithfulness_ok": True,
+                    "faithfulness_feedback": "",
+                    "faithfulness_retry_count": retry_count,
+                    "final_sources": build_sources_from_catalog(catalog, valid_cited),
+                }
+            else:
+                # Retry: answer/partial sees faithfulness_feedback in its human context.
+                merge = {
+                    "faithfulness_ok": False,
+                    "faithfulness_feedback": feedback,
+                    "faithfulness_retry_count": retry_count,
+                }
+            if settings.langfuse_tracing_enabled:
+                langfuse = get_langfuse_client()
+                with langfuse.start_as_current_observation(as_type="span", name="faithfulness") as node_span:
+                    node_span.update(
+                        input={"answer": answer_text, "cited_document_ids": cited_ids, "document_catalog": catalog},
+                        output={"faithfulness_ok": merge.get("faithfulness_ok"), "invalid_ids": invalid_ids, "faithfulness_retry_count": merge.get("faithfulness_retry_count"), "final_sources": merge.get("final_sources")},
+                    )
+            return merge
 
-    async def faithfulness_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Verify the answer is grounded in cited catalog passages only.
-
-        On pass: fill sources from catalog and patch the answer AIMessage.
-        On fail: increment faithfulness_answer_retry_count and set faithfulness_feedback for retry.
-        """
-
-        catalog = dict(state.get("document_catalog") or {})
-        cited_ids = [str(point_id).strip() for point_id in (state.get("cited_document_ids") or []) if str(point_id).strip()]
-        answer_mode = str(state.get("answer_mode") or "full")
-        allowed_names = {"answer_node"} if answer_mode == "full" else {"partial_answer_node"}
-
-        answer_text = ""
-        for message in reversed(state.get("messages") or []):
-            name = getattr(message, "name", None)
-            if name not in allowed_names:
-                continue
-            content = getattr(message, "content", None)
-            try:
-                payload = json.loads(content) if isinstance(content, str) else {}
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(payload, dict):
-                answer_text = str(payload.get("answer") or "")
-            break
-
+        # --- Step 2: LLM gate — is answer_text grounded in the cited passages only? ---
         cited_passages = {
-            point_id: {
-                "text": (catalog.get(point_id) or {}).get("text"),
-                "source": (catalog.get(point_id) or {}).get("source"),
-            }
+            point_id: str((catalog.get(point_id) or {}).get("text") or "")
             for point_id in cited_ids
-            if point_id in catalog
         }
         human_content = (
             f"## Answer\n{answer_text}\n\n"
@@ -1324,73 +1279,71 @@ class RetrievalGraph:
                     update_llm_generation(gen, model=model, raw=result.get("raw"))
                 parsed = result["parsed"]
                 if parsed.passed:
-                    sources = build_sources_from_catalog(catalog, cited_ids)
-                    patched = patch_answer_message_sources(
-                        list(state.get("messages") or []),
-                        allowed_names=allowed_names,
-                        sources=sources,
-                    )
-                    merge: dict[str, Any] = {
+                    # Pass: fill final_sources from cited catalog rows; turn can END.
+                    merge = {
                         "faithfulness_ok": True,
                         "faithfulness_feedback": "",
-                        "final_sources": sources,
+                        "final_sources": build_sources_from_catalog(catalog, cited_ids),
                     }
-                    if patched:
-                        merge["messages"] = patched
-                    node_span.update(input={"answer": answer_text, "cited_passages": cited_passages}, output={"passed": True, "reason": parsed.reason, "final_sources": sources})
-                    return merge
-                retry_count = int(state.get("faithfulness_answer_retry_count") or 0) + 1
-                feedback = (
-                    "Faithfulness check failed. The answer is not fully supported by the cited "
-                    f"passages. Reason: {parsed.reason.strip()}. "
-                    "Regenerate a grounded answer. cited_document_ids must be valid catalog ids; "
-                    "sources must stay []."
+                else:
+                    feedback = (
+                        "Faithfulness check failed. The answer is not fully supported by the cited "
+                        f"passages. Reason: {parsed.reason.strip()}. "
+                        "Regenerate a grounded answer. cited_document_ids must be valid catalog ids; "
+                        "sources must stay []."
+                    )
+                    retry_count = int(state.get("faithfulness_retry_count") or 0) + 1
+                    if retry_count >= settings.answer_retry_max:
+                        # Force-pass after grounding failures exhaust the retry budget.
+                        valid_cited = [point_id for point_id in cited_ids if point_id in catalog]
+                        merge = {
+                            "faithfulness_ok": True,
+                            "faithfulness_feedback": "",
+                            "faithfulness_retry_count": retry_count,
+                            "final_sources": build_sources_from_catalog(catalog, valid_cited),
+                        }
+                    else:
+                        merge = {
+                            "faithfulness_ok": False,
+                            "faithfulness_feedback": feedback,
+                            "faithfulness_retry_count": retry_count,
+                        }
+                node_span.update(
+                    input={"answer": answer_text, "cited_passages": cited_passages},
+                    output={"faithfulness_ok": merge.get("faithfulness_ok"), "reason": parsed.reason, "faithfulness_retry_count": merge.get("faithfulness_retry_count"), "final_sources": merge.get("final_sources")},
                 )
-                merge = {
-                    "faithfulness_ok": False,
-                    "faithfulness_feedback": feedback,
-                    "faithfulness_answer_retry_count": retry_count,
-                }
-                span_output: dict[str, Any] = {"passed": False, "reason": parsed.reason}
-                if retry_count >= settings.answer_retry_max:
-                    merge["final_sources"] = []
-                    span_output["final_sources"] = []
-                node_span.update(input={"answer": answer_text, "cited_passages": cited_passages}, output=span_output)
                 return merge
 
+        # Same LLM path without Langfuse spans.
         result = await llm.ainvoke(messages_for_llm)
         parsed = result["parsed"]
         if parsed.passed:
-            sources = build_sources_from_catalog(catalog, cited_ids)
-            patched = patch_answer_message_sources(
-                list(state.get("messages") or []),
-                allowed_names=allowed_names,
-                sources=sources,
-            )
-            merge = {
+            return {
                 "faithfulness_ok": True,
                 "faithfulness_feedback": "",
-                "final_sources": sources,
+                "final_sources": build_sources_from_catalog(catalog, cited_ids),
             }
-            if patched:
-                merge["messages"] = patched
-            return merge
 
-        retry_count = int(state.get("faithfulness_answer_retry_count") or 0) + 1
         feedback = (
             "Faithfulness check failed. The answer is not fully supported by the cited "
             f"passages. Reason: {parsed.reason.strip()}. "
             "Regenerate a grounded answer. cited_document_ids must be valid catalog ids; "
             "sources must stay []."
         )
-        merge = {
+        retry_count = int(state.get("faithfulness_retry_count") or 0) + 1
+        if retry_count >= settings.answer_retry_max:
+            valid_cited = [point_id for point_id in cited_ids if point_id in catalog]
+            return {
+                "faithfulness_ok": True,
+                "faithfulness_feedback": "",
+                "faithfulness_retry_count": retry_count,
+                "final_sources": build_sources_from_catalog(catalog, valid_cited),
+            }
+        return {
             "faithfulness_ok": False,
             "faithfulness_feedback": feedback,
-            "faithfulness_answer_retry_count": retry_count,
+            "faithfulness_retry_count": retry_count,
         }
-        if retry_count >= settings.answer_retry_max:
-            merge["final_sources"] = []
-        return merge
 
     # --- Conditional routing ---
 
@@ -1415,33 +1368,11 @@ class RetrievalGraph:
             return "partial_answer"
         return "create_queries_for_unsupported_facts"
 
-    def route_after_validate_cited_ids(self, state: RetrievalState) -> str:
-        """Route after cited-id validation."""
-
-        catalog = dict(state.get("document_catalog") or {})
-        ok, _invalid = cited_ids_valid(state.get("cited_document_ids") or [], catalog)
-        if ok:
-            return "faithfulness"
-        if int(state.get("cited_id_check_retry_count") or 0) >= settings.cited_id_retry_max:
-            return "end"
-        if str(state.get("answer_mode") or "") == "partial":
-            return "partial_answer"
-        return "answer"
-
     def route_after_faithfulness(self, state: RetrievalState) -> str:
-        """Route after faithfulness check."""
+        """End when faithfulness_ok; otherwise retry the same answer_mode."""
 
         if state.get("faithfulness_ok"):
             return "end"
-        if int(state.get("faithfulness_answer_retry_count") or 0) >= settings.answer_retry_max:
-            return "end"
-        if str(state.get("answer_mode") or "") == "partial":
-            return "partial_answer"
-        return "answer"
-
-    def route_answer_mode(self, state: RetrievalState) -> str:
-        """Return answer or partial_answer from answer_mode (unused helper for tests)."""
-
         if str(state.get("answer_mode") or "") == "partial":
             return "partial_answer"
         return "answer"
@@ -1452,7 +1383,7 @@ class RetrievalGraph:
         """Wire nodes and compile the LangGraph with a session checkpointer.
 
         Repair loop: recall_check → create_queries_for_unsupported_facts → strategy_upgrade → retrieval → recall_check.
-        Answer path: answer|partial_answer → validate_cited_ids → faithfulness → END (with retries).
+        Answer path: answer|partial_answer → faithfulness → END (or retry answer mode).
         Retry exhaustion on configured nodes: handle_node_failure → error_answer → END.
         """
         builder = StateGraph(RetrievalState)
@@ -1467,7 +1398,6 @@ class RetrievalGraph:
         builder.add_node("strategy_upgrade", self.strategy_upgrade_node)
         builder.add_node("answer", self.answer_node, retry_policy=node_retry)
         builder.add_node("partial_answer", self.partial_answer_node, retry_policy=node_retry)
-        builder.add_node("validate_cited_ids", self.validate_cited_ids_node)
         builder.add_node("faithfulness", self.faithfulness_node, retry_policy=node_retry, error_handler=handle_node_failure)
         builder.add_node("error_answer", self.error_answer_node)
 
@@ -1495,18 +1425,8 @@ class RetrievalGraph:
         )
         builder.add_edge("create_queries_for_unsupported_facts", "strategy_upgrade")
         builder.add_edge("strategy_upgrade", "retrieval")
-        builder.add_edge("answer", "validate_cited_ids")
-        builder.add_edge("partial_answer", "validate_cited_ids")
-        builder.add_conditional_edges(
-            "validate_cited_ids",
-            self.route_after_validate_cited_ids,
-            {
-                "faithfulness": "faithfulness",
-                "answer": "answer",
-                "partial_answer": "partial_answer",
-                "end": END,
-            },
-        )
+        builder.add_edge("answer", "faithfulness")
+        builder.add_edge("partial_answer", "faithfulness")
         builder.add_conditional_edges(
             "faithfulness",
             self.route_after_faithfulness,

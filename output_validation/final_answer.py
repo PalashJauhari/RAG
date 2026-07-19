@@ -5,7 +5,7 @@ Used by prompts ``final_answer`` and ``partial_answer`` plus deterministic fallb
 in checkpointed ``messages``.
 
 ``cited_document_ids`` are chosen by the LLM from ``document_catalog`` keys.
-``sources`` is filled by code after validate + faithfulness (LLM must leave it empty).
+``sources`` is filled by code after faithfulness (LLM must leave it empty).
 """
 
 from typing import Literal
