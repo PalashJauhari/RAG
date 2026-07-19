@@ -15,12 +15,18 @@ token counts; latency from context duration.
 from __future__ import annotations
 
 import os
+from contextvars import ContextVar
 from typing import Any
 
 from langchain_core.messages import AIMessage
 from langfuse import get_client
 
 from config.settings import settings
+
+# Root ``run`` / ``stream_run`` / ``resume`` observation for end-of-turn metrics.
+langfuse_root_observation: ContextVar[Any] = ContextVar(
+    "langfuse_root_observation", default=None
+)
 
 
 def is_tracing_enabled() -> bool:

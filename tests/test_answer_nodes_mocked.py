@@ -159,6 +159,7 @@ async def test_faithfulness_invalid_ids_exhausted_force_pass_valid_sources(monke
         }
     )
     assert result["faithfulness_ok"] is True
+    assert result["faithfulness_forced_pass"] is True
     assert result["faithfulness_retry_count"] == 1
     assert result["final_sources"] == ["hotpotqa"]
     assert result["faithfulness_feedback"] == ""
@@ -263,5 +264,6 @@ async def test_faithfulness_llm_fail_exhausted_force_pass(monkeypatch) -> None:
         }
     )
     assert result["faithfulness_ok"] is True
+    assert result["faithfulness_forced_pass"] is True
     assert result["final_sources"] == ["wiki"]
     assert result["faithfulness_feedback"] == ""

@@ -15,8 +15,10 @@ def test_prepare_state_resets_catalog_and_faithfulness_scratch() -> None:
     assert patch["document_catalog"] == {}
     assert patch["cited_document_ids"] == []
     assert patch["answer_text"] == ""
+    assert patch["strategies_used"] == []
     assert patch["faithfulness_retry_count"] == 0
     assert patch["faithfulness_ok"] is False
+    assert patch["faithfulness_forced_pass"] is False
     assert patch["faithfulness_feedback"] == ""
     assert patch["answer_mode"] == ""
     assert patch["final_sources"] == []

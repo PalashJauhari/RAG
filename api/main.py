@@ -416,6 +416,9 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
                 new_doc_count = 0
                 if isinstance(update, dict) and update:
                     node_name = next(iter(update))
+                    # Langfuse-only turn snapshot; keep out of UI progress.
+                    if node_name == "post_deployment_metrics":
+                        continue
                     payload = update.get(node_name) or {}
                     if node_name == "strategy_upgrade":
                         retrieval_loop_count = int(

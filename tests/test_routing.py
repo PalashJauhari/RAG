@@ -8,9 +8,12 @@ from config import settings as settings_module
 from graph.graph import RetrievalGraph
 
 
-def test_route_after_faithfulness_pass_ends() -> None:
+def test_route_after_faithfulness_pass_goes_to_metrics() -> None:
     graph = RetrievalGraph(InMemorySaver())
-    assert graph.route_after_faithfulness({"faithfulness_ok": True}) == "end"
+    assert (
+        graph.route_after_faithfulness({"faithfulness_ok": True})
+        == "post_deployment_metrics"
+    )
 
 
 def test_route_after_faithfulness_fail_retries_full_mode() -> None:

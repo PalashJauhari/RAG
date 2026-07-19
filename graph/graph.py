@@ -18,6 +18,7 @@ High-level flow (see repository README and ``artifacts/langgraph.png``)::
         → [create_queries_for_unsupported_facts → strategy_upgrade → retrieval]*
         → answer | partial_answer
         → faithfulness
+        → post_deployment_metrics
         → END
 
 Repair loop (``*``): runs while facts fail recall and ``retrieval_retry_count <
@@ -25,7 +26,8 @@ RETRIEVAL_LOOP_MAX_RETRIES``. Each repair pass uses new gap-fill queries and Qdr
 HasId exclusion via ``document_catalog`` keys — not widened top-k.
 
 After answer/partial: one faithfulness gate checks cited ids then LLM grounding
-(retry up to ``ANSWER_RETRY_MAX``). ``error_answer`` skips faithfulness and ends.
+(retry up to ``ANSWER_RETRY_MAX``). ``error_answer`` skips faithfulness and goes to
+``post_deployment_metrics`` then END. Metrics node only logs a Langfuse turn snapshot.
 
 Checkpointing
 -----------
@@ -76,6 +78,7 @@ from middleware.llm_client import get_llm_client
 from observability.langfuse_handler import (
     flush_langfuse,
     get_langfuse_client,
+    langfuse_root_observation,
     messages_for_langfuse,
     update_llm_generation,
 )
@@ -142,6 +145,9 @@ class RetrievalState(TypedDict, total=False):
     document_catalog: dict[str, dict[str, Any]]
     # Turn-local map point_id → {text, source, score}; merged across retrieval passes.
 
+    strategies_used: list[str]
+    # Retrieval strategies attempted this turn (seeded at query_complexity, appended on upgrade).
+
     # --- Fact scratch (reset each /run; recall_check mutates verification fields) ---
 
     facts: list[dict[str, Any]]
@@ -179,6 +185,9 @@ class RetrievalState(TypedDict, total=False):
 
     faithfulness_ok: bool
     # True when the answer may end (pass or forced pass after retry exhaustion).
+
+    faithfulness_forced_pass: bool
+    # True when faithfulness shipped after ANSWER_RETRY_MAX exhaustion (not a clean pass).
 
     faithfulness_feedback: str
     # Retry hint for answer/partial; empty string means omit from the LLM prompt.
@@ -496,6 +505,7 @@ def prepare_state_for_next_question(user_query: str) -> dict[str, Any]:
         "retrieval_strategy": "",
         "active_retrieval_queries": [],
         "document_catalog": {},
+        "strategies_used": [],
         "facts": [],
         "needs_split": False,
         "recall_sufficient": False,
@@ -506,6 +516,7 @@ def prepare_state_for_next_question(user_query: str) -> dict[str, Any]:
         "answer_mode": "",
         "faithfulness_retry_count": 0,
         "faithfulness_ok": False,
+        "faithfulness_forced_pass": False,
         "faithfulness_feedback": "",
         "final_sources": [],
     }
@@ -752,6 +763,7 @@ class RetrievalGraph:
             "explanation": explanation,
             "fact_count": fact_count,
             "retrieval_strategy": "fast_bm25_retrieval",
+            "strategies_used": ["fast_bm25_retrieval"],
             "active_retrieval_queries": active_retrieval_queries,
         }
 
@@ -1052,6 +1064,7 @@ class RetrievalGraph:
         return {
             "retrieval_strategy": strategy,
             "retrieval_retry_count": retry_count,
+            "strategies_used": list(state.get("strategies_used") or []) + [strategy],
         }
 
     # --- Answer and cleanup ---
@@ -1206,7 +1219,7 @@ class RetrievalGraph:
             faithfulness_ok, faithfulness_feedback, faithfulness_retry_count,
             final_sources (on pass / force-pass).
 
-        Routes via: ``route_after_faithfulness`` (END | answer | partial_answer).
+        Routes via: ``route_after_faithfulness`` (post_deployment_metrics | answer | partial_answer).
         """
 
         catalog = dict(state.get("document_catalog") or {})
@@ -1231,6 +1244,7 @@ class RetrievalGraph:
                 valid_cited = [point_id for point_id in cited_ids if point_id in catalog]
                 merge: dict[str, Any] = {
                     "faithfulness_ok": True,
+                    "faithfulness_forced_pass": True,
                     "faithfulness_feedback": "",
                     "faithfulness_retry_count": retry_count,
                     "final_sources": build_sources_from_catalog(catalog, valid_cited),
@@ -1298,6 +1312,7 @@ class RetrievalGraph:
                         valid_cited = [point_id for point_id in cited_ids if point_id in catalog]
                         merge = {
                             "faithfulness_ok": True,
+                            "faithfulness_forced_pass": True,
                             "faithfulness_feedback": "",
                             "faithfulness_retry_count": retry_count,
                             "final_sources": build_sources_from_catalog(catalog, valid_cited),
@@ -1335,6 +1350,7 @@ class RetrievalGraph:
             valid_cited = [point_id for point_id in cited_ids if point_id in catalog]
             return {
                 "faithfulness_ok": True,
+                "faithfulness_forced_pass": True,
                 "faithfulness_feedback": "",
                 "faithfulness_retry_count": retry_count,
                 "final_sources": build_sources_from_catalog(catalog, valid_cited),
@@ -1344,6 +1360,62 @@ class RetrievalGraph:
             "faithfulness_feedback": feedback,
             "faithfulness_retry_count": retry_count,
         }
+
+    async def post_deployment_metrics_node(self, state: RetrievalState) -> dict[str, Any]:
+        """Log end-of-turn eval fields onto the root Langfuse run/stream_run span.
+
+        No LLM. No answer mutation. When Langfuse is off, this is a no-op.
+        Hidden from SSE/UI progress.
+        """
+
+        if not settings.langfuse_tracing_enabled:
+            return {}
+
+        root = langfuse_root_observation.get()
+        if root is None:
+            return {}
+
+        confidence = "low"
+        for message in reversed(state.get("messages") or []):
+            name = getattr(message, "name", None)
+            if name not in {"answer_node", "partial_answer_node", "error_answer_node"}:
+                continue
+            content = getattr(message, "content", None)
+            try:
+                payload = json.loads(content) if isinstance(content, str) else {}
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(payload, dict) and payload.get("confidence") is not None:
+                confidence = str(payload.get("confidence") or "low")
+            break
+
+        facts = list(state.get("facts") or [])
+        unsupported_fact_ids = [
+            row.get("fact_id") for row in facts if not row.get("verification_status")
+        ]
+        root.update(
+            output={
+                "user_question": state.get("user_question") or "",
+                "normalized_query": state.get("normalized_query") or "",
+                "document_catalog": dict(state.get("document_catalog") or {}),
+                "strategies_used": list(state.get("strategies_used") or []),
+                "retrieval_retry_count": int(state.get("retrieval_retry_count") or 0),
+                "faithfulness_retry_count": int(state.get("faithfulness_retry_count") or 0),
+                "fact_count": len(facts),
+                "fact_ids": [row.get("fact_id") for row in facts],
+                "unsupported_fact_ids": unsupported_fact_ids,
+                "recall_sufficient": bool(state.get("recall_sufficient")),
+                "answer_mode": str(state.get("answer_mode") or ""),
+                "answer_text": str(state.get("answer_text") or ""),
+                "cited_document_ids": list(state.get("cited_document_ids") or []),
+                "final_sources": list(state.get("final_sources") or []),
+                "confidence": confidence,
+                "faithfulness_ok": bool(state.get("faithfulness_ok")),
+                "faithfulness_forced_pass": bool(state.get("faithfulness_forced_pass")),
+                "graph_failure": dict(state.get("graph_failure") or {}),
+            }
+        )
+        return {}
 
     # --- Conditional routing ---
 
@@ -1369,10 +1441,10 @@ class RetrievalGraph:
         return "create_queries_for_unsupported_facts"
 
     def route_after_faithfulness(self, state: RetrievalState) -> str:
-        """End when faithfulness_ok; otherwise retry the same answer_mode."""
+        """Metrics then END when faithfulness_ok; otherwise retry the same answer_mode."""
 
         if state.get("faithfulness_ok"):
-            return "end"
+            return "post_deployment_metrics"
         if str(state.get("answer_mode") or "") == "partial":
             return "partial_answer"
         return "answer"
@@ -1383,8 +1455,8 @@ class RetrievalGraph:
         """Wire nodes and compile the LangGraph with a session checkpointer.
 
         Repair loop: recall_check → create_queries_for_unsupported_facts → strategy_upgrade → retrieval → recall_check.
-        Answer path: answer|partial_answer → faithfulness → END (or retry answer mode).
-        Retry exhaustion on configured nodes: handle_node_failure → error_answer → END.
+        Answer path: answer|partial_answer → faithfulness → post_deployment_metrics → END (or retry answer mode).
+        Retry exhaustion on configured nodes: handle_node_failure → error_answer → post_deployment_metrics → END.
         """
         builder = StateGraph(RetrievalState)
         node_retry = RetryPolicy(max_attempts=settings.graph_node_retry_max_attempts, initial_interval=1.0, backoff_factor=2.0)
@@ -1400,6 +1472,7 @@ class RetrievalGraph:
         builder.add_node("partial_answer", self.partial_answer_node, retry_policy=node_retry)
         builder.add_node("faithfulness", self.faithfulness_node, retry_policy=node_retry, error_handler=handle_node_failure)
         builder.add_node("error_answer", self.error_answer_node)
+        builder.add_node("post_deployment_metrics", self.post_deployment_metrics_node)
 
         builder.set_entry_point("query_normalisation")
         builder.add_edge("query_normalisation", "fact_decomposition")
@@ -1433,10 +1506,11 @@ class RetrievalGraph:
             {
                 "answer": "answer",
                 "partial_answer": "partial_answer",
-                "end": END,
+                "post_deployment_metrics": "post_deployment_metrics",
             },
         )
-        builder.add_edge("error_answer", END)
+        builder.add_edge("error_answer", "post_deployment_metrics")
+        builder.add_edge("post_deployment_metrics", END)
         return builder.compile(checkpointer=self.checkpointer)
 
     # --- Public invoke API (called from api.main) ---
@@ -1474,8 +1548,12 @@ class RetrievalGraph:
         try:
             # Root span: one trace per /run; child node spans nest under this context.
             with langfuse.start_as_current_observation(as_type="span", name="run", metadata={"session_id": session_id}) as root:
-                with propagate_attributes(session_id=session_id):
-                    return await self.graph.ainvoke(invoke_input, config=config)
+                root_token = langfuse_root_observation.set(root)
+                try:
+                    with propagate_attributes(session_id=session_id):
+                        return await self.graph.ainvoke(invoke_input, config=config)
+                finally:
+                    langfuse_root_observation.reset(root_token)
         finally:
             flush_langfuse()  # Flush batched observations before returning to the client.
 
@@ -1505,13 +1583,17 @@ class RetrievalGraph:
         langfuse = get_langfuse_client()
         try:
             with langfuse.start_as_current_observation(as_type="span", name="stream_run", metadata={"session_id": session_id}) as root:
-                with propagate_attributes(session_id=session_id):
-                    async for update in self.graph.astream(
-                        invoke_input,
-                        config=config,
-                        stream_mode="updates",
-                    ):
-                        yield update
+                root_token = langfuse_root_observation.set(root)
+                try:
+                    with propagate_attributes(session_id=session_id):
+                        async for update in self.graph.astream(
+                            invoke_input,
+                            config=config,
+                            stream_mode="updates",
+                        ):
+                            yield update
+                finally:
+                    langfuse_root_observation.reset(root_token)
         finally:
             flush_langfuse()
 
@@ -1539,7 +1621,11 @@ class RetrievalGraph:
         langfuse = get_langfuse_client()
         try:
             with langfuse.start_as_current_observation(as_type="span", name="resume", metadata={"session_id": session_id}) as root:
-                with propagate_attributes(session_id=session_id):
-                    return await self.graph.ainvoke(Command(resume=value), config=config)
+                root_token = langfuse_root_observation.set(root)
+                try:
+                    with propagate_attributes(session_id=session_id):
+                        return await self.graph.ainvoke(Command(resume=value), config=config)
+                finally:
+                    langfuse_root_observation.reset(root_token)
         finally:
             flush_langfuse()
