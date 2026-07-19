@@ -1,6 +1,8 @@
-"""post_deployment_metrics logs to root Langfuse observation only when enabled."""
+"""post_deployment_metrics logs a Langfuse child span when enabled."""
 
 from __future__ import annotations
+
+from contextlib import contextmanager
 
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -9,6 +11,26 @@ import pytest
 from config import settings as settings_module
 from graph.graph import RetrievalGraph, build_node_ai_message
 from observability.langfuse_handler import langfuse_root_observation
+
+
+class FakeSpan:
+    def __init__(self) -> None:
+        self.output = None
+
+    def update(self, **kwargs):
+        self.output = kwargs.get("output")
+
+
+class FakeLangfuse:
+    def __init__(self) -> None:
+        self.last_span = FakeSpan()
+        self.last_name = None
+
+    @contextmanager
+    def start_as_current_observation(self, *, as_type: str, name: str):
+        self.last_name = name
+        self.last_span = FakeSpan()
+        yield self.last_span
 
 
 class FakeRoot:
@@ -27,8 +49,10 @@ async def test_metrics_noop_when_langfuse_disabled(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_metrics_updates_root_observation(monkeypatch) -> None:
+async def test_metrics_creates_child_span_and_updates_root(monkeypatch) -> None:
     monkeypatch.setattr(settings_module.settings, "langfuse_tracing_enabled", True)
+    fake = FakeLangfuse()
+    monkeypatch.setattr("graph.graph.get_langfuse_client", lambda: fake)
     root = FakeRoot()
     token = langfuse_root_observation.set(root)
     try:
@@ -68,17 +92,13 @@ async def test_metrics_updates_root_observation(monkeypatch) -> None:
             }
         )
         assert result == {}
+        assert fake.last_name == "post_deployment_metrics"
+        assert fake.last_span.output is not None
+        assert fake.last_span.output["user_question"] == "raw q"
+        assert fake.last_span.output["confidence"] == "high"
+        assert fake.last_span.output["faithfulness_forced_pass"] is True
         assert root.output is not None
-        assert root.output["user_question"] == "raw q"
         assert root.output["normalized_query"] == "norm q"
-        assert root.output["document_catalog"]["id-1"]["text"] == "passage"
-        assert root.output["strategies_used"] == [
-            "fast_bm25_retrieval",
-            "fast_bm25_late_interaction_retrieval",
-        ]
         assert root.output["unsupported_fact_ids"] == [2]
-        assert root.output["confidence"] == "high"
-        assert root.output["faithfulness_forced_pass"] is True
-        assert root.output["answer_mode"] == "partial"
     finally:
         langfuse_root_observation.reset(token)

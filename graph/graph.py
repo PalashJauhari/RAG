@@ -1362,17 +1362,14 @@ class RetrievalGraph:
         }
 
     async def post_deployment_metrics_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Log end-of-turn eval fields onto the root Langfuse run/stream_run span.
+        """Log end-of-turn eval fields as a Langfuse child span under run/stream_run.
 
+        Also mirrors the snapshot onto the root span output when available.
         No LLM. No answer mutation. When Langfuse is off, this is a no-op.
         Hidden from SSE/UI progress.
         """
 
         if not settings.langfuse_tracing_enabled:
-            return {}
-
-        root = langfuse_root_observation.get()
-        if root is None:
             return {}
 
         confidence = "low"
@@ -1393,28 +1390,34 @@ class RetrievalGraph:
         unsupported_fact_ids = [
             row.get("fact_id") for row in facts if not row.get("verification_status")
         ]
-        root.update(
-            output={
-                "user_question": state.get("user_question") or "",
-                "normalized_query": state.get("normalized_query") or "",
-                "document_catalog": dict(state.get("document_catalog") or {}),
-                "strategies_used": list(state.get("strategies_used") or []),
-                "retrieval_retry_count": int(state.get("retrieval_retry_count") or 0),
-                "faithfulness_retry_count": int(state.get("faithfulness_retry_count") or 0),
-                "fact_count": len(facts),
-                "fact_ids": [row.get("fact_id") for row in facts],
-                "unsupported_fact_ids": unsupported_fact_ids,
-                "recall_sufficient": bool(state.get("recall_sufficient")),
-                "answer_mode": str(state.get("answer_mode") or ""),
-                "answer_text": str(state.get("answer_text") or ""),
-                "cited_document_ids": list(state.get("cited_document_ids") or []),
-                "final_sources": list(state.get("final_sources") or []),
-                "confidence": confidence,
-                "faithfulness_ok": bool(state.get("faithfulness_ok")),
-                "faithfulness_forced_pass": bool(state.get("faithfulness_forced_pass")),
-                "graph_failure": dict(state.get("graph_failure") or {}),
-            }
-        )
+        snapshot = {
+            "user_question": state.get("user_question") or "",
+            "normalized_query": state.get("normalized_query") or "",
+            "document_catalog": dict(state.get("document_catalog") or {}),
+            "strategies_used": list(state.get("strategies_used") or []),
+            "retrieval_retry_count": int(state.get("retrieval_retry_count") or 0),
+            "faithfulness_retry_count": int(state.get("faithfulness_retry_count") or 0),
+            "fact_count": len(facts),
+            "fact_ids": [row.get("fact_id") for row in facts],
+            "unsupported_fact_ids": unsupported_fact_ids,
+            "recall_sufficient": bool(state.get("recall_sufficient")),
+            "answer_mode": str(state.get("answer_mode") or ""),
+            "answer_text": str(state.get("answer_text") or ""),
+            "cited_document_ids": list(state.get("cited_document_ids") or []),
+            "final_sources": list(state.get("final_sources") or []),
+            "confidence": confidence,
+            "faithfulness_ok": bool(state.get("faithfulness_ok")),
+            "faithfulness_forced_pass": bool(state.get("faithfulness_forced_pass")),
+            "graph_failure": dict(state.get("graph_failure") or {}),
+        }
+
+        langfuse = get_langfuse_client()
+        with langfuse.start_as_current_observation(as_type="span", name="post_deployment_metrics") as node_span:
+            node_span.update(output=snapshot)
+
+        root = langfuse_root_observation.get()
+        if root is not None:
+            root.update(output=snapshot)
         return {}
 
     # --- Conditional routing ---
