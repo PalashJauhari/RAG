@@ -1,19 +1,68 @@
 # Factline
 
-> Grounded answers from an explicit retrieval graph — decompose, verify, repair, answer.
+Fact-first RAG orchestration on **LangGraph**, **Qdrant**, and **OpenAI**.
 
-Factline is a fact-first RAG pipeline built on **LangGraph**, **Qdrant**, and **OpenAI**. Each turn decomposes the question into checkable facts, retrieves evidence, verifies recall per fact, repairs gaps when needed, and only then answers from retrieved documents.
+Factline does not retrieve-and-hope. Each turn decomposes the question into checkable facts, retrieves evidence, verifies whether those facts are supported, repairs gaps when needed, then answers only from grounded passages — with a faithfulness gate before the response is finalized.
+
+---
+
+## Features
+
+- Explicit multi-node graph: normalize → decompose → retrieve → recall check → repair → answer → faithfulness
+- Hybrid retrieval: dense + BM25, optional ColBERT late interaction (Jina)
+- Turn-local `document_catalog` (point id → text / source / score) accumulated across repair passes
+- Cited-id validation + LLM faithfulness before shipping answers
+- FastAPI (`/run`, `/run/stream`) and optional Dash UI
+- HotpotQA offline benchmarks (retrieval and full graph)
+- Optional Langfuse tracing (including end-of-turn metrics on the root span)
+
+---
+
+## Architecture
+
+![Graph topology](artifacts/langgraph.png)
+
+1. **Normalize** the user message into a standalone query  
+2. **Decompose** into ordered facts (`fact_id`, verification shell)  
+3. **Route** — single fact retrieves with the normalized query; multiple facts split into focused queries  
+4. **Retrieve** via Qdrant hybrid search; repair passes exclude already-seen point ids  
+5. **Verify recall** — one batched LLM call over all facts against the catalog  
+6. **Repair** unsupported facts (gap-fill queries → strategy upgrade → retrieve) until the retry budget is exhausted  
+7. **Answer** or **partial answer** with `cited_document_ids` from `document_catalog`  
+8. **Faithfulness** — cited ids must exist in the catalog, then LLM grounding (retry up to `ANSWER_RETRY_MAX`)  
+9. **Post-deployment metrics** — optional Langfuse turn snapshot (hidden from UI)
+
+---
+
+## Benchmark results (HotpotQA)
+
+Evaluated on **50** HotpotQA distractor-split questions. The corpus was uploaded with large language model enrichment into the Qdrant collection `hotpot_with_enrichment` (`RETRIEVAL_TOP_K=5`). Quality scores are RAGAS means on a 0–1 scale. Latency is end-to-end wall-clock time per question in seconds (mean, 50th percentile, and 99th percentile).
+
+| Evaluation mode | Context precision | Context recall | Faithfulness | Answer correctness | Partial answers | Mean latency (seconds) | p50 latency (seconds) | p99 latency (seconds) |
+|-----------------|------------------:|---------------:|-------------:|-------------------:|----------------:|-----------------------:|----------------------:|----------------------:|
+| Dense embedding + BM25 | 0.47 | 0.70 | Not applicable | Not applicable | Not applicable | 0.66 | 0.62 | 2.39 |
+| Dense embedding + BM25 + late interaction | 0.51 | 0.80 | Not applicable | Not applicable | Not applicable | 3.28 | 1.42 | 15.70 |
+| Full Factline graph | 0.47 | 0.82 | 0.78 | 0.60 | 10 / 50 (20%) | 22.68 | 15.87 | 64.68 |
+
+**Notes**
+
+- Retrieval-only modes report context precision and context recall only.  
+- Full Factline graph mode also reports faithfulness and answer correctness; partial answers are included when scorable.  
+- Late interaction improves context recall versus dense embedding + BM25 alone, at higher latency.  
+- Full Factline graph adds multi-step large language model orchestration (highest latency; includes answer-level metrics).
+
+Raw result artifacts: `benchmarking/hotpotqa/data/results/` (see [benchmarking/hotpotqa/README.md](benchmarking/hotpotqa/README.md)).
+
+---
 
 ## Quick start
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # add OPENAI_API_KEY, QDRANT_URL, QDRANT_API_KEY, QDRANT_COLLECTION_NAME
+cp .env.example .env   # set OPENAI_API_KEY, QDRANT_URL, QDRANT_API_KEY, QDRANT_COLLECTION_NAME
 uvicorn api.main:app --reload
 ```
-
-Send a query:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/run \
@@ -21,7 +70,7 @@ curl -X POST http://127.0.0.1:8000/run \
   -d '{"session_id":"demo","message":"Compare refund policies for Enterprise and Consumer tiers."}'
 ```
 
-Stream node progress (SSE):
+Stream progress (SSE):
 
 ```bash
 curl -N -X POST http://127.0.0.1:8000/run/stream \
@@ -29,152 +78,89 @@ curl -N -X POST http://127.0.0.1:8000/run/stream \
   -d '{"session_id":"demo","message":"Compare refund policies for Enterprise and Consumer tiers."}'
 ```
 
-Optional Dash UI (port 8050): `python ui/dash_app.py`
+Optional UI: `python ui/dash_app.py` (port 8050).
 
-## How it works
-
-![Graph topology](artifacts/langgraph.png)
-
-1. **Normalize** the latest user message into a standalone query.
-2. **Decompose** into an ordered `facts` list (`fact_id`, verification shell).
-3. **Route** on fact count: one fact → retrieve with the normalized query; multiple facts → split into focused queries.
-4. **Retrieve** with hybrid Qdrant search; repair passes exclude already-seen point ids (HasId) and dedupe by id.
-5. **Verify recall** with one batched LLM call for all facts against retrieved passages; update verification in place on the same `facts` list.
-6. **Repair** unsupported facts via `create_queries_for_unsupported_facts` → `strategy_upgrade` → retrieval (until retries exhausted).
-7. **Answer** (or partial answer) with `cited_document_ids` from `document_catalog`.
-8. **Faithfulness** checks cited ids against `document_catalog`, then LLM grounding (retry up to `ANSWER_RETRY_MAX`); code fills `sources` from catalog.
-
-Unified fact record:
-
-```json
-{
-  "fact_id": 1,
-  "fact": "Whether Enterprise tier has a published refund policy",
-  "verification_status": false,
-  "evidence_document_ids": [],
-  "search_queries": [],
-  "gap_fill_explanation": ""
-}
-```
+---
 
 ## Configuration
 
-Copy `.env.example` to `.env`. Essential groups:
+Copy `.env.example` → `.env`. Main groups:
 
 | Group | Variables |
 |-------|-----------|
+| OpenAI | `OPENAI_API_KEY`, `OPENAI_EMBEDDING_MODEL`, `OPENAI_EMBEDDING_DIMENSIONS` |
 | Qdrant | `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION_NAME` |
-| Retrieval | `RETRIEVAL_TOP_K`, `RETRIEVAL_CANDIDATE_DENSE_MMR`, `RETRIEVAL_CANDIDATE_BM25`, `RETRIEVAL_CANDIDATE_FOR_LATE_INTERACTION`, `RETRIEVAL_MMR_DIVERSITY` |
-| Repair | `RETRIEVAL_LOOP_MAX_RETRIES` (repair loops escalate to ColBERT late interaction when enabled; default starts at `fast_bm25_retrieval`) |
-| Node retries | `GRAPH_NODE_RETRY_MAX_ATTEMPTS` (LangGraph `RetryPolicy` on LLM/retrieval nodes for transient failures; separate from recall repair loop and routes to `error_answer` when exhausted) |
-| Models | `QUERY_NORMALISATION_MODEL`, `QUERY_DECOMPOSITION_MODEL`, `RECALL_CHECK_MODEL`, `GAP_FILL_MODEL`, `FINAL_ANSWER_MODEL` |
+| Retrieval | `USE_BM25`, `USE_LATE_INTERACTION`, `RETRIEVAL_TOP_K`, candidate pool sizes, `RETRIEVAL_MMR_DIVERSITY` |
+| Repair | `RETRIEVAL_LOOP_MAX_RETRIES`, `ANSWER_RETRY_MAX` |
+| Node retries | `GRAPH_NODE_RETRY_MAX_ATTEMPTS` |
+| Models | `QUERY_NORMALISATION_MODEL`, `QUERY_DECOMPOSITION_MODEL`, `RECALL_CHECK_MODEL`, `GAP_FILL_MODEL`, `FINAL_ANSWER_MODEL`, `FAITHFULNESS_MODEL` |
 | Observability | `LANGFUSE_TRACING_ENABLED` (+ Langfuse keys when true) |
 
-Retrieval limits are **fixed every pass**. Repair loops rely on new gap-fill queries plus Qdrant HasId exclusion, not widened top-k.
+HotpotQA-only knobs live in `benchmarking/hotpotqa/.env` (`HOTPOTQA_MAX_QUESTIONS`, `HOTPOTQA_RAGAS_MODEL`).
 
-## Chunk payload contract
+---
 
-Every Qdrant point (HotpotQA, PMC, or future corpora) uses the same payload shape. **Embedding** uses enriched `text`; **graph LLM nodes and RAGAS** use raw passage text only (`additional_metadata.raw_text`).
+## Document catalog & payload contract
 
-### Qdrant point `payload`
+Retriever hits keep the full Qdrant payload. The graph stores a slim catalog:
+
+```text
+point_id → { text, source, score }
+```
+
+- `text` = `additional_metadata.raw_text` (grounding / RAGAS)  
+- `source` = `additional_metadata.source`  
+- Embedding string may be enriched at upload; LLMs answer from **raw** text only  
 
 ```json
 {
-  "text": "embedded string; equals raw_text when enrichments is {}",
-  "enrichments": {
-    "summary": "optional structured enrichment"
-  },
+  "text": "string used for dense / BM25 / ColBERT at upload",
+  "enrichments": {},
   "additional_metadata": {
-    "raw_text": "mandatory original passage or chunk",
-    "source": "hotpotqa",
-    "context_id": "source-specific keys as needed"
+    "raw_text": "original passage",
+    "source": "hotpotqa"
   }
 }
 ```
 
-| Field | Rule |
-|-------|------|
-| `text` | Only string used for dense, BM25, and ColBERT at upload |
-| `enrichments` | Structured LLM enrichment; `{}` when none |
-| `additional_metadata.raw_text` | Always required; used by graph LLM nodes and RAGAS |
-| No enrichment | `enrichments = {}` and `text == raw_text` |
+Production PMC ingestion: [ingestion/README.md](ingestion/README.md).
 
-### Production ingestion
-
-PMC PDF download, Unstructured partition/chunk, and Qdrant upload live under **`ingestion/`** with its own `.env`. See **[ingestion/README.md](ingestion/README.md)** for the full flow, commands, and env reference.
-
-```text
-download_data  →  unstructured_pipeline  →  chunks.json  →  qdrant_upload  →  Qdrant
-```
-
-**Isolation:** `ingestion/` does not import graph, retriever, or benchmark code. HotpotQA benchmarking is separate under `benchmarking/hotpotqa/`. Graph reads raw passage text via `tool_wrappers/retrieval_payload.py`.
-
-### At retrieval time
-
-| Layer | Shape | `text` meaning |
-|-------|--------|----------------|
-| Retriever hit | `{id, score, rank, payload}` | Full Qdrant payload |
-| Graph `document_catalog` (during turn) | `{id: {text, source, score}}` | **`raw_text`** + `additional_metadata.source` |
-| API `/run` `document_catalog` | same map | Corpus from the completed turn (reset on the next `/run`) |
-
-Catalog build: `tool_wrappers/retrieval_payload.py` (`catalog_entries_from_retriever_hits`). After answer: `faithfulness` (cited-id check + grounding); `sources` filled from catalog by code.
-
-After changing the contract, **re-upload** your Qdrant collection (e.g. `python -m benchmarking.hotpotqa.qdrant_upload.upload` for benchmarks).
+---
 
 ## API
 
 | Endpoint | Description |
 |----------|-------------|
-| `POST /run` | Run one turn; returns `{ answer, sources, confidence, cited_document_ids, document_catalog }` |
-| `POST /run/stream` | Same turn with SSE node progress (counts only on the wire) |
-| `POST /resume` | Reserved for future clarification interrupts |
+| `POST /run` | One turn → answer, sources, confidence, cited ids, document catalog |
+| `POST /run/stream` | SSE node progress; final frame when `faithfulness_ok` |
+| `POST /resume` | Reserved for clarification interrupts |
 
-**`/run` response:** Turn-local scratch (including `document_catalog`) is reset at the start of the next `/run`. `sources` are code-filled from catalog after faithfulness (non-empty `source` labels only).
+`sources` are filled from the catalog after faithfulness (LLM leaves `sources: []`). Turn scratch, including `document_catalog`, resets at the next `/run`.
 
-**`/run/stream`:** Node events expose retrieval **counts** (not passage text). Final frame is emitted when ``faithfulness_ok`` is true (pass or forced pass after ``ANSWER_RETRY_MAX``). `done` includes `retrieved_doc_count`.
-
-Example `/run` JSON shape:
-
-```json
-{
-  "session_id": "demo",
-  "interrupted": false,
-  "question": null,
-  "answer": "...",
-  "sources": ["hotpotqa"],
-  "confidence": "high",
-  "cited_document_ids": ["uuid..."],
-  "document_catalog": {}
-}
-```
-
-Example SSE frames:
-
-```text
-data: {"type":"node","node":"fact_decomposition","status":"completed","label":"Decomposing facts","fact_count":2}
-data: {"type":"node","node":"recall_check","status":"completed","label":"Checking recall","recall_sufficient":true,"unsupported_fact_count":0}
-data: {"type":"final","node":"faithfulness","status":"completed","label":"Answer ready","answer":"...","sources":["hotpotqa"]}
-data: {"type":"done","session_id":"demo","retrieved_doc_count":12}
-```
+---
 
 ## Project layout
 
 | Path | Role |
 |------|------|
 | `graph/` | LangGraph state, nodes, routing |
-| `retriever/` | Qdrant hybrid retrieval (dense, BM25, ColBERT) |
-| `prompts/` | One system prompt per LLM node |
-| `output_validation/` | Pydantic schemas for structured outputs |
-| `api/` | FastAPI `/run`, `/run/stream`, `/resume` |
+| `retriever/` | Qdrant hybrid retrieval |
+| `prompts/` | System prompts per LLM node |
+| `output_validation/` | Pydantic structured-output schemas |
+| `api/` | FastAPI app |
 | `ui/` | Dash chat client |
-| `ingestion/` | Self-contained PMC pipeline: download, chunk stub, `.env`, embed, Qdrant upload |
-| `benchmarking/` | Optional offline retrieval / eval suite |
-| `artifacts/` | Graph topology (`langgraph.png`, `langgraph.mmd`); regenerate with `python scripts/plot_langgraph.py` |
+| `ingestion/` | PMC download → chunk → embed → Qdrant |
+| `benchmarking/hotpotqa/` | HotpotQA download, upload, eval |
+| `artifacts/` | Graph topology (`langgraph.png`) |
+
+---
 
 ## Observability
 
-Set `LANGFUSE_TRACING_ENABLED=true` for one trace per `/run` or `/run/stream` with nested node spans and LLM generations (token counts). SSE and the UI expose counts only; full passage text stays in Langfuse when enabled.
+With `LANGFUSE_TRACING_ENABLED=true`, each `/run` or `/run/stream` opens a root span with nested node and generation spans. `post_deployment_metrics` writes a turn snapshot onto the root span output (not shown in the UI progress stream).
+
+---
 
 ## Stack
 
-LangGraph · Qdrant · OpenAI · optional Jina ColBERT · optional Langfuse
+LangGraph · Qdrant · OpenAI · Jina ColBERT (optional) · Langfuse (optional) · RAGAS (benchmarks)
