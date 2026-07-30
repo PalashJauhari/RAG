@@ -605,13 +605,12 @@ class RetrievalGraph:
             ``normalized_query`` — a self-contained search/answer string for downstream nodes.
 
         Reads:
+            ``user_question`` — raw user utterance for this turn (also used as LLM fallback).
             ``messages`` — full checkpointed chat (HumanMessage + prior AIMessage JSON).
-            ``message_summary`` — optional rolled-up history (unused while truncation disabled).
+            ``message_summary`` — optional rolled-up history (empty until a summary node exists).
 
         Writes:
-            ``normalized_query`` — from ``QueryNormalisationResult`` or fallback to raw user text.
-            ``messages`` — optional ``RemoveMessage`` ops when truncation is enabled (currently []).
-            ``message_summary`` — updated summary when truncation is enabled (currently unchanged).
+            ``normalized_query`` — from ``QueryNormalisationResult`` or fallback to ``user_question``.
 
         LLM:
             Model: ``settings.query_normalisation_model``
@@ -623,23 +622,15 @@ class RetrievalGraph:
 
         messages = state.get("messages", [])
         summary = state.get("message_summary", "")
-        # When enabled: evicts old turns, updates summary, returns RemoveMessage ops for checkpoint.
-        # summary, kept_messages, remove_ops = await truncate_and_summarize(messages, summary)
-        kept_messages = messages  # No truncation: use full history for normalisation context.
-        remove_ops = []  # No RemoveMessage updates applied this step.
-
-        # Last HumanMessage in time order = current user utterance for this turn.
-        latest_user_query = ""
-        for message in reversed(kept_messages):
-            if isinstance(message, HumanMessage):
-                latest_user_query = str(message.content)
-                break
+        latest_user_query = str(state.get("user_question") or "").strip()
 
         context = (
+            "## User question\n"
+            f"{latest_user_query or '(none)'}\n\n"
             "## Conversation Summary\n"
             f"{summary or '(none)'}\n\n"
             "## Recent Messages\n"
-            f"{messages_to_plain_context(kept_messages)}"
+            f"{messages_to_plain_context(messages)}"
         )
         # Structured LLM output → QueryNormalisationResult (standalone query).
         llm = get_llm_client(
@@ -666,13 +657,7 @@ class RetrievalGraph:
             response = result["parsed"]
             normalized_query = response.normalized_query.strip() or latest_user_query.strip()
 
-        # remove_ops shrink checkpoint when truncation is on; message_summary holds rolled-up history.
-        merge = {
-            "messages": remove_ops,
-            "message_summary": summary,
-            "normalized_query": normalized_query,
-        }
-        return merge
+        return {"normalized_query": normalized_query}
 
     async def fact_decomposition_node(self, state: RetrievalState) -> dict[str, Any]:
         """Decompose the normalized query into atomic required facts (information needs).
