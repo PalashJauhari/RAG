@@ -598,7 +598,7 @@ class RetrievalGraph:
     # Langfuse (when enabled): each node opens a span; LLM calls nest as ``{node}-llm``.
 
     async def query_normalisation_node(self, state: RetrievalState) -> dict[str, Any]:
-        """Rewrite the latest user message into a standalone query using conversation context.
+        """Rewrite the latest user message into a standalone query using conversation context
 
         Purpose:
             Multi-turn questions often use pronouns or omit entities. This node produces
