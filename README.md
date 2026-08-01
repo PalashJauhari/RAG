@@ -164,3 +164,22 @@ With `LANGFUSE_TRACING_ENABLED=true`, each `/run` or `/run/stream` opens a root 
 ## Stack
 
 LangGraph · Qdrant · OpenAI · Jina ColBERT (optional) · Langfuse (optional) · RAGAS (benchmarks)
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Short notes:
+
+```bash
+make install
+make test
+./start.sh    # or: make start
+./stop.sh     # or: make stop
+```
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).

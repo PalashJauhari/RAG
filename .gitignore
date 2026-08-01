@@ -1,23 +1,68 @@
+# --- Secrets — NEVER commit real keys or tokens ---
+# Block all env files; only the tracked template is allowed (see exception below).
+.env
+**/.env
+*.env
+.env.*
+!.env.example
+!**/.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Distribution / packaging ---
+dist/
+build/
+*.egg-info/
+*.egg
+*.pem
+
+# --- Testing / type / lint caches ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+# --- IDE ---
+.idea/
+.vscode/
+*.swp
+*.swo
 .DS_Store
 
-.env
-ingestion/.env
-__pycache__/
-*.pyc
-.venv/
-.pytest_cache/
+# --- Logs ---
+*.log
+logs/
+
+# --- Generated artifacts (keep documented topology image + README) ---
+artifacts/*
+!artifacts/README.md
+!artifacts/langgraph.png
+
+# --- Ingestion local data ---
+ingestion/raw_pdfs/*
+!ingestion/raw_pdfs/.gitkeep
+ingestion/sandbox/out/*
+!ingestion/sandbox/out/.gitkeep
+
+# --- HotpotQA local dumps ---
 benchmarking/hotpotqa/data/raw/*
 !benchmarking/hotpotqa/data/raw/.gitkeep
 benchmarking/hotpotqa/data/processed/*
 !benchmarking/hotpotqa/data/processed/.gitkeep
 benchmarking/hotpotqa/data/results/*
 !benchmarking/hotpotqa/data/results/.gitkeep
-
-artifacts/*
-!artifacts/README.md
-
-ingestion/raw_pdfs/*
-!ingestion/raw_pdfs/.gitkeep
-
-ingestion/sandbox/out/*
-!ingestion/sandbox/out/.gitkeep
