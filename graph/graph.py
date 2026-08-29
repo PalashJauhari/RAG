@@ -133,9 +133,8 @@ class RetrievalState(TypedDict, total=False):
     # Standalone query rewritten from the latest user message + thread context.
 
     retrieval_strategy: str
-    # Active Qdrant tier for retrieval_node: e.g. ``fast_bm25_retrieval``,
-    # ``fast_bm25_late_interaction_retrieval``. Seeded by query_complexity; upgraded by
-    # strategy_upgrade during repair loops.
+    # Intended Qdrant tier for the next retrieval pass. Default
+    # ``fast_bm25_retrieval`` at turn start; only ``strategy_upgrade`` changes it.
 
     active_retrieval_queries: list[str]
     # One or more search strings passed to Retriever.retrieve this pass. Seeded from
@@ -146,7 +145,7 @@ class RetrievalState(TypedDict, total=False):
     # Turn-local map point_id → {text, source, score}; merged across retrieval passes.
 
     strategies_used: list[str]
-    # Retrieval strategies attempted this turn (seeded at query_complexity, appended on upgrade).
+    # Strategies actually executed this turn; appended only in ``retrieval_node``.
 
     # --- Fact scratch (reset each /run; recall_check mutates verification fields) ---
 
@@ -502,7 +501,7 @@ def prepare_state_for_next_question(user_query: str) -> dict[str, Any]:
         "messages": [HumanMessage(content=user_query)],
         "user_question": user_query,
         "normalized_query": "",
-        "retrieval_strategy": "",
+        "retrieval_strategy": "fast_bm25_retrieval",
         "active_retrieval_queries": [],
         "document_catalog": {},
         "strategies_used": [],
@@ -712,15 +711,14 @@ class RetrievalGraph:
         """Classify retrieval complexity and seed the first retrieval pass.
 
         Purpose:
-            Decide whether per-fact query splitting is needed (``needs_split``) and initialize
-            ``retrieval_strategy`` + ``active_retrieval_queries`` for the first retrieval.
+            Decide whether per-fact query splitting is needed (``needs_split``) and seed
+            ``active_retrieval_queries`` for the first retrieval.
 
         Reads:
             ``normalized_query``, ``facts``
 
         Writes:
             ``needs_split`` — ``len(facts) > 1``; also used by Langfuse span output.
-            ``retrieval_strategy`` — always ``fast_bm25_retrieval`` on first pass.
             ``active_retrieval_queries`` — ``[normalized_query]`` when query is non-empty.
 
         Routes via:
@@ -747,8 +745,6 @@ class RetrievalGraph:
             "needs_split": needs_split,
             "explanation": explanation,
             "fact_count": fact_count,
-            "retrieval_strategy": "fast_bm25_retrieval",
-            "strategies_used": ["fast_bm25_retrieval"],
             "active_retrieval_queries": active_retrieval_queries,
         }
 
@@ -828,7 +824,8 @@ class RetrievalGraph:
 
         Writes:
             ``document_catalog`` — merged map of new point ids.
-            ``retrieval_strategy``, ``active_retrieval_queries``
+            ``active_retrieval_queries``
+            ``strategies_used`` — append the strategy actually executed this pass.
 
         Routes to:
             ``recall_check`` (fixed edge).
@@ -874,8 +871,8 @@ class RetrievalGraph:
 
         return {
             "document_catalog": merged_catalog,
-            "retrieval_strategy": strategy,
             "active_retrieval_queries": search_queries,
+            "strategies_used": list(state.get("strategies_used") or []) + [strategy],
         }
 
     # --- Recall / repair nodes ---
@@ -1049,7 +1046,6 @@ class RetrievalGraph:
         return {
             "retrieval_strategy": strategy,
             "retrieval_retry_count": retry_count,
-            "strategies_used": list(state.get("strategies_used") or []) + [strategy],
         }
 
     # --- Answer and cleanup ---
