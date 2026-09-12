@@ -10,7 +10,7 @@ Factline does not retrieve-and-hope. Each turn decomposes the question into chec
 
 - Explicit multi-node graph: normalize → decompose → retrieve → recall check → repair → answer → faithfulness
 - Hybrid retrieval: dense + BM25, optional ColBERT late interaction (Jina)
-- Turn-local `document_catalog` (point id → text / source / score) accumulated across repair passes
+- Turn-local `document_catalog` (point id → text / score / source URL / page) accumulated across repair passes
 - Cited-id validation + LLM faithfulness before shipping answers
 - FastAPI (`/run`, `/run/stream`) and optional Dash UI
 - HotpotQA offline benchmarks (retrieval and full graph)
@@ -90,7 +90,7 @@ Copy `.env.example` → `.env`. Main groups:
 |-------|-----------|
 | OpenAI | `OPENAI_API_KEY`, `OPENAI_EMBEDDING_MODEL`, `OPENAI_EMBEDDING_DIMENSIONS` |
 | Qdrant | `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION_NAME` |
-| Retrieval | `USE_BM25`, `USE_LATE_INTERACTION`, `RETRIEVAL_TOP_K`, candidate pool sizes, `RETRIEVAL_MMR_DIVERSITY` |
+| Retrieval | `USE_BM25`, `USE_LATE_INTERACTION`, `DENSE_PQ` (`none` / `pq8` / `pq16` / `pq32`; ingest+app must match), `RETRIEVAL_TOP_K`, candidate pool sizes, `RETRIEVAL_MMR_DIVERSITY` |
 | Repair | `RETRIEVAL_LOOP_MAX_RETRIES`, `ANSWER_RETRY_MAX` |
 | Node retries | `GRAPH_NODE_RETRY_MAX_ATTEMPTS` |
 | Models | `QUERY_NORMALISATION_MODEL`, `QUERY_DECOMPOSITION_MODEL`, `RECALL_CHECK_MODEL`, `GAP_FILL_MODEL`, `FINAL_ANSWER_MODEL`, `FAITHFULNESS_MODEL` |
@@ -105,11 +105,13 @@ HotpotQA-only knobs live in `benchmarking/hotpotqa/.env` (`HOTPOTQA_MAX_QUESTION
 Retriever hits keep the full Qdrant payload. The graph stores a slim catalog:
 
 ```text
-point_id → { text, source, score }
+point_id → { text, score, source, page_number }
 ```
 
-- `text` = `additional_metadata.raw_text` (grounding / RAGAS)  
-- `source` = `additional_metadata.source`  
+- `text` = `additional_metadata.raw_text` (grounding / RAGAS / answer citations)  
+- `source` = arXiv abs URL (UI only, cited chunks)  
+- `page_number` = Unstructured PDF page (UI only, cited chunks)  
+- Answer LLMs see `{text, score}` keyed by point id and must return those ids in `cited_document_ids`  
 - Embedding string may be enriched at upload; LLMs answer from **raw** text only  
 
 ```json
@@ -118,12 +120,15 @@ point_id → { text, source, score }
   "enrichments": {},
   "additional_metadata": {
     "raw_text": "original passage",
-    "source": "hotpotqa"
+    "source": "https://arxiv.org/abs/1706.03762",
+    "page_number": 3,
+    "filename": "arxiv_1706.03762.pdf",
+    "arxiv_id": "1706.03762"
   }
 }
 ```
 
-Production PMC ingestion: [ingestion/README.md](ingestion/README.md).
+Production arXiv ingestion: [ingestion/README.md](ingestion/README.md). Collection: `arxiv_cs_ds`.
 
 ---
 
@@ -135,7 +140,7 @@ Production PMC ingestion: [ingestion/README.md](ingestion/README.md).
 | `POST /run/stream` | SSE node progress; final frame when `faithfulness_ok` |
 | `POST /resume` | Reserved for clarification interrupts |
 
-`sources` are filled from the catalog after faithfulness (LLM leaves `sources: []`). Turn scratch, including `document_catalog`, resets at the next `/run`.
+`sources` are the cited catalog point ids after faithfulness (LLM leaves `sources: []`). Turn scratch, including `document_catalog`, resets at the next `/run`.
 
 ---
 
@@ -149,7 +154,7 @@ Production PMC ingestion: [ingestion/README.md](ingestion/README.md).
 | `output_validation/` | Pydantic structured-output schemas |
 | `api/` | FastAPI app |
 | `ui/` | Dash chat client |
-| `ingestion/` | PMC download → chunk → embed → Qdrant |
+| `ingestion/` | arXiv download → chunk → embed → Qdrant (`arxiv_cs_ds`) |
 | `benchmarking/hotpotqa/` | HotpotQA download, upload, eval |
 | `artifacts/` | Graph topology (`langgraph.png`) |
 

@@ -71,7 +71,13 @@ async def test_metrics_creates_child_span_and_updates_root(monkeypatch) -> None:
                 "user_question": "raw q",
                 "normalized_query": "norm q",
                 "document_catalog": {
-                    "id-1": {"text": "passage", "source": "hotpotqa", "score": 0.9},
+                    "id-1": {
+                        "text": "passage",
+                        "source": "hotpotqa",
+                        "score": 0.9,
+                        "images_base64": ["secret-bytes"],
+                        "table_html": ["<table>ok</table>"],
+                    },
                 },
                 "strategies_used": ["fast_bm25_retrieval", "fast_bm25_late_interaction_retrieval"],
                 "retrieval_retry_count": 2,
@@ -100,5 +106,8 @@ async def test_metrics_creates_child_span_and_updates_root(monkeypatch) -> None:
         assert root.output is not None
         assert root.output["normalized_query"] == "norm q"
         assert root.output["unsupported_fact_ids"] == [2]
+        assert "images_base64" not in root.output["document_catalog"]["id-1"]
+        assert "images_base64" not in fake.last_span.output["document_catalog"]["id-1"]
+        assert fake.last_span.output["document_catalog"]["id-1"]["table_html"] == ["<table>ok</table>"]
     finally:
         langfuse_root_observation.reset(token)

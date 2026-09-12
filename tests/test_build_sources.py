@@ -11,7 +11,7 @@ def test_build_sources_preserves_first_seen_order() -> None:
         "2": {"text": "b", "source": "beta", "score": 1},
         "3": {"text": "c", "source": "gamma", "score": 1},
     }
-    assert build_sources_from_catalog(catalog, ["2", "1", "3"]) == ["beta", "alpha", "gamma"]
+    assert build_sources_from_catalog(catalog, ["2", "1", "3"]) == ["2", "1", "3"]
 
 
 def test_build_sources_empty_catalog() -> None:

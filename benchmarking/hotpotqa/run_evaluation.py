@@ -69,14 +69,17 @@ def validate_strategy_env(strategy: RetrievalStrategy) -> None:
 
 
 def get_raw_text(payload: dict[str, Any]) -> str:
-    """Return raw passage text from a retrieved doc payload."""
+    """Return payload ``text`` (catalog/LLM string). Fall back to ``raw_text`` if empty."""
 
+    text = str(payload.get("text") or "")
+    if text.strip():
+        return text
     additional = payload.get("additional_metadata")
     if isinstance(additional, dict):
         raw = additional.get("raw_text")
         if raw is not None and str(raw).strip():
             return str(raw)
-    return str(payload.get("text") or "")
+    return text
 
 
 def get_metadata(payload: dict[str, Any]) -> dict[str, Any]:

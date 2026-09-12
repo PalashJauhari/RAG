@@ -6,14 +6,16 @@ import json
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from qdrant_pq import normalize_dense_pq
 
 INGESTION_ROOT = Path(__file__).resolve().parent
 
 
 class IngestionConfig(BaseSettings):
-    """PMC ingestion: Unstructured, Qdrant, OpenAI, Jina (standalone from app/benchmark)."""
+    """arXiv PDF ingestion: Unstructured, Qdrant, OpenAI, Jina (standalone from app/benchmark)."""
 
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"
@@ -33,6 +35,7 @@ class IngestionConfig(BaseSettings):
 
     use_bm25: bool = True
     use_late_interaction: bool = True
+    dense_pq: str = "none"
 
     jina_api_key: str = ""
     jina_colbert_model: str = "jina-colbert-v2"
@@ -84,6 +87,11 @@ class IngestionConfig(BaseSettings):
         extra="ignore",
         populate_by_name=True,
     )
+
+    @field_validator("dense_pq")
+    @classmethod
+    def _normalize_dense_pq(cls, value: str) -> str:
+        return normalize_dense_pq(value)
 
     def resolve_path(self, relative: str) -> Path:
         """Resolve a path relative to ``ingestion/`` unless already absolute."""

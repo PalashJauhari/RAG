@@ -22,13 +22,13 @@ def test_graph_run_response_uses_final_sources_and_catalog() -> None:
             "id-1": {"text": "passage", "source": "hotpotqa", "score": 0.9},
         },
         "cited_document_ids": ["id-1"],
-        "final_sources": ["hotpotqa"],
+        "final_sources": ["id-1"],
         "faithfulness_ok": True,
         "answer_mode": "full",
     }
     response = graph_run_response("sess", state)
     assert response["answer"] == "done"
-    assert response["sources"] == ["hotpotqa"]
+    assert response["sources"] == ["id-1"]
     assert response["cited_document_ids"] == ["id-1"]
     assert response["document_catalog"]["id-1"]["text"] == "passage"
     assert response["faithfulness_ok"] is True

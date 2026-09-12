@@ -17,7 +17,7 @@ You receive these blocks in the user message:
 - **Normalized query**
 - **Facts**: each row has fact_id, fact, verification_status, evidence_document_ids, and optional
   repair fields
-- **Document catalog**: point id → {text, source, score}; resolve evidence_document_ids via this map
+- **Document catalog**: point id → {text, score}; resolve evidence_document_ids via this map
 
 Grounding rules:
 1. Answer only from relevant catalog passages.

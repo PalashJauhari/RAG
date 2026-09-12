@@ -552,3 +552,43 @@ body {
   background: none;
   padding: 0;
 }
+
+.rag-cited {
+  margin-top: 0.85em;
+  padding-top: 0.7em;
+  border-top: 1px solid var(--rag-border);
+}
+.rag-cited-heading {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--rag-muted);
+  margin-bottom: 0.5em;
+}
+.rag-cited-item {
+  margin-bottom: 0.75em;
+}
+.rag-cited-item:last-child {
+  margin-bottom: 0;
+}
+.rag-cited-meta {
+  font-size: 12px;
+  margin-bottom: 0.4em;
+  word-break: break-all;
+}
+.rag-cited-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.rag-cited-table td,
+.rag-cited-table th {
+  border: 1px solid var(--rag-border);
+  padding: 4px 6px;
+}
+.rag-cited-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin-top: 0.4em;
+  border-radius: 6px;
+}

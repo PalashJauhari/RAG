@@ -162,6 +162,63 @@ def _meta_row(*, is_user: bool) -> html.Div:
     )
 
 
+def _cited_media_children(citations: list | None) -> list:
+    """Render cited source URL, page, tables, and images when present."""
+
+    if not citations:
+        return []
+    blocks: list = []
+    for row in citations:
+        if not isinstance(row, dict):
+            continue
+        kids: list = []
+        source = str(row.get("source") or "").strip()
+        page = row.get("page_number")
+        meta: list = []
+        if source:
+            if source.startswith("http://") or source.startswith("https://"):
+                meta.append(
+                    html.A(
+                        source,
+                        href=source,
+                        target="_blank",
+                        rel="noopener noreferrer",
+                    )
+                )
+            else:
+                meta.append(html.Span(source))
+        if page is not None and str(page).strip() != "":
+            if meta:
+                meta.append(html.Span(" · "))
+            meta.append(html.Span(f"p. {page}"))
+        if meta:
+            kids.append(html.Div(meta, className="rag-cited-meta"))
+        for table in row.get("table_html") or []:
+            html_src = str(table or "").strip()
+            if html_src:
+                kids.append(
+                    dcc.Markdown(
+                        html_src,
+                        dangerously_allow_html=True,
+                        className="rag-cited-table",
+                    )
+                )
+        for image in row.get("images_base64") or []:
+            data = str(image or "").strip()
+            if data:
+                kids.append(
+                    html.Img(
+                        src=f"data:image/png;base64,{data}",
+                        className="rag-cited-image",
+                    )
+                )
+        if kids:
+            blocks.append(html.Div(kids, className="rag-cited-item"))
+    if not blocks:
+        return []
+    return [html.Div([html.Div("Sources", className="rag-cited-heading"), *blocks], className="rag-cited")]
+
+
 @callback(Output("chat-area", "children"), Input("chat-state", "data"))
 def render_chat(messages):
     """Render ``chat-state`` as user/assistant bubbles (Markdown for assistant)."""
@@ -208,6 +265,7 @@ def render_chat(messages):
                                     dangerously_allow_html=False,
                                     className="rag-md",
                                 ),
+                                *_cited_media_children(m.get("citations")),
                                 _meta_row(is_user=False),
                             ],
                         ),

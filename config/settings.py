@@ -4,7 +4,10 @@ Consumed by FastAPI, :class:`~graph.graph.RetrievalGraph`, :class:`~retriever.re
 and middleware. HotpotQA benchmarks use a separate settings module under ``benchmarking/hotpotqa/``.
 """
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from qdrant_pq import normalize_dense_pq
 
 
 class Settings(BaseSettings):
@@ -37,6 +40,7 @@ class Settings(BaseSettings):
     use_bm25: bool = True
     use_late_interaction: bool = True
     use_mmr: bool = True
+    dense_pq: str = "none"
 
     retrieval_top_k: int = 8
     retrieval_candidate_dense_mmr: int = 100
@@ -88,6 +92,11 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @field_validator("dense_pq")
+    @classmethod
+    def _normalize_dense_pq(cls, value: str) -> str:
+        return normalize_dense_pq(value)
 
 
 settings = Settings()

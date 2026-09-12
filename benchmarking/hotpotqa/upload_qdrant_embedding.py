@@ -194,6 +194,8 @@ def context_to_chunk(record: dict[str, Any], context: dict[str, Any]) -> tuple[s
             "level": record.get("level"),
             "is_supporting": context.get("is_supporting"),
             "supporting_sentence_ids": context.get("supporting_sentence_ids") or [],
+            "images_base64": None,
+            "table_html": None,
         },
     )
     return point_id, payload

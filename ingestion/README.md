@@ -1,24 +1,25 @@
-# Ingestion (PMC → Qdrant)
+# Ingestion (arXiv → Qdrant)
 
-Standalone PMC pipeline: download PDFs, partition/chunk with Unstructured, embed and upsert to Qdrant.
+Standalone arXiv pipeline: download PDFs, partition/chunk with Unstructured, embed and upsert to Qdrant.
 
 Configure via **`ingestion/.env` only** — not repo root or HotpotQA benchmark env.
+
+Target collection name: **`arxiv_cs_ds`**.
 
 ## Prerequisites
 
 - Python env with repo dependencies (e.g. `rag_env_1`)
 - `cp ingestion/.env.example ingestion/.env` and fill keys
 - Unstructured image LLM: configure OpenAI in [platform.unstructured.io](https://platform.unstructured.io) (not in `.env`)
+- Optional `CONTACT_EMAIL` for OpenAlex's polite pool
 
 Run all commands from the **repo root**.
 
 ## Steps
 
 ```bash
-# 1. Download PMC open-access PDFs (--query is required)
-python -m ingestion.download_raw_pdfs \
-  --max-results 150 \
-  --query "(your topic) AND open access[filter]"
+# 1. Download landmark + 2025+ most-cited CS arXiv PDFs (~102)
+python -m ingestion.download_arxiv_pdfs
 
 # 2. Unstructured pipeline (layout + chunk → chunks.json)
 python -m ingestion.unstructured_pipeline
@@ -38,9 +39,9 @@ python -m ingestion.unstructured_pipeline --dry-run
 
 | Step | Output |
 |------|--------|
-| 1 | `ingestion/raw_pdfs/PMC_*.pdf`, `manifest.json` |
+| 1 | `ingestion/raw_pdfs/arxiv_*.pdf`, `manifest.json` |
 | 2 | `ingestion/raw_pdfs/chunks.json` |
-| 3 | Qdrant collection `QDRANT_COLLECTION_NAME` |
+| 3 | Qdrant collection `QDRANT_COLLECTION_NAME` (use `arxiv_cs_ds`) |
 
 Step 3 **deletes and recreates** the collection if it already exists.
 
@@ -48,7 +49,7 @@ Step 3 **deletes and recreates** the collection if it already exists.
 
 Same as Factline corpora: embed `payload.text`; graph and RAGAS use `additional_metadata.raw_text` only. See root [README.md](../README.md) (Chunk payload contract).
 
-PMC `additional_metadata` includes `source`, `filename`, `element_id`, `page_number`, `pmc_id`.
+arXiv `additional_metadata` includes `source` (abs URL), `page_number`, `filename`, `element_id`, `arxiv_id`. The UI shows URL and page only for cited catalog ids.
 
 ## Environment
 
@@ -61,7 +62,7 @@ All variables live in **`ingestion/.env`**. Key groups:
 | Unstructured | `UNSTRUCTURED_API_KEY`, partition/chunk settings |
 | Paths | `RAW_PDFS_DIR`, `CHUNKS_OUTPUT_PATH` |
 
-Use a **dedicated** `QDRANT_COLLECTION_NAME` so you do not overwrite HotpotQA or production collections.
+Use **`arxiv_cs_ds`** as `QDRANT_COLLECTION_NAME` so you do not overwrite HotpotQA or other collections.
 
 Full list: [`.env.example`](.env.example).
 

@@ -19,6 +19,7 @@ from qdrant_client import AsyncQdrantClient, models
 from config.settings import Settings
 from middleware.llm_client import get_embeddings_client
 from output_validation.retrieval_strategy import RetrievalStrategy
+from qdrant_pq import dense_quantization_search_params
 
 
 class Retriever:
@@ -262,6 +263,11 @@ class Retriever:
             ),
         )
 
+    def dense_search_params(self) -> models.SearchParams | None:
+        """PQ oversampling + original-vector rescore, or None when DENSE_PQ=none."""
+
+        return dense_quantization_search_params(getattr(self.config, "dense_pq", "none"))
+
     async def retrieve_one(
         self,
         query: str,
@@ -307,11 +313,15 @@ class Retriever:
         dense_query_vec = self.dense_query(dense_vector, dense_mmr_limit)
 
         # --- fast_retrieval: single dense (or MMR) query against the collection. ---
+        dense_params = self.dense_search_params()
+
         if strategy == "fast_retrieval":
             response = await self.qdrant.query_points(
                 collection_name=self.config.qdrant_collection_name,
                 query=dense_query_vec,
+                using=self.config.qdrant_dense_vector_name,
                 query_filter=query_filter,
+                search_params=dense_params,
                 limit=top_k,
                 with_payload=True,
                 with_vectors=False,
@@ -325,6 +335,7 @@ class Retriever:
                 using=self.config.qdrant_dense_vector_name,
                 limit=dense_mmr_limit,
                 filter=query_filter,
+                params=dense_params,
             ),
             models.Prefetch(
                 query=models.Document(text=query, model=self.config.qdrant_bm25_model),

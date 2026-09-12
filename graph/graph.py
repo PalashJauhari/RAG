@@ -48,7 +48,7 @@ Unified fact record (in ``state["facts"]``)::
 
 Document catalog (in ``state["document_catalog"]`` during a turn)::
 
-    {"<qdrant_point_id>": {"text": "<raw_text>", "source": "<source or empty>", "score": float}}
+    {"<qdrant_point_id>": {"text": "<payload.text>", "score": float, "source": "<abs url>", "page_number": int | None, "images_base64": list | None, "table_html": list | None}}
 
 Module layout
 -------------
@@ -102,7 +102,10 @@ from prompts.query_normalisation import SYSTEM_PROMPT as QUERY_NORMALISATION_PRO
 from prompts.query_splitter import SYSTEM_PROMPT as QUERY_SPLITTER_PROMPT
 from retriever.retriever import Retriever
 from tool_wrappers.prompt_plain import messages_to_plain_context
-from tool_wrappers.retrieval_payload import catalog_entries_from_retriever_hits
+from tool_wrappers.retrieval_payload import (
+    catalog_entries_from_retriever_hits,
+    catalog_without_images,
+)
 
 
 class RetrievalState(TypedDict, total=False):
@@ -142,7 +145,7 @@ class RetrievalState(TypedDict, total=False):
     # on repair.
 
     document_catalog: dict[str, dict[str, Any]]
-    # Turn-local map point_id → {text, source, score}; merged across retrieval passes.
+    # Turn-local map point_id → {text, score, source, page_number, images_base64, table_html}.
 
     strategies_used: list[str]
     # Strategies actually executed this turn; appended only in ``retrieval_node``.
@@ -192,7 +195,7 @@ class RetrievalState(TypedDict, total=False):
     # Retry hint for answer/partial; empty string means omit from the LLM prompt.
 
     final_sources: list[str]
-    # Code-built source labels after faithfulness (non-empty catalog.source only).
+    # Code-built cited catalog point ids after faithfulness.
 
 
 ERROR_ANSWER_USER_MESSAGE = "An error occurred while processing your request. Please try again."
@@ -438,7 +441,7 @@ def catalog_texts_for_prompt(catalog: dict[str, dict[str, Any]] | None) -> list[
 
 
 def catalog_docs_block(catalog: dict[str, dict[str, Any]] | None) -> str:
-    """Numbered passage block from document_catalog for recall/answer prompts."""
+    """Numbered passage block from document_catalog for recall prompts (text + ids only)."""
 
     lines: list[str] = []
     for index, (point_id, row) in enumerate((catalog or {}).items(), start=1):
@@ -449,23 +452,34 @@ def catalog_docs_block(catalog: dict[str, dict[str, Any]] | None) -> str:
     return "\n".join(lines) if lines else "(none)"
 
 
+def catalog_for_llm(catalog: dict[str, dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    """Passages and scores keyed by catalog id (no URL, page, images, or table HTML lists)."""
+
+    slim: dict[str, dict[str, Any]] = {}
+    for point_id, row in (catalog or {}).items():
+        row = row or {}
+        slim[str(point_id)] = {
+            "text": str(row.get("text") or ""),
+            "score": row.get("score"),
+        }
+    return slim
+
+
 def build_sources_from_catalog(
     catalog: dict[str, dict[str, Any]] | None,
     cited_ids: list[str] | None,
 ) -> list[str]:
-    """Collect non-empty source labels for cited ids (skip missing / empty source)."""
+    """Cited catalog point ids that exist in the catalog (deduped, first-seen order)."""
 
     catalog = catalog or {}
     sources: list[str] = []
     seen: set[str] = set()
     for point_id in cited_ids or []:
         key = str(point_id).strip()
-        row = catalog.get(key) or {}
-        source = str(row.get("source") or "").strip()
-        if not source or source in seen:
+        if not key or key not in catalog or key in seen:
             continue
-        seen.add(source)
-        sources.append(source)
+        seen.add(key)
+        sources.append(key)
     return sources
 
 
@@ -865,7 +879,7 @@ class RetrievalGraph:
             langfuse = get_langfuse_client()
             with langfuse.start_as_current_observation(as_type="span", name="retrieval") as node_span:
                 merged_catalog = await run_retrieval()
-                node_span.update(input={"active_retrieval_queries": search_queries, "retrieval_strategy": strategy}, output={"document_catalog": merged_catalog})
+                node_span.update(input={"active_retrieval_queries": search_queries, "retrieval_strategy": strategy}, output={"document_catalog": catalog_without_images(merged_catalog)})
         else:
             merged_catalog = await run_retrieval()
 
@@ -893,7 +907,7 @@ class RetrievalGraph:
                     "gap_fill_explanation": "",
                 }
 
-            document_catalog: map of point id → {text, source, score}.
+            document_catalog: map of point id → {text, score}.
 
         Output (state merge):
             facts: list[dict] — same rows with verification fields set per fact.
@@ -921,7 +935,7 @@ class RetrievalGraph:
                     catalog=catalog,
                 )
                 recall_sufficient = all(row["verification_status"] for row in verified_facts)
-                node_span.update(input={"facts": facts, "document_catalog": catalog}, output={"facts": verified_facts})
+                node_span.update(input={"facts": facts, "document_catalog": catalog_without_images(catalog)}, output={"facts": verified_facts})
         else:
             verified_facts = await verify_all_facts(
                 facts,
@@ -992,7 +1006,7 @@ class RetrievalGraph:
                     list(state.get("facts") or []),
                     list(response.facts),
                 )
-                node_span.update(input={"unsupported_facts": unsupported, "document_catalog": state.get("document_catalog") or {}}, output={"facts": updated_facts, "active_retrieval_queries": queries})
+                node_span.update(input={"unsupported_facts": unsupported, "document_catalog": catalog_without_images(state.get("document_catalog") or {})}, output={"facts": updated_facts, "active_retrieval_queries": queries})
         else:
             result = await llm.ainvoke(messages_for_llm)
             response = result["parsed"]
@@ -1063,7 +1077,7 @@ class RetrievalGraph:
             "## Normalized query\n"
             f"{state.get('normalized_query') or ''}\n\n"
             "## Document catalog\n"
-            f"{json.dumps(catalog, ensure_ascii=False)}"
+            f"{json.dumps(catalog_for_llm(catalog), ensure_ascii=False)}"
         )
         if feedback:
             context = f"## Faithfulness feedback\n{feedback}\n\n{context}"
@@ -1087,7 +1101,7 @@ class RetrievalGraph:
                 raw = result["raw"]
                 answer = response.model_dump()
                 answer["sources"] = []
-                node_span.update(input={"user_question": state.get("user_question") or "", "normalized_query": state.get("normalized_query") or "", "facts": state.get("facts") or [], "document_catalog": catalog}, output={"answer": answer.get("answer") or "", "cited_document_ids": answer.get("cited_document_ids") or []})
+                node_span.update(input={"user_question": state.get("user_question") or "", "normalized_query": state.get("normalized_query") or "", "facts": state.get("facts") or [], "document_catalog": catalog_without_images(catalog)}, output={"answer": answer.get("answer") or "", "cited_document_ids": answer.get("cited_document_ids") or []})
         else:
             result = await llm.ainvoke(messages_for_llm)
             response = result["parsed"]
@@ -1118,7 +1132,7 @@ class RetrievalGraph:
             "## Facts\n"
             f"{json.dumps(state.get('facts') or [], ensure_ascii=False)}\n\n"
             "## Document catalog\n"
-            f"{json.dumps(catalog, ensure_ascii=False)}"
+            f"{json.dumps(catalog_for_llm(catalog), ensure_ascii=False)}"
         )
         if feedback:
             context = f"## Faithfulness feedback\n{feedback}\n\n{context}"
@@ -1142,7 +1156,7 @@ class RetrievalGraph:
                 raw = result["raw"]
                 answer = response.model_dump()
                 answer["sources"] = []
-                node_span.update(input={"user_question": state.get("user_question") or "", "normalized_query": state.get("normalized_query") or "", "facts": state.get("facts") or [], "document_catalog": catalog}, output={"answer": answer.get("answer") or "", "cited_document_ids": answer.get("cited_document_ids") or []})
+                node_span.update(input={"user_question": state.get("user_question") or "", "normalized_query": state.get("normalized_query") or "", "facts": state.get("facts") or [], "document_catalog": catalog_without_images(catalog)}, output={"answer": answer.get("answer") or "", "cited_document_ids": answer.get("cited_document_ids") or []})
         else:
             result = await llm.ainvoke(messages_for_llm)
             response = result["parsed"]
@@ -1241,7 +1255,7 @@ class RetrievalGraph:
                 langfuse = get_langfuse_client()
                 with langfuse.start_as_current_observation(as_type="span", name="faithfulness") as node_span:
                     node_span.update(
-                        input={"answer": answer_text, "cited_document_ids": cited_ids, "document_catalog": catalog},
+                        input={"answer": answer_text, "cited_document_ids": cited_ids, "document_catalog": catalog_without_images(catalog)},
                         output={"faithfulness_ok": merge.get("faithfulness_ok"), "invalid_ids": invalid_ids, "faithfulness_retry_count": merge.get("faithfulness_retry_count"), "final_sources": merge.get("final_sources")},
                     )
             return merge
@@ -1374,7 +1388,7 @@ class RetrievalGraph:
         snapshot = {
             "user_question": state.get("user_question") or "",
             "normalized_query": state.get("normalized_query") or "",
-            "document_catalog": dict(state.get("document_catalog") or {}),
+            "document_catalog": catalog_without_images(state.get("document_catalog") or {}),
             "strategies_used": list(state.get("strategies_used") or []),
             "retrieval_retry_count": int(state.get("retrieval_retry_count") or 0),
             "faithfulness_retry_count": int(state.get("faithfulness_retry_count") or 0),

@@ -21,6 +21,7 @@ from graph import RetrievalGraph
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from output_validation.final_answer import FinalAnswer
+from tool_wrappers.retrieval_payload import catalog_for_client, cited_ui_entries
 
 
 # --- Request models ---
@@ -346,6 +347,7 @@ def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
             "confidence": None,
             "cited_document_ids": [],
             "document_catalog": {},
+            "cited_ui": [],
         }
 
     messages = list(result.get("messages") or [])
@@ -370,6 +372,10 @@ def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
     else:
         sources = list(answer.sources)
 
+    cited_ids = list(
+        result.get("cited_document_ids") or answer.cited_document_ids or []
+    )
+    catalog = dict(result.get("document_catalog") or {})
     return {
         "session_id": session_id,
         "interrupted": False,
@@ -377,10 +383,9 @@ def get_api_response(session_id: str, result: dict[str, Any]) -> dict[str, Any]:
         "answer": answer.answer,
         "sources": sources,
         "confidence": answer.confidence,
-        "cited_document_ids": list(
-            result.get("cited_document_ids") or answer.cited_document_ids or []
-        ),
-        "document_catalog": dict(result.get("document_catalog") or {}),
+        "cited_document_ids": cited_ids,
+        "document_catalog": catalog_for_client(catalog, cited_ids),
+        "cited_ui": cited_ui_entries(catalog, cited_ids),
     }
 
 
@@ -402,12 +407,15 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
     """Stream node-level graph progress as Server-Sent Events (``text/event-stream``)."""
 
     async def event_generator():
-        # Map each LangGraph stream chunk to SSE; expose counts only to keep UI payloads light.
+        # Map each LangGraph stream chunk to SSE. Progress events stay light; the final
+        # frame includes cited catalog ids and retrieved passage text.
         retrieved_doc_count = 0
         retrieval_loop_count = 0
         last_answer = ""
         last_confidence = "low"
         last_sources: list[str] = []
+        last_cited_ids: list[str] = []
+        last_catalog: dict[str, Any] = {}
         try:
             async for update in app.state.retrieval_graph.stream_run(
                 request.session_id,
@@ -429,6 +437,8 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
                         catalog_size = len(catalog) if isinstance(catalog, dict) else 0
                         new_doc_count = max(0, catalog_size - retrieved_doc_count)
                         retrieved_doc_count = catalog_size
+                        if isinstance(catalog, dict):
+                            last_catalog = catalog
                     if node_name in {"answer", "partial_answer", "error_answer"}:
                         allowed = (
                             {"answer_node"}
@@ -445,6 +455,7 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
                             last_answer = parsed.answer
                             last_confidence = parsed.confidence
                             last_sources = list(parsed.sources or [])
+                            last_cited_ids = list(parsed.cited_document_ids or [])
                 event = get_stream_event(
                     request.session_id,
                     update,
@@ -466,6 +477,9 @@ async def run_stream(request: RunRequest) -> StreamingResponse:
                             "label": "Answer ready",
                             "answer": last_answer,
                             "sources": last_sources,
+                            "cited_document_ids": last_cited_ids,
+                            "document_catalog": catalog_for_client(last_catalog, last_cited_ids),
+                            "cited_ui": cited_ui_entries(last_catalog, last_cited_ids),
                             "confidence": last_confidence,
                             "retrieved_doc_count": retrieved_doc_count,
                         }

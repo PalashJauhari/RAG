@@ -5,7 +5,8 @@ Used by prompts ``final_answer`` and ``partial_answer`` plus deterministic fallb
 in checkpointed ``messages``.
 
 ``cited_document_ids`` are chosen by the LLM from ``document_catalog`` keys.
-``sources`` is filled by code after faithfulness (LLM must leave it empty).
+``sources`` is filled by code after faithfulness with those same catalog ids
+(LLM must leave it empty).
 """
 
 from typing import Literal
@@ -22,5 +23,5 @@ class FinalAnswer(BaseModel):
     confidence: Literal["high", "medium", "low"] = Field(default="low")
     sources: list[str] = Field(
         default_factory=list,
-        description="Source labels filled by code from document_catalog; LLM must return [].",
+        description="Cited catalog point ids filled by code after faithfulness; LLM must return [].",
     )

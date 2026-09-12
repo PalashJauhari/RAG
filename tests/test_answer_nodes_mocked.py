@@ -51,6 +51,10 @@ async def test_answer_node_sets_mode_and_cited_ids(monkeypatch) -> None:
     assert result["cited_document_ids"] == ["doc-1"]
     assert result["faithfulness_feedback"] == ""
     assert result["messages"][0].name == "answer_node"
+    human = next(message for message in fake.last_messages if isinstance(message, HumanMessage))
+    assert "doc-1" in human.content
+    assert "evidence" in human.content
+    assert "arxiv.org" not in human.content
 
 
 @pytest.mark.asyncio
@@ -161,7 +165,7 @@ async def test_faithfulness_invalid_ids_exhausted_force_pass_valid_sources(monke
     assert result["faithfulness_ok"] is True
     assert result["faithfulness_forced_pass"] is True
     assert result["faithfulness_retry_count"] == 1
-    assert result["final_sources"] == ["hotpotqa"]
+    assert result["final_sources"] == ["doc-1"]
     assert result["faithfulness_feedback"] == ""
 
 
@@ -194,7 +198,7 @@ async def test_faithfulness_llm_pass_fills_sources(monkeypatch) -> None:
         }
     )
     assert result["faithfulness_ok"] is True
-    assert result["final_sources"] == ["hotpotqa"]
+    assert result["final_sources"] == ["doc-1"]
     assert "messages" not in result
     assert "Because of X" in fake.last_messages[1].content
 
@@ -222,7 +226,7 @@ async def test_faithfulness_llm_fail_increments_retry(monkeypatch) -> None:
             "answer_text": "guess",
             "cited_document_ids": ["doc-1"],
             "document_catalog": {
-                "doc-1": {"text": "other", "source": "pmc", "score": 0.2},
+                "doc-1": {"text": "other", "source": "https://arxiv.org/abs/2210.03629", "score": 0.2},
             },
             "messages": [answer_msg],
             "faithfulness_retry_count": 0,
@@ -265,5 +269,5 @@ async def test_faithfulness_llm_fail_exhausted_force_pass(monkeypatch) -> None:
     )
     assert result["faithfulness_ok"] is True
     assert result["faithfulness_forced_pass"] is True
-    assert result["final_sources"] == ["wiki"]
+    assert result["final_sources"] == ["doc-1"]
     assert result["faithfulness_feedback"] == ""

@@ -1,1 +1,1 @@
-"""PMC ingestion: download_raw_pdfs, unstructured_pipeline, upload_qdrant_embedding (standalone)."""
+"""arXiv ingestion: download_arxiv_pdfs, unstructured_pipeline, upload_qdrant_embedding (standalone)."""

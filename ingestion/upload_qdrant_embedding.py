@@ -1,4 +1,4 @@
-"""Upload PMC chunks from ``chunks.json`` to Qdrant (optional LLM enrichment)."""
+"""Upload arXiv chunks from ``chunks.json`` to Qdrant (optional LLM enrichment)."""
 
 from __future__ import annotations
 
@@ -14,7 +14,13 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, field_validator, model_validator
 from qdrant_client import AsyncQdrantClient, models
 
+from ingestion.chunk_media import (
+    extract_images_base64,
+    extract_table_html,
+    with_prefixed_tables,
+)
 from ingestion.ingestion_config import load_ingestion_config
+from qdrant_pq import product_quantization_config
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +28,9 @@ ENRICH_CONCURRENCY = 10
 ENRICH_MAX_RETRIES = 3
 
 ENRICHMENT_SYSTEM_PROMPT = """
-You are a document indexing assistant for a biomedical literature retrieval system.
+You are a document indexing assistant for a computer-science literature retrieval system.
 
-Given one text chunk from a PMC paper, produce structured metadata to improve search.
+Given one text chunk from an arXiv paper, produce structured metadata to improve search.
 Do not answer questions about the passage. Do not invent facts not supported by the text.
 
 Return JSON matching the schema:
@@ -58,7 +64,7 @@ class ContextFact(BaseModel):
 
 
 class ContextEnrichmentResult(BaseModel):
-    """LLM-generated metadata for one PMC chunk."""
+    """LLM-generated metadata for one arXiv chunk."""
 
     predicted_title: str
     summary: str
@@ -87,7 +93,7 @@ class ContextEnrichmentResult(BaseModel):
 
 
 class ChunkPayload(BaseModel):
-    """Qdrant point payload (embed ``text``; graph reads ``additional_metadata.raw_text``)."""
+    """Qdrant point payload (embed and LLM ``text``; ``raw_text`` is unused by the graph)."""
 
     text: str
     enrichments: dict[str, Any] = Field(default_factory=dict)
@@ -160,16 +166,22 @@ def pdf_basename(pdf_path: str) -> str:
     return pdf_path.replace("\\", "/").split("/")[-1]
 
 
-def build_manifest_lookup(manifest: dict[str, Any]) -> dict[str, str]:
-    """Map PDF filename to PMC id from manifest."""
+def build_manifest_lookup(manifest: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """Map PDF filename to arXiv id and abs URL from manifest."""
 
-    lookup: dict[str, str] = {}
+    lookup: dict[str, dict[str, str]] = {}
     for paper in manifest.get("papers") or []:
         pdf_path = paper.get("pdf_path")
-        pmc_id = paper.get("pmc_id")
-        if not pdf_path or not pmc_id:
+        arxiv_id = str(paper.get("arxiv_id") or "").strip()
+        abs_url = str(paper.get("abs_url") or "").strip()
+        if not pdf_path or not arxiv_id:
             continue
-        lookup[pdf_basename(str(pdf_path))] = str(pmc_id)
+        if not abs_url:
+            abs_url = f"https://arxiv.org/abs/{arxiv_id}"
+        lookup[pdf_basename(str(pdf_path))] = {
+            "arxiv_id": arxiv_id,
+            "abs_url": abs_url,
+        }
     return lookup
 
 
@@ -177,12 +189,14 @@ def element_to_chunk(
     file_result: dict[str, Any],
     element: dict[str, Any],
     *,
-    manifest_lookup: dict[str, str],
+    manifest_lookup: dict[str, dict[str, str]],
 ) -> tuple[str, ChunkPayload] | None:
     """Build stable point id and payload for one Unstructured chunk element."""
 
     raw_text = str(element.get("text") or "").strip()
-    if not raw_text:
+    images_base64 = extract_images_base64(element)
+    table_html = extract_table_html(element)
+    if not raw_text and not table_html:
         return None
 
     enrichments = element.get("enrichment") or {}
@@ -190,6 +204,7 @@ def element_to_chunk(
         enrichments = {}
 
     enriched = build_enriched_text(raw_text=raw_text, enrichments=enrichments)
+    embed_text = with_prefixed_tables(enriched, table_html)
     filename = str(file_result.get("filename") or "")
     element_id = str(element.get("element_id") or "")
     if not element_id:
@@ -202,16 +217,19 @@ def element_to_chunk(
     if isinstance(metadata, dict):
         page_number = metadata.get("page_number")
 
+    paper = manifest_lookup.get(filename) or {}
     payload = ChunkPayload(
-        text=enriched,
+        text=embed_text,
         enrichments=enrichments,
         additional_metadata={
             "raw_text": raw_text,
-            "source": "pmc",
+            "source": paper.get("abs_url") or "",
             "filename": filename,
             "element_id": element_id,
             "page_number": page_number,
-            "pmc_id": manifest_lookup.get(filename),
+            "arxiv_id": paper.get("arxiv_id") or "",
+            "images_base64": images_base64,
+            "table_html": table_html,
         },
     )
     return point_id, payload
@@ -367,11 +385,15 @@ async def recreate_collection(client: AsyncQdrantClient, config) -> None:
         await client.delete_collection(name)
         print(f"Deleted existing collection {name!r}")
 
+    dense_kwargs: dict[str, Any] = {
+        "size": config.openai_embedding_dimensions,
+        "distance": models.Distance.COSINE,
+    }
+    dense_pq = product_quantization_config(config.dense_pq)
+    if dense_pq is not None:
+        dense_kwargs["quantization_config"] = dense_pq
     vectors_config = {
-        config.qdrant_dense_vector_name: models.VectorParams(
-            size=config.openai_embedding_dimensions,
-            distance=models.Distance.COSINE,
-        )
+        config.qdrant_dense_vector_name: models.VectorParams(**dense_kwargs)
     }
     if config.use_late_interaction:
         vectors_config[config.qdrant_colbert_vector_name] = models.VectorParams(
@@ -396,7 +418,7 @@ async def recreate_collection(client: AsyncQdrantClient, config) -> None:
         vectors_config=vectors_config,
         sparse_vectors_config=sparse_vectors_config,
     )
-    print(f"Created collection {name!r}")
+    print(f"Created collection {name!r} (dense PQ={config.dense_pq})")
 
 
 async def upsert_chunks(
@@ -449,7 +471,7 @@ async def upsert_chunks(
 
 def collect_chunks(
     file_results: list[dict[str, Any]],
-    manifest_lookup: dict[str, str],
+    manifest_lookup: dict[str, dict[str, str]],
 ) -> list[tuple[str, ChunkPayload]]:
     """Build all Qdrant points from chunks.json file results."""
 
@@ -484,7 +506,7 @@ async def run_upload(do_enrich: bool) -> None:
             encoding="utf-8",
         )
 
-    manifest_lookup: dict[str, str] = {}
+    manifest_lookup: dict[str, dict[str, str]] = {}
     if config.manifest_path.is_file():
         manifest = json.loads(config.manifest_path.read_text(encoding="utf-8"))
         manifest_lookup = build_manifest_lookup(manifest)
@@ -507,10 +529,10 @@ async def run_upload(do_enrich: bool) -> None:
 
 
 def main() -> None:
-    """CLI entry: upload PMC chunks to Qdrant."""
+    """CLI entry: upload arXiv chunks to Qdrant."""
 
     logging.basicConfig(level=logging.INFO)
-    parser = argparse.ArgumentParser(description="Upload PMC chunks to Qdrant")
+    parser = argparse.ArgumentParser(description="Upload arXiv chunks to Qdrant")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--enrich", action="store_true", help="LLM-enrich chunks before upload")
     group.add_argument("--no-enrich", action="store_true", help="Upload without enrichment")

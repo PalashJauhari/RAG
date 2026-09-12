@@ -112,4 +112,5 @@ class RagApiClient:
         data.setdefault("confidence", None)
         data.setdefault("cited_document_ids", [])
         data.setdefault("document_catalog", {})
+        data.setdefault("cited_ui", [])
         return data

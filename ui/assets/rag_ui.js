@@ -20,6 +20,11 @@ function truncate(s, maxLen) {
   return s.slice(0, maxLen - 1) + "…";
 }
 
+function citedUiFromEvent(data) {
+  data = data && typeof data === "object" ? data : {};
+  return Array.isArray(data.cited_ui) ? data.cited_ui : [];
+}
+
 function loopSuffix(ev) {
   const n = ev.retrieval_loop_count ?? ev.retrieval_retry_count;
   return n != null ? " · loop " + n : "";
@@ -378,14 +383,12 @@ window.dash_clientside.rag_ui.submit_message = async function (
       }
       var elapsedResume = clockNowMs() - startResume;
       let content = data.answer || "Done.";
-      const sources = data.sources || [];
-      if (sources.length)
-        content += "\n\nSources: " + sources.map(String).join(", ");
-      const catalog = data.document_catalog || {};
-      const catalogCount = Object.keys(catalog).length;
-      if (catalogCount) content += "\n\nRetrieved " + catalogCount + " passages.";
       content = appendTimeTakenFooter(content, elapsedResume);
-      chat.push({ role: "assistant", content: content });
+      chat.push({
+        role: "assistant",
+        content: content,
+        citations: citedUiFromEvent(data),
+      });
       return [chat, false, "", ""];
     }
 
@@ -423,14 +426,12 @@ window.dash_clientside.rag_ui.submit_message = async function (
     }
 
     let content = finalPayload.answer || "Done.";
-    const sources = finalPayload.sources || [];
-    if (sources.length)
-      content += "\n\nSources: " + sources.map(String).join(", ");
-    const finalDocCount =
-      retrievedDocCount || finalPayload.retrieved_doc_count || 0;
-    if (finalDocCount) content += "\n\nRetrieved " + finalDocCount + " passages.";
     content = appendTimeTakenFooter(content, elapsedStream);
-    chat.push({ role: "assistant", content: content });
+    chat.push({
+      role: "assistant",
+      content: content,
+      citations: citedUiFromEvent(finalPayload),
+    });
     clearStreamUI();
     return [chat, false, "", ""];
   } catch (e) {

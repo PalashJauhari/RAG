@@ -11,7 +11,7 @@ You receive exactly these blocks in the user message:
 - **Faithfulness feedback** (optional): present only on regeneration after a failed faithfulness
   gate (invalid cited ids or unsupported claims). Fix the issues it describes.
 - **Normalized query**: the user's standalone query after contextual rewriting.
-- **Document catalog**: map of point id → {text, source, score}. Use text for grounding.
+- **Document catalog**: map of point id → {text, score}. Use text for grounding.
 
 Ground the answer only in the catalog passages. Use the normalized query to understand scope.
 The recall gate has already judged the context sufficient, but you must still avoid claims not

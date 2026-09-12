@@ -1,4 +1,4 @@
-"""PMC PDF partition and chunking via Unstructured On-Demand Jobs API.
+"""PDF partition and chunking via Unstructured On-Demand Jobs API.
 
 Run::
 
@@ -140,7 +140,7 @@ def run_pipeline(
     output_path: Path | None = None,
     dry_run: bool = False,
 ) -> list[dict[str, Any]]:
-    """Partition and chunk downloaded PMC PDFs; write Unstructured output to chunks.json."""
+    """Partition and chunk downloaded PDFs; write Unstructured output to chunks.json."""
 
     config = config or load_ingestion_config()
     manifest_file = manifest_path or config.manifest_path
@@ -290,7 +290,7 @@ def main() -> None:
     """CLI entry for the Unstructured partition + chunk pipeline."""
 
     parser = argparse.ArgumentParser(
-        description="Partition and chunk PMC PDFs via Unstructured Jobs API.",
+        description="Partition and chunk PDFs via Unstructured Jobs API.",
     )
     parser.add_argument(
         "--manifest",
