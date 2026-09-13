@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import shutil
 import time
@@ -138,19 +137,15 @@ def relative_pdf_path(pdf_path: Path) -> str:
 
 
 def request_headers() -> dict[str, str]:
-    """User-Agent for OpenAlex and arXiv (include mailto when set)."""
+    """User-Agent for OpenAlex and arXiv."""
 
-    email = os.getenv("CONTACT_EMAIL", "").strip()
-    ua = "CiteflowRAG/1.0 (https://github.com/arxiv/arxiv-docs)"
-    if email:
-        ua = f"CiteflowRAG/1.0 (mailto:{email})"
-    return {"User-Agent": ua}
+    return {"User-Agent": "CiteflowRAG/1.0 (https://github.com/arxiv/arxiv-docs)"}
 
 
-def openalex_params(search: str, cursor: str, mailto: str) -> dict[str, str]:
+def openalex_params(search: str, cursor: str) -> dict[str, str]:
     """Query params for one OpenAlex page: 2025+ works, citation desc."""
 
-    params = {
+    return {
         "search": search,
         "filter": (
             "from_publication_date:2025-01-01,"
@@ -161,9 +156,6 @@ def openalex_params(search: str, cursor: str, mailto: str) -> dict[str, str]:
         "cursor": cursor,
         "select": "id,display_name,publication_year,cited_by_count,ids,locations,open_access",
     }
-    if mailto:
-        params["mailto"] = mailto
-    return params
 
 
 def search_openalex_slice(
@@ -172,7 +164,6 @@ def search_openalex_slice(
     search: str,
     target: int,
     seen_ids: set[str],
-    mailto: str,
 ) -> list[dict[str, Any]]:
     """Return up to ``target`` unique arXiv papers for one topical slice."""
 
@@ -186,7 +177,7 @@ def search_openalex_slice(
             break
         response = session.get(
             OPENALEX_URL,
-            params=openalex_params(search, cursor, mailto),
+            params=openalex_params(search, cursor),
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
@@ -266,7 +257,7 @@ def paper_row(
     return row
 
 
-def collect_paper_specs(mailto: str) -> list[dict[str, Any]]:
+def collect_paper_specs() -> list[dict[str, Any]]:
     """Pinned landmarks first, then OpenAlex slices."""
 
     seen: set[str] = set()
@@ -291,7 +282,6 @@ def collect_paper_specs(mailto: str) -> list[dict[str, Any]]:
                 search=search,
                 target=target,
                 seen_ids=seen,
-                mailto=mailto,
             )
         )
     return specs
@@ -301,9 +291,8 @@ def run_download(*, output_dir: Path) -> dict[str, Any]:
     """Clear output dir, resolve paper list, download PDFs, return manifest."""
 
     clear_output_dir(output_dir)
-    mailto = os.getenv("CONTACT_EMAIL", "").strip()
     print("Selecting arXiv papers (landmarks + OpenAlex 2025+ citation rank)...")
-    specs = collect_paper_specs(mailto)
+    specs = collect_paper_specs()
     print(f"Will attempt {len(specs)} downloads.")
 
     papers: list[dict[str, Any]] = []

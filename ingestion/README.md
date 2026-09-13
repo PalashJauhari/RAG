@@ -11,7 +11,6 @@ Target collection name: **`arxiv_cs_ds`**.
 - Python env with repo dependencies (e.g. `rag_env_1`)
 - `cp ingestion/.env.example ingestion/.env` and fill keys
 - Unstructured image LLM: configure OpenAI in [platform.unstructured.io](https://platform.unstructured.io) (not in `.env`)
-- Optional `CONTACT_EMAIL` for OpenAlex's polite pool
 
 Run all commands from the **repo root**.
 

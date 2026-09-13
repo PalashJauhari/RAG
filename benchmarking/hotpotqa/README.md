@@ -1,29 +1,65 @@
-# HotpotQA benchmark (distractor)
+# HotpotQA evaluation
 
-End-to-end eval for Citeflow retrieval and graph on HotpotQA **distractor** validation.
+This folder runs **offline Citeflow eval** on [HotpotQA](https://hotpotqa.github.io/) (distractor validation). You index the supporting (and distractor) paragraphs, ask the same questions Citeflow would see in production, then score the answers.
 
-Benchmark knobs are **CLI only** (no `benchmarking/hotpotqa/.env`). Secrets stay in **repo root `.env`**.
+HotpotQA is a multi-hop set: each question usually needs **more than one paragraph**. That stresses recall repair and citation, not just “did the top hit look relevant?”
 
-## Prerequisites
+Typical use: compare **search only** vs the **full Citeflow graph**, and optionally compare dense product-quantization (PQ) settings on the same embeddings.
 
-- Python env with repo dependencies (e.g. `rag_env_1`)
-- Repo root `.env`: OpenAI, Qdrant, Jina, `USE_BM25`, `USE_LATE_INTERACTION`, retrieval limits, graph models
+Knobs are **CLI flags**. Keys (OpenAI, Qdrant, Jina) stay in the **repo root `.env`**. There is no `benchmarking/hotpotqa/.env`.
 
-Run all commands from the **repo root**.
+Run every command from the **repo root**.
 
-## Steps
+---
+
+## What you get
+
+- A processed question file (ids, gold answers, supporting vs distractor contexts)
+- One or more Qdrant collections: `{collection-base}_{none|pq8|pq16|pq32}`
+- Per-question JSON plus a short markdown report you can paste into the [root README](../../README.md) table
+- RAGAS scores: **context recall** always; **faithfulness** and **answer correctness** on graph runs
+- **Partial-answer** rate on graph runs (when Citeflow refuses to guess a full answer)
+- **Mean and p50 latency in seconds** (retriever wall time, or full graph wall time)
+
+The graph itself is not forked for eval. The runner only points `QDRANT_COLLECTION_NAME` and `DENSE_PQ` at the collection under test.
+
+---
+
+## How a run works
+
+```mermaid
+flowchart TD
+  download[Download HotpotQA] --> upload[Embed once and upsert]
+  upload --> retrieve[Retrieval eval]
+  upload --> graph[Graph eval]
+  retrieve --> reportR[Recall plus latency]
+  graph --> reportG[Recall, faithfulness, correctness, partials, latency]
+```
+
+1. **Download** the distractor split and write a local JSON (cap with `--max-questions`).
+2. **Upload** contexts to Qdrant. Embeddings are computed once; you can create several PQ collections in the same command.
+3. **Evaluate** one mode at a time. `--pq` is sequential (none, then pq8, …). Each PQ writes its own folder.
+4. **Score** with RAGAS, then write `benchmark_report.md`.
+
+Retrieval mode answers “did search surface the right passages?” Graph mode answers “did the whole Citeflow turn stay grounded and correct?”
+
+---
+
+## Quick start
+
+Root `.env` must already have OpenAI, Qdrant, and (for ColBERT rerank) Jina, plus `USE_BM25` / `USE_LATE_INTERACTION` matching how you want to search.
 
 ```bash
-# 1. Download & process (distractor validation)
+# 1. Download & process (default cap is 200; 0 = full split)
 python -m benchmarking.hotpotqa.download_process_hotpotqa --max-questions 50
 
-# 2. Upload: one command can create several PQ collections (embeddings computed once)
+# 2. Upload: several PQ collections, embeddings computed once
 python -m benchmarking.hotpotqa.upload_qdrant_embedding \
   --no-enrich \
   --collection-base hotpotqa_eval \
   --pq none pq8 pq16 pq32
 
-# 3. Evaluate sequentially (none, then pq8, …). Each PQ writes its own folder.
+# 3a. Search only (hybrid). Repeat with fast_bm25_late_interaction_retrieval for rerank.
 python -m benchmarking.hotpotqa.run_evaluation \
   --mode retrieval \
   --strategy fast_bm25_retrieval \
@@ -31,6 +67,7 @@ python -m benchmarking.hotpotqa.run_evaluation \
   --collection-base hotpotqa_eval \
   --pq none pq8 pq16 pq32
 
+# 3b. Full Citeflow pipeline
 python -m benchmarking.hotpotqa.run_evaluation \
   --mode graph \
   --experiment-name hotpot_graph_v1 \
@@ -40,33 +77,49 @@ python -m benchmarking.hotpotqa.run_evaluation \
 
 `--collection-base` must match upload. Collections are `{base}_none`, `{base}_pq8`, `{base}_pq16`, `{base}_pq32`.
 
-`--experiment-name` is required. Results go to `data/results/<experiment-name>/<pq>/`. If that PQ folder already exists, the run exits without overwriting.
+`--experiment-name` is required. Results go to `benchmarking/hotpotqa/data/results/<experiment-name>/<pq>/`. If that folder already exists, the run **exits** instead of overwriting.
 
-`--max-questions` on eval (default `0`) slices the processed JSON; `0` uses the full downloaded file.
+`--max-questions` on eval (default `0`) slices the processed JSON; `0` uses the whole downloaded file.
 
-`--ragas-model` defaults to `gpt-4o-mini` (context recall only).
+`--ragas-model` defaults to `gpt-4o-mini`.
 
-The graph is invoked as-is; eval only switches `QDRANT_COLLECTION_NAME` / `DENSE_PQ` on the shared settings object.
+Retrieval `--strategy` values: `fast_retrieval`, `keyword`, `fast_bm25_retrieval` (hybrid), `fast_bm25_late_interaction_retrieval` (hybrid + ColBERT).
+
+---
+
+## Metrics
+
+These are the columns on the root README. Graph mode fills all five. Retrieval-only fills latency (quality cells stay blank).
+
+| Metric | Retrieval | Graph |
+|--------|-----------|-------|
+| Faithfulness | — | RAGAS vs retrieved passages |
+| Answer correctness | — | RAGAS vs the Hotpot gold answer |
+| Partial answers | — | share of turns that used the partial-answer path |
+| Mean / p50 latency | retriever wall time (seconds) | full graph wall time (seconds) |
+
+Context recall is still scored in the report for both modes. It is just not a root-README column.
+
+---
 
 ## Outputs
 
 Under `benchmarking/hotpotqa/data/results/<experiment-name>/<pq>/`:
 
-- `results.json` — per-question eval rows
-- `run_metadata.json` — mode, PQ, collection, latency, env snapshot
-- `ragas_results.json` — context recall scores
-- `benchmark_report.md` — context recall + latencies
+| File | What it is |
+|------|------------|
+| `results.json` | Per-question rows (answers, contexts, flags, latency) |
+| `run_metadata.json` | Mode, PQ, collection, latency summary, env snapshot |
+| `ragas_results.json` | Per-question RAGAS scores |
+| `benchmark_report.md` | Table you can copy from |
 
-## Metrics
+---
 
-| Metric | Retrieval | Graph |
-|--------|-----------|-------|
-| Context recall | yes | yes |
-| Latency | retriever wall time | full graph wall time |
+## Configuration
 
-## Environment
+| What | Where |
+|------|--------|
+| API keys, Qdrant URL, BM25 / late-interaction / MMR / top-k, graph models | repo root `.env` |
+| Question cap, PQ list, collection base, experiment name, RAGAS model, retrieval strategy | CLI |
 
-| Variable | File |
-|----------|------|
-| API keys, Qdrant URL, BM25 / late-interaction / MMR / top-k | repo root `.env` |
-| Max questions, PQ list, collection base, experiment name, RAGAS model | CLI |
+Do not change `graph/graph.py` to run this eval.

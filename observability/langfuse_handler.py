@@ -36,12 +36,11 @@ def is_tracing_enabled() -> bool:
 
 def configure_langfuse_env() -> None:
     """Copy settings into environment variables the Langfuse SDK reads."""
-    base_url = settings.langfuse_base_url or settings.langfuse_host
     os.environ.setdefault("LANGFUSE_PUBLIC_KEY", settings.langfuse_public_key)
     os.environ.setdefault("LANGFUSE_SECRET_KEY", settings.langfuse_secret_key)
-    if base_url:
-        os.environ.setdefault("LANGFUSE_BASE_URL", base_url)
-        os.environ.setdefault("LANGFUSE_HOST", base_url)
+    if settings.langfuse_host:
+        os.environ.setdefault("LANGFUSE_BASE_URL", settings.langfuse_host)
+        os.environ.setdefault("LANGFUSE_HOST", settings.langfuse_host)
     os.environ.setdefault(
         "LANGFUSE_TRACING_ENABLED",
         "true" if settings.langfuse_tracing_enabled else "false",

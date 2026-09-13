@@ -5,17 +5,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from statistics import mean
 from typing import Any
 
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from openai import AsyncOpenAI
+from ragas.embeddings import OpenAIEmbeddings
 from ragas.llms import llm_factory
-from ragas.metrics.collections import ContextRecall
+from ragas.metrics.collections import AnswerCorrectness, ContextRecall, Faithfulness
 
 from benchmarking.hotpotqa.benchmark_config import (
     DEFAULT_RAGAS_MODEL,
@@ -89,7 +90,18 @@ def latency_summary(latencies_ms: list[float]) -> dict[str, float]:
     """Aggregate wall-clock latencies."""
 
     if not latencies_ms:
-        return {"mean_ms": 0.0, "p50_ms": 0.0, "p95_ms": 0.0, "min_ms": 0.0, "max_ms": 0.0}
+        return {
+            "mean_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "min_ms": 0.0,
+            "max_ms": 0.0,
+            "mean_s": 0.0,
+            "p50_s": 0.0,
+            "p95_s": 0.0,
+            "min_s": 0.0,
+            "max_s": 0.0,
+        }
     ordered = sorted(latencies_ms)
     n = len(ordered)
 
@@ -97,12 +109,22 @@ def latency_summary(latencies_ms: list[float]) -> dict[str, float]:
         idx = min(n - 1, max(0, int(p * n)))
         return ordered[idx]
 
+    mean_ms = sum(ordered) / n
+    p50_ms = percentile(0.5)
+    p95_ms = percentile(0.95)
+    min_ms = ordered[0]
+    max_ms = ordered[-1]
     return {
-        "mean_ms": sum(ordered) / n,
-        "p50_ms": percentile(0.5),
-        "p95_ms": percentile(0.95),
-        "min_ms": ordered[0],
-        "max_ms": ordered[-1],
+        "mean_ms": mean_ms,
+        "p50_ms": p50_ms,
+        "p95_ms": p95_ms,
+        "min_ms": min_ms,
+        "max_ms": max_ms,
+        "mean_s": mean_ms / 1000.0,
+        "p50_s": p50_ms / 1000.0,
+        "p95_s": p95_ms / 1000.0,
+        "min_s": min_ms / 1000.0,
+        "max_s": max_ms / 1000.0,
     }
 
 
@@ -420,16 +442,41 @@ def apply_eval_collection(config: BenchmarkRunConfig) -> None:
     settings.dense_pq = config.dense_pq
 
 
+def metric_float(value: Any) -> float | None:
+    """Finite float from a RAGAS result; NaN becomes None."""
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(number) or math.isinf(number):
+        return None
+    return number
+
+
 async def run_ragas(config, mode: str) -> dict[str, Any]:
-    """Score results with RAGAS context recall only and write ragas_results.json."""
+    """Score results with RAGAS and write ragas_results.json."""
 
     rows = json.loads(config.results_path.read_text(encoding="utf-8"))
     client = AsyncOpenAI(api_key=settings.openai_api_key)
     llm = llm_factory(config.hotpotqa_ragas_model, client=client)
     context_recall = ContextRecall(llm=llm)
+    faithfulness = Faithfulness(llm=llm) if mode == "graph" else None
+    answer_correctness = (
+        AnswerCorrectness(
+            llm=llm,
+            embeddings=OpenAIEmbeddings(
+                client=client,
+                model=settings.openai_embedding_model,
+            ),
+        )
+        if mode == "graph"
+        else None
+    )
 
     scored_rows: list[dict[str, Any]] = []
     skipped_empty_contexts = 0
+    skipped_empty_answers = 0
 
     for index, row in enumerate(rows, start=1):
         question = row["question"]
@@ -445,15 +492,35 @@ async def run_ragas(config, mode: str) -> dict[str, Any]:
             reference=reference,
             retrieved_contexts=retrieved_contexts,
         )
-        scored = {
+        scored: dict[str, Any] = {
             "id": row["id"],
             "question": question,
             "type": row.get("type", "unknown"),
             "level": row.get("level", "unknown"),
-            "context_recall": float(recall.value),
+            "context_recall": metric_float(recall.value),
         }
         if mode == "graph":
-            scored["is_partial"] = row.get("is_partial", False)
+            scored["is_partial"] = bool(row.get("is_partial", False))
+            response = str(row.get("response") or "").strip()
+            if not response:
+                skipped_empty_answers += 1
+                scored["faithfulness"] = None
+                scored["answer_correctness"] = None
+            else:
+                assert faithfulness is not None
+                assert answer_correctness is not None
+                faith = await faithfulness.ascore(
+                    user_input=question,
+                    response=response,
+                    retrieved_contexts=retrieved_contexts,
+                )
+                correct = await answer_correctness.ascore(
+                    user_input=question,
+                    response=response,
+                    reference=reference,
+                )
+                scored["faithfulness"] = metric_float(faith.value)
+                scored["answer_correctness"] = metric_float(correct.value)
         scored_rows.append(scored)
         print(f"Scored {index}/{len(rows)} questions")
 
@@ -463,10 +530,18 @@ async def run_ragas(config, mode: str) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "total_scored": len(scored_rows),
         "skipped_empty_contexts": skipped_empty_contexts,
-        "mean_context_recall": mean(r["context_recall"] for r in scored_rows),
+        "mean_context_recall": group_mean(scored_rows, "context_recall"),
     }
     if mode == "graph":
-        summary["partial_answer_count"] = sum(1 for row in rows if row.get("is_partial"))
+        question_count = len(rows)
+        partial_count = sum(1 for row in rows if row.get("is_partial"))
+        summary["skipped_empty_answers"] = skipped_empty_answers
+        summary["mean_faithfulness"] = group_mean(scored_rows, "faithfulness")
+        summary["mean_answer_correctness"] = group_mean(scored_rows, "answer_correctness")
+        summary["partial_answer_count"] = partial_count
+        summary["partial_answer_percent"] = (
+            round(100.0 * partial_count / question_count, 2) if question_count else 0.0
+        )
 
     output = {"summary": summary, "rows": scored_rows}
     config.ragas_results_path.write_text(
@@ -506,10 +581,18 @@ def group_mean(rows: list[dict[str, Any]], key: str) -> float | None:
 
 
 def write_benchmark_report(config, mode: str, metadata: dict[str, Any]) -> None:
-    """Write benchmark_report.md: context recall and latencies only."""
+    """Write benchmark_report.md: quality metrics and latency in seconds."""
 
     ragas = json.loads(config.ragas_results_path.read_text(encoding="utf-8"))
     title = "HotpotQA Graph Benchmark Report" if mode == "graph" else "HotpotQA Retriever Benchmark Report"
+    s = ragas.get("summary") or {}
+    question_count = metadata.get("question_count") or 0
+    partial_count = metadata.get("partial_answer_count", s.get("partial_answer_count", 0))
+    partial_percent = metadata.get("partial_answer_percent")
+    if partial_percent is None:
+        partial_percent = s.get("partial_answer_percent")
+    if partial_percent is None and question_count:
+        partial_percent = round(100.0 * float(partial_count) / float(question_count), 2)
 
     lines = [
         f"# {title}",
@@ -535,33 +618,50 @@ def write_benchmark_report(config, mode: str, metadata: dict[str, Any]) -> None:
         ]
     )
 
-    lines.extend(["", "## Context recall", ""])
-    if ragas.get("summary"):
-        s = ragas["summary"]
-        lines.extend(
+    lines.extend(["", "## Quality", ""])
+    quality_rows = [
+        "| Metric | Value |",
+        "|--------|-------|",
+        f"| Context recall | {format_metric(s.get('mean_context_recall'))} |",
+        f"| Questions scored | {s.get('total_scored', '—')} |",
+        f"| Skipped (empty contexts) | {s.get('skipped_empty_contexts', 0)} |",
+    ]
+    if mode == "graph":
+        quality_rows.extend(
             [
-                "| Metric | Mean |",
-                "|--------|------|",
-                f"| Context recall | {format_metric(s.get('mean_context_recall'))} |",
-                f"| Questions scored | {s.get('total_scored', '—')} |",
-                f"| Skipped (empty contexts) | {s.get('skipped_empty_contexts', 0)} |",
-                "",
+                f"| Faithfulness | {format_metric(s.get('mean_faithfulness'))} |",
+                f"| Answer correctness | {format_metric(s.get('mean_answer_correctness'))} |",
+                f"| Partial answers | {partial_count} ({format_metric(partial_percent, 2)}%) |",
+                f"| Skipped (empty answers) | {s.get('skipped_empty_answers', 0)} |",
             ]
         )
+    lines.extend(quality_rows)
+    lines.append("")
 
     latency_label = "Graph latency" if mode == "graph" else "Retriever latency"
     lines.extend([f"## {latency_label}", ""])
     latency = metadata.get("latency") or {}
     if latency:
+        mean_s = latency.get("mean_s")
+        p50_s = latency.get("p50_s")
+        p95_s = latency.get("p95_s")
+        min_s = latency.get("min_s")
+        max_s = latency.get("max_s")
+        if mean_s is None and latency.get("mean_ms") is not None:
+            mean_s = float(latency["mean_ms"]) / 1000.0
+            p50_s = float(latency.get("p50_ms") or 0.0) / 1000.0
+            p95_s = float(latency.get("p95_ms") or 0.0) / 1000.0
+            min_s = float(latency.get("min_ms") or 0.0) / 1000.0
+            max_s = float(latency.get("max_ms") or 0.0) / 1000.0
         lines.extend(
             [
-                "| Stat | ms |",
-                "|------|-----|",
-                f"| Mean | {format_metric(latency.get('mean_ms'), 2)} |",
-                f"| p50 | {format_metric(latency.get('p50_ms'), 2)} |",
-                f"| p95 | {format_metric(latency.get('p95_ms'), 2)} |",
-                f"| Min | {format_metric(latency.get('min_ms'), 2)} |",
-                f"| Max | {format_metric(latency.get('max_ms'), 2)} |",
+                "| Stat | seconds |",
+                "|------|---------|",
+                f"| Mean | {format_metric(mean_s, 2)} |",
+                f"| p50 | {format_metric(p50_s, 2)} |",
+                f"| p95 | {format_metric(p95_s, 2)} |",
+                f"| Min | {format_metric(min_s, 2)} |",
+                f"| Max | {format_metric(max_s, 2)} |",
                 "",
             ]
         )
@@ -572,18 +672,34 @@ def write_benchmark_report(config, mode: str, metadata: dict[str, Any]) -> None:
         for row in ragas["rows"]:
             groups[(row.get("type", "unknown"), row.get("level", "unknown"))].append(row)
 
-        lines.extend(
-            [
-                "| Type | Level | Count | Context recall |",
-                "|------|-------|-------|----------------|",
-            ]
-        )
-        for (qtype, level), group_rows in sorted(groups.items()):
-            n = len(group_rows)
-            lines.append(
-                f"| {qtype} | {level} | {n} | "
-                f"{format_metric(group_mean(group_rows, 'context_recall'))} |"
+        if mode == "graph":
+            lines.extend(
+                [
+                    "| Type | Level | Count | Context recall | Faithfulness | Answer correctness |",
+                    "|------|-------|-------|----------------|--------------|--------------------|",
+                ]
             )
+            for (qtype, level), group_rows in sorted(groups.items()):
+                n = len(group_rows)
+                lines.append(
+                    f"| {qtype} | {level} | {n} | "
+                    f"{format_metric(group_mean(group_rows, 'context_recall'))} | "
+                    f"{format_metric(group_mean(group_rows, 'faithfulness'))} | "
+                    f"{format_metric(group_mean(group_rows, 'answer_correctness'))} |"
+                )
+        else:
+            lines.extend(
+                [
+                    "| Type | Level | Count | Context recall |",
+                    "|------|-------|-------|----------------|",
+                ]
+            )
+            for (qtype, level), group_rows in sorted(groups.items()):
+                n = len(group_rows)
+                lines.append(
+                    f"| {qtype} | {level} | {n} | "
+                    f"{format_metric(group_mean(group_rows, 'context_recall'))} |"
+                )
         lines.append("")
 
     lines.extend(
@@ -617,7 +733,7 @@ async def run_one_pq_evaluation(
     strategy: str | None,
     config: BenchmarkRunConfig,
 ) -> None:
-    """Eval → RAGAS recall → report for one PQ collection."""
+    """Eval → RAGAS → report for one PQ collection."""
 
     apply_eval_collection(config)
     assert_experiment_results_dir_available(config)
@@ -707,7 +823,10 @@ def main() -> None:
     parser.add_argument(
         "--ragas-model",
         default=DEFAULT_RAGAS_MODEL,
-        help=f"LLM for context recall (default: {DEFAULT_RAGAS_MODEL})",
+        help=(
+            f"LLM for RAGAS context recall, faithfulness, and answer correctness "
+            f"(default: {DEFAULT_RAGAS_MODEL})"
+        ),
     )
     args = parser.parse_args()
     validate_experiment_name(args.experiment_name)

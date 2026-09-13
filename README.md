@@ -56,13 +56,13 @@ Multi-turn chat is checkpointed per `session_id`. Scratch from one question (fac
 
 ## Evaluation
 
-Offline runs on HotpotQA (distractor split). Fill in after the next benchmark.
+Offline runs on HotpotQA (distractor split). Fill in after the next benchmark. Graph mode (`--mode graph`) writes all five columns below. Retrieval-only runs fill latency and leave the quality columns blank.
 
-| Setup | Context recall | Latency |
-|-------|----------------|---------|
-| Hybrid search | — | — |
-| Hybrid search + rerank | — | — |
-| Full Citeflow pipeline | — | — |
+| Setup | Faithfulness | Answer correctness | Partial answers | Mean latency (seconds) | p50 latency (seconds) |
+|-------|--------------|--------------------|-----------------|------------------------|------------------------|
+| Hybrid search | — | — | — | — | — |
+| Hybrid search + rerank | — | — | — | — | — |
+| Full Citeflow pipeline | — | — | — | — | — |
 
 How to run: [benchmarking/hotpotqa/README.md](benchmarking/hotpotqa/README.md).
 
@@ -99,7 +99,7 @@ Load a corpus first (arXiv PDFs → Qdrant): [ingestion/README.md](ingestion/REA
 | Jina (optional) | ColBERT-style re-ranking |
 | FastAPI + Dash | API and chat UI |
 | Langfuse (optional) | Tracing |
-| RAGAS | Offline recall scoring |
+| RAGAS | Offline recall, faithfulness, and answer-correctness scoring |
 
 Python 3.10+. MIT license.
 
