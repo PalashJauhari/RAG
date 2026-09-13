@@ -24,7 +24,7 @@ app = Dash(
     suppress_callback_exceptions=True,
     assets_folder=str(Path(__file__).resolve().parent / "assets"),
 )
-app.title = "Factline"
+app.title = "Citeflow"
 
 
 # --- Layout (stores + chat shell) ---
@@ -54,7 +54,7 @@ app.layout = lambda: html.Div(
                                 html.Div("G", className="rag-avatar rag-avatar-lg"),
                                 html.Div(
                                     children=[
-                                        html.Span("Factline", className="rag-brand-title"),
+                                        html.Span("Citeflow", className="rag-brand-title"),
                                         html.Span(" RAG Chat", className="rag-brand-sub"),
                                     ]
                                 ),

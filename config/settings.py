@@ -75,10 +75,6 @@ class Settings(BaseSettings):
     # Answer ↔ faithfulness repair budget (id check + LLM grounding; separate from retrieval).
     answer_retry_max: int = 5
 
-    # --- Long-context summarization (optional; see middleware.context_editing) ---
-    message_summary_token_threshold: int = 100000
-    message_summary_keep_recent: int = 10
-
     # --- OpenAI request rate limiting ---
     openai_rate_limit_enabled: bool = True
     openai_rate_limit_requests_per_second: float = 1.0

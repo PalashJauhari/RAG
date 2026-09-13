@@ -67,7 +67,7 @@ async def lifespan(app: FastAPI):
             await postgres_context.__aexit__(None, None, None)
 
 
-app = FastAPI(title="Factline", lifespan=lifespan)
+app = FastAPI(title="Citeflow", lifespan=lifespan)
 
 # CORS: Dash on 8050 calls the API from the browser; allow loopback variants.
 app.add_middleware(

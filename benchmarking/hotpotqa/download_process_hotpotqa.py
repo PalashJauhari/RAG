@@ -10,7 +10,10 @@ from typing import Any
 
 from datasets import load_dataset
 
-from benchmarking.hotpotqa.benchmark_config import load_benchmark_env
+from benchmarking.hotpotqa.benchmark_config import (
+    DEFAULT_MAX_QUESTIONS,
+    PROCESSED_DATASET_PATH,
+)
 
 DATASET_NAME = "hotpotqa/hotpot_qa"
 DATASET_CONFIG = "distractor"
@@ -93,25 +96,23 @@ def main() -> None:
     parser.add_argument(
         "--max-questions",
         type=int,
-        default=None,
-        help="Cap questions (default: HOTPOTQA_MAX_QUESTIONS from hotpotqa/.env)",
+        default=DEFAULT_MAX_QUESTIONS,
+        help=f"Cap questions (default: {DEFAULT_MAX_QUESTIONS}). 0 = full split.",
     )
     args = parser.parse_args()
-
-    config = load_benchmark_env()
-    max_questions = args.max_questions if args.max_questions is not None else config.hotpotqa_max_questions
+    max_questions = args.max_questions
 
     dataset = load_dataset(DATASET_NAME, DATASET_CONFIG, split=SPLIT)
     if max_questions > 0:
         dataset = subsample_dataset(dataset, max_questions)
 
     records = build_records(dataset)
-    config.processed_dataset_path.parent.mkdir(parents=True, exist_ok=True)
-    config.processed_dataset_path.write_text(
+    PROCESSED_DATASET_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PROCESSED_DATASET_PATH.write_text(
         json.dumps(records, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    print(f"Wrote {len(records)} records to {config.processed_dataset_path}")
+    print(f"Wrote {len(records)} records to {PROCESSED_DATASET_PATH}")
 
 
 if __name__ == "__main__":

@@ -141,9 +141,9 @@ def request_headers() -> dict[str, str]:
     """User-Agent for OpenAlex and arXiv (include mailto when set)."""
 
     email = os.getenv("CONTACT_EMAIL", "").strip()
-    ua = "FactlineRAG/1.0 (https://github.com/arxiv/arxiv-docs)"
+    ua = "CiteflowRAG/1.0 (https://github.com/arxiv/arxiv-docs)"
     if email:
-        ua = f"FactlineRAG/1.0 (mailto:{email})"
+        ua = f"CiteflowRAG/1.0 (mailto:{email})"
     return {"User-Agent": ua}
 
 

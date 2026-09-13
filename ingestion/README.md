@@ -47,7 +47,7 @@ Step 3 **deletes and recreates** the collection if it already exists.
 
 ## Payload contract
 
-Same as Factline corpora: embed `payload.text`; graph and RAGAS use `additional_metadata.raw_text` only. See root [README.md](../README.md) (Chunk payload contract).
+Same as Citeflow corpora: embed `payload.text`; graph and RAGAS use `additional_metadata.raw_text` only. See root [README.md](../README.md) (Chunk payload contract).
 
 arXiv `additional_metadata` includes `source` (abs URL), `page_number`, `filename`, `element_id`, `arxiv_id`. The UI shows URL and page only for cited catalog ids.
 

@@ -1,31 +1,42 @@
-"""HotpotQA benchmark paths and local env variables (not experiment name)."""
+"""HotpotQA benchmark paths and CLI-only run config (no hotpotqa/.env)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from qdrant_pq import normalize_dense_pq
 
 HOTPOTQA_ROOT = Path(__file__).resolve().parent
+PROCESSED_DATASET_PATH = HOTPOTQA_ROOT / "data" / "processed" / "hotpotqa_eval.json"
+
+DEFAULT_MAX_QUESTIONS = 200
+DEFAULT_RAGAS_MODEL = "gpt-4o-mini"
 
 
-class BenchmarkEnvSettings(BaseSettings):
-    """Loads ``benchmarking/hotpotqa/.env`` (max questions, RAGAS model only)."""
+def parse_pq_list(values: list[str] | None) -> list[str]:
+    """Parse CLI ``--pq`` tokens (space or comma separated). Default ``[none]``."""
 
-    hotpotqa_max_questions: int = Field(default=200, alias="HOTPOTQA_MAX_QUESTIONS")
-    hotpotqa_ragas_model: str = Field(default="gpt-4o-mini", alias="HOTPOTQA_RAGAS_MODEL")
+    if not values:
+        return ["none"]
+    ordered: list[str] = []
+    for raw in values:
+        for part in str(raw).replace(",", " ").split():
+            key = normalize_dense_pq(part)
+            if key not in ordered:
+                ordered.append(key)
+    return ordered or ["none"]
 
-    model_config = SettingsConfigDict(
-        env_file=HOTPOTQA_ROOT / ".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
 
-    @property
-    def processed_dataset_path(self) -> Path:
-        return HOTPOTQA_ROOT / "data" / "processed" / "hotpotqa_eval.json"
+def collection_name_for_pq(collection_base: str, dense_pq: str) -> str:
+    """``{base}_{none|pq8|pq16|pq32}``."""
+
+    base = (collection_base or "").strip()
+    if not base:
+        raise ValueError("--collection-base is required and must be non-empty")
+    if "/" in base or "\\" in base:
+        raise ValueError("--collection-base must be a single name (no slashes)")
+    return f"{base}_{normalize_dense_pq(dense_pq)}"
 
 
 def validate_experiment_name(experiment_name: str) -> str:
@@ -44,26 +55,32 @@ def validate_experiment_name(experiment_name: str) -> str:
 
 @dataclass
 class BenchmarkRunConfig:
-    """Eval run config: env settings plus required experiment name from CLI."""
+    """One sequential PQ eval run: CLI experiment + pq subfolder."""
 
-    env: BenchmarkEnvSettings
     hotpotqa_experiment_name: str
+    dense_pq: str
+    collection_base: str
+    hotpotqa_max_questions: int = 0
+    hotpotqa_ragas_model: str = DEFAULT_RAGAS_MODEL
 
-    @property
-    def hotpotqa_max_questions(self) -> int:
-        return self.env.hotpotqa_max_questions
-
-    @property
-    def hotpotqa_ragas_model(self) -> str:
-        return self.env.hotpotqa_ragas_model
+    def __post_init__(self) -> None:
+        self.hotpotqa_experiment_name = validate_experiment_name(self.hotpotqa_experiment_name)
+        self.dense_pq = normalize_dense_pq(self.dense_pq)
+        self.collection_base = (self.collection_base or "").strip()
+        if not self.collection_base:
+            raise ValueError("--collection-base is required")
 
     @property
     def processed_dataset_path(self) -> Path:
-        return self.env.processed_dataset_path
+        return PROCESSED_DATASET_PATH
+
+    @property
+    def qdrant_collection_name(self) -> str:
+        return collection_name_for_pq(self.collection_base, self.dense_pq)
 
     @property
     def results_dir(self) -> Path:
-        return HOTPOTQA_ROOT / "data" / "results" / self.hotpotqa_experiment_name
+        return HOTPOTQA_ROOT / "data" / "results" / self.hotpotqa_experiment_name / self.dense_pq
 
     @property
     def results_path(self) -> Path:
@@ -82,20 +99,20 @@ class BenchmarkRunConfig:
         return self.results_dir / "benchmark_report.md"
 
 
-def load_benchmark_env() -> BenchmarkEnvSettings:
-    """Load HotpotQA env settings for download/upload (no experiment name)."""
-
-    return BenchmarkEnvSettings()
-
-
-def load_benchmark_config(experiment_name: str) -> BenchmarkRunConfig:
-    """Load env settings and bind a required experiment name from ``--experiment-name``."""
+def load_benchmark_config(
+    experiment_name: str,
+    *,
+    dense_pq: str,
+    collection_base: str,
+    max_questions: int = 0,
+    ragas_model: str = DEFAULT_RAGAS_MODEL,
+) -> BenchmarkRunConfig:
+    """Bind CLI flags for one PQ eval folder."""
 
     return BenchmarkRunConfig(
-        env=load_benchmark_env(),
-        hotpotqa_experiment_name=validate_experiment_name(experiment_name),
+        hotpotqa_experiment_name=experiment_name,
+        dense_pq=dense_pq,
+        collection_base=collection_base,
+        hotpotqa_max_questions=max_questions,
+        hotpotqa_ragas_model=ragas_model or DEFAULT_RAGAS_MODEL,
     )
-
-
-# Back-compat alias for scripts that only need processed dataset paths.
-BenchmarkConfig = BenchmarkEnvSettings

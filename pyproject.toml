@@ -1,7 +1,7 @@
 [project]
-name = "factline"
+name = "citeflow"
 version = "0.1.0"
-description = "Fact-first RAG orchestration — LangGraph, Qdrant hybrid retrieval, faithfulness-gated answers."
+description = "Grounded RAG orchestration — LangGraph, Qdrant hybrid retrieval, citation-gated answers."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

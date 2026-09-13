@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve Factline / RAG.
+Thanks for helping improve Citeflow.
 
 ## Prerequisites
 

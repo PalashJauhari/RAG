@@ -35,6 +35,17 @@ def _reject_io_artifact_path(path: Path, label: str) -> None:
         )
 
 
+def _strip_error_handler_nodes(mermaid: str) -> str:
+    """Drop LangGraph ``__error_handler__*`` nodes so the public diagram stays readable."""
+
+    kept: list[str] = []
+    for line in mermaid.splitlines():
+        if "__error_handler__" in line:
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _remove_stale_io_artifacts(artifacts_dir: Path) -> None:
     """Delete legacy hand-maintained I/O diagram files if they still exist."""
     for pattern in ("langgraph_io.mmd", "langgraph_io.png", "*_io.mmd", "*_io.png"):
@@ -88,7 +99,7 @@ async def main() -> None:
     retrieval_graph = RetrievalGraph(InMemorySaver())
     try:
         graph = retrieval_graph.graph.get_graph()
-        mermaid = graph.draw_mermaid()
+        mermaid = _strip_error_handler_nodes(graph.draw_mermaid())
         mermaid_path.write_text(mermaid, encoding="utf-8")
 
         png = graph.draw_mermaid_png(

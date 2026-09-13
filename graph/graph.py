@@ -1,4 +1,4 @@
-"""Factline LangGraph agent: normalize, decompose facts, retrieve, verify recall, and answer.
+"""Citeflow LangGraph agent: normalize, decompose facts, retrieve, verify recall, and answer.
 
 Overview
 --------
@@ -70,8 +70,6 @@ from langgraph.graph import END, StateGraph, add_messages
 from langgraph.types import Command, RetryPolicy
 
 from config.settings import settings
-# Optional long-context compaction (summarize + RemoveMessage); disabled below in normalisation node.
-# from middleware.context_editing import truncate_and_summarize
 from langfuse import propagate_attributes
 
 from middleware.llm_client import get_llm_client
@@ -124,8 +122,7 @@ class RetrievalState(TypedDict, total=False):
     # Intermediate node outputs are NOT stored here (keeps checkpoint small).
 
     message_summary: str
-    # Rolling summary of evicted turns when ``middleware.context_editing`` truncation is
-    # enabled. Currently unused (truncation disabled in query_normalisation_node).
+    # Optional rolled-up history for query normalisation (usually empty).
 
     # --- Turn scratch (reset at each /run invoke via prepare_state_for_next_question) ---
 
@@ -575,7 +572,7 @@ def build_node_ai_message(
 
 
 class RetrievalGraph:
-    """Compiles and runs the Factline retrieval LangGraph.
+    """Compiles and runs the Citeflow retrieval LangGraph.
 
     Responsibilities:
     - Own a shared :class:`~retriever.retriever.Retriever` (Qdrant + embeddings).

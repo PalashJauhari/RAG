@@ -1,12 +1,13 @@
 # HotpotQA benchmark (distractor)
 
-End-to-end eval for Factline retrieval and graph on HotpotQA **distractor** validation.
+End-to-end eval for Citeflow retrieval and graph on HotpotQA **distractor** validation.
+
+Benchmark knobs are **CLI only** (no `benchmarking/hotpotqa/.env`). Secrets stay in **repo root `.env`**.
 
 ## Prerequisites
 
 - Python env with repo dependencies (e.g. `rag_env_1`)
-- Repo root `.env`: OpenAI, Qdrant, Jina, `USE_BM25`, `USE_LATE_INTERACTION`, retrieval limits, graph models, `QDRANT_COLLECTION_NAME`
-- `benchmarking/hotpotqa/.env`: `HOTPOTQA_MAX_QUESTIONS`, `HOTPOTQA_RAGAS_MODEL` (see `.env.example`)
+- Repo root `.env`: OpenAI, Qdrant, Jina, `USE_BM25`, `USE_LATE_INTERACTION`, retrieval limits, graph models
 
 Run all commands from the **repo root**.
 
@@ -14,56 +15,58 @@ Run all commands from the **repo root**.
 
 ```bash
 # 1. Download & process (distractor validation)
-python -m benchmarking.hotpotqa.download_process_hotpotqa --max-questions 200
+python -m benchmarking.hotpotqa.download_process_hotpotqa --max-questions 50
 
-# 2. Upload to Qdrant (pick one)
-python -m benchmarking.hotpotqa.upload_qdrant_embedding --no-enrich
-python -m benchmarking.hotpotqa.upload_qdrant_embedding --enrich
+# 2. Upload: one command can create several PQ collections (embeddings computed once)
+python -m benchmarking.hotpotqa.upload_qdrant_embedding \
+  --no-enrich \
+  --collection-base hotpotqa_eval \
+  --pq none pq8 pq16 pq32
 
-# 3. Evaluate (required: unique --experiment-name per run)
+# 3. Evaluate sequentially (none, then pq8, …). Each PQ writes its own folder.
 python -m benchmarking.hotpotqa.run_evaluation \
   --mode retrieval \
   --strategy fast_bm25_retrieval \
-  --experiment-name hotpot_retrieval_bm25_v1
+  --experiment-name hotpot_retrieval_v1 \
+  --collection-base hotpotqa_eval \
+  --pq none pq8 pq16 pq32
 
 python -m benchmarking.hotpotqa.run_evaluation \
   --mode graph \
-  --experiment-name hotpot_graph_v1
+  --experiment-name hotpot_graph_v1 \
+  --collection-base hotpotqa_eval \
+  --pq none pq8 pq16 pq32
 ```
 
-`--experiment-name` is **required** for both modes. It is not read from `.env`. If `data/results/<name>/` already exists, the run exits without overwriting.
+`--collection-base` must match upload. Collections are `{base}_none`, `{base}_pq8`, `{base}_pq16`, `{base}_pq32`.
 
-Align `QDRANT_COLLECTION_NAME` in root `.env` with the collection you upload to.
+`--experiment-name` is required. Results go to `data/results/<experiment-name>/<pq>/`. If that PQ folder already exists, the run exits without overwriting.
+
+`--max-questions` on eval (default `0`) slices the processed JSON; `0` uses the full downloaded file.
+
+`--ragas-model` defaults to `gpt-4o-mini` (context recall only).
+
+The graph is invoked as-is; eval only switches `QDRANT_COLLECTION_NAME` / `DENSE_PQ` on the shared settings object.
 
 ## Outputs
 
-Under `benchmarking/hotpotqa/data/results/<experiment-name>/`:
+Under `benchmarking/hotpotqa/data/results/<experiment-name>/<pq>/`:
 
 - `results.json` — per-question eval rows
-- `run_metadata.json` — mode, latency, env snapshot
-- `ragas_results.json` — RAGAS scores
-- `benchmark_report.md` — summary report
+- `run_metadata.json` — mode, PQ, collection, latency, env snapshot
+- `ragas_results.json` — context recall scores
+- `benchmark_report.md` — context recall + latencies
 
 ## Metrics
 
 | Metric | Retrieval | Graph |
 |--------|-----------|-------|
-| Context precision / recall | yes | yes |
-| Faithfulness | — | yes |
-| Answer correctness | — | yes |
-
-Graph mode reads `document_catalog` for RAGAS contexts and `final_sources` for reported sources
-(after the in-graph faithfulness gate). Partial answers (`answer_mode=partial`) are included in
-RAGAS when scorable.
+| Context recall | yes | yes |
+| Latency | retriever wall time | full graph wall time |
 
 ## Environment
 
 | Variable | File |
 |----------|------|
-| `HOTPOTQA_MAX_QUESTIONS` | `benchmarking/hotpotqa/.env` |
-| `HOTPOTQA_RAGAS_MODEL` | `benchmarking/hotpotqa/.env` |
-| Everything else (API keys, Qdrant, models, flags) | repo root `.env` |
-
-Experiment name: **`--experiment-name` CLI only** (eval step).
-
-Enrichment uses `QUERY_DECOMPOSITION_MODEL` from root `.env` when `--enrich` is set.
+| API keys, Qdrant URL, BM25 / late-interaction / MMR / top-k | repo root `.env` |
+| Max questions, PQ list, collection base, experiment name, RAGAS model | CLI |

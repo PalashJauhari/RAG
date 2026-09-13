@@ -2,12 +2,9 @@
 
 Generated files for documentation (not committed — see root `.gitignore`).
 
-## LangGraph topology
+The README flowchart is Mermaid in `README.md` (happy path + repair loop; no node-failure handlers).
 
-| File | Description |
-|------|-------------|
-| `langgraph.mmd` | Mermaid source from the compiled `RetrievalGraph` |
-| `langgraph.png` | Rendered diagram (linked from root `README.md`) |
+Optional PNG/MMD dump from the compiled graph (error-handler nodes stripped from `.mmd`):
 
 Regenerate from repo root with **`rag_env_1`** active:
 

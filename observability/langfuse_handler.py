@@ -1,4 +1,4 @@
-"""Langfuse tracing for the Factline graph.
+"""Langfuse tracing for the Citeflow graph.
 
 One root span per ``run`` / ``stream_run`` / ``resume``; inline node spans and nested
 ``{node}-llm`` generation spans. Gated by ``LANGFUSE_TRACING_ENABLED`` in

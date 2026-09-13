@@ -15,9 +15,14 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, field_validator, model_validator
 from qdrant_client import AsyncQdrantClient, models
 
-from benchmarking.hotpotqa.benchmark_config import load_benchmark_env
+from benchmarking.hotpotqa.benchmark_config import (
+    PROCESSED_DATASET_PATH,
+    collection_name_for_pq,
+    parse_pq_list,
+)
 from config.settings import settings
 from middleware.llm_client import get_llm_client
+from qdrant_pq import product_quantization_config
 
 logger = logging.getLogger(__name__)
 
@@ -329,19 +334,26 @@ async def enrich_all_contexts(records: list[dict[str, Any]]) -> None:
     )
 
 
-async def recreate_collection(client: AsyncQdrantClient) -> None:
+async def recreate_collection(
+    client: AsyncQdrantClient,
+    collection_name: str,
+    dense_pq: str,
+) -> None:
     """Delete existing collection if present, then create a fresh one."""
 
-    name = settings.qdrant_collection_name
-    if await client.collection_exists(name):
-        await client.delete_collection(name)
-        print(f"Deleted existing collection {name!r}")
+    if await client.collection_exists(collection_name):
+        await client.delete_collection(collection_name)
+        print(f"Deleted existing collection {collection_name!r}")
 
+    dense_kwargs: dict[str, Any] = {
+        "size": settings.openai_embedding_dimensions,
+        "distance": models.Distance.COSINE,
+    }
+    dense_pq_config = product_quantization_config(dense_pq)
+    if dense_pq_config is not None:
+        dense_kwargs["quantization_config"] = dense_pq_config
     vectors_config = {
-        settings.qdrant_dense_vector_name: models.VectorParams(
-            size=settings.openai_embedding_dimensions,
-            distance=models.Distance.COSINE,
-        )
+        settings.qdrant_dense_vector_name: models.VectorParams(**dense_kwargs)
     }
     if settings.use_late_interaction:
         vectors_config[settings.qdrant_colbert_vector_name] = models.VectorParams(
@@ -362,19 +374,19 @@ async def recreate_collection(client: AsyncQdrantClient) -> None:
         }
 
     await client.create_collection(
-        collection_name=name,
+        collection_name=collection_name,
         vectors_config=vectors_config,
         sparse_vectors_config=sparse_vectors_config,
     )
-    print(f"Created collection {name!r}")
+    print(f"Created collection {collection_name!r} (dense PQ={dense_pq})")
 
 
-async def upsert_chunks(
-    client: AsyncQdrantClient,
+async def embed_chunks(
     chunks: list[tuple[str, ChunkPayload]],
-) -> None:
-    """Embed payload text and upsert points in batches."""
+) -> list[tuple[str, ChunkPayload, list[float], list[list[float]] | None]]:
+    """Embed all chunks once (dense + optional ColBERT) for reuse across PQ collections."""
 
+    embedded: list[tuple[str, ChunkPayload, list[float], list[list[float]] | None]] = []
     for start in range(0, len(chunks), UPLOAD_BATCH_SIZE):
         batch = chunks[start : start + UPLOAD_BATCH_SIZE]
         texts = [payload.text for _, payload in batch]
@@ -385,19 +397,32 @@ async def upsert_chunks(
                 texts,
                 input_type="document",
             )
-
-        points: list[models.PointStruct] = []
         for index, (point_id, payload) in enumerate(batch):
-            embed_input = texts[index]
-            vector: dict[str, Any] = {settings.qdrant_dense_vector_name: dense_vectors[index]}
+            colbert = colbert_vectors[index] if colbert_vectors else None
+            embedded.append((point_id, payload, dense_vectors[index], colbert))
+        print(f"Embedded {min(start + UPLOAD_BATCH_SIZE, len(chunks))}/{len(chunks)} points")
+    return embedded
+
+
+async def upsert_embedded_chunks(
+    client: AsyncQdrantClient,
+    collection_name: str,
+    embedded: list[tuple[str, ChunkPayload, list[float], list[list[float]] | None]],
+) -> None:
+    """Upsert precomputed vectors into one collection."""
+
+    for start in range(0, len(embedded), UPLOAD_BATCH_SIZE):
+        batch = embedded[start : start + UPLOAD_BATCH_SIZE]
+        points: list[models.PointStruct] = []
+        for point_id, payload, dense_vector, colbert_vector in batch:
+            vector: dict[str, Any] = {settings.qdrant_dense_vector_name: dense_vector}
             if settings.use_bm25:
                 vector[settings.qdrant_bm25_vector_name] = models.Document(
-                    text=embed_input,
+                    text=payload.text,
                     model=settings.qdrant_bm25_model,
                 )
-            if settings.use_late_interaction and colbert_vectors:
-                vector[settings.qdrant_colbert_vector_name] = colbert_vectors[index]
-
+            if settings.use_late_interaction and colbert_vector is not None:
+                vector[settings.qdrant_colbert_vector_name] = colbert_vector
             points.append(
                 models.PointStruct(
                     id=point_id,
@@ -405,25 +430,31 @@ async def upsert_chunks(
                     payload=payload.to_qdrant_payload(),
                 )
             )
-
         await client.upsert(
-            collection_name=settings.qdrant_collection_name,
+            collection_name=collection_name,
             points=points,
             wait=True,
         )
-        print(f"Uploaded {min(start + UPLOAD_BATCH_SIZE, len(chunks))}/{len(chunks)} points")
+        print(
+            f"Uploaded {min(start + UPLOAD_BATCH_SIZE, len(embedded))}/{len(embedded)} "
+            f"points to {collection_name!r}"
+        )
 
 
-async def run_upload(do_enrich: bool) -> None:
-    """Load JSON, optionally enrich, recreate collection, upsert all contexts."""
+async def run_upload(
+    do_enrich: bool,
+    *,
+    collection_base: str,
+    dense_pq_values: list[str],
+) -> None:
+    """Load JSON, optionally enrich, embed once, recreate each PQ collection, upsert."""
 
-    config = load_benchmark_env()
-    records = json.loads(config.processed_dataset_path.read_text(encoding="utf-8"))
+    records = json.loads(PROCESSED_DATASET_PATH.read_text(encoding="utf-8"))
 
     if do_enrich:
         print(f"Enriching contexts for {len(records)} questions...")
         await enrich_all_contexts(records)
-        config.processed_dataset_path.write_text(
+        PROCESSED_DATASET_PATH.write_text(
             json.dumps(records, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
@@ -441,22 +472,42 @@ async def run_upload(do_enrich: bool) -> None:
         timeout=settings.request_timeout_seconds,
     )
     try:
-        await recreate_collection(client)
-        await upsert_chunks(client, chunks)
+        embedded = await embed_chunks(chunks)
+        for dense_pq in dense_pq_values:
+            name = collection_name_for_pq(collection_base, dense_pq)
+            await recreate_collection(client, name, dense_pq)
+            await upsert_embedded_chunks(client, name, embedded)
     finally:
         await client.close()
 
 
 def main() -> None:
-    """CLI entry: upload HotpotQA contexts to Qdrant."""
+    """CLI entry: upload HotpotQA contexts to one or more PQ collections."""
 
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description="Upload HotpotQA contexts to Qdrant")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--enrich", action="store_true", help="LLM-enrich contexts before upload")
     group.add_argument("--no-enrich", action="store_true", help="Upload without enrichment")
+    parser.add_argument(
+        "--collection-base",
+        required=True,
+        help="Collection prefix; each PQ becomes {base}_{none|pq8|pq16|pq32}",
+    )
+    parser.add_argument(
+        "--pq",
+        nargs="+",
+        default=["none"],
+        help="PQ modes to create in one go (none pq8 pq16 pq32). Default: none",
+    )
     args = parser.parse_args()
-    asyncio.run(run_upload(do_enrich=args.enrich))
+    asyncio.run(
+        run_upload(
+            do_enrich=args.enrich,
+            collection_base=args.collection_base,
+            dense_pq_values=parse_pq_list(args.pq),
+        )
+    )
 
 
 if __name__ == "__main__":
