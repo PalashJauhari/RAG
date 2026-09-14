@@ -56,13 +56,39 @@ Multi-turn chat is checkpointed per `session_id`. Scratch from one question (fac
 
 ## Evaluation
 
-Offline runs on HotpotQA (distractor split). Fill in after the next benchmark. Graph mode (`--mode graph`) writes all five columns below. Retrieval-only runs fill latency and leave the quality columns blank.
+Offline HotpotQA (distractor split, **200** questions). Retrieval-only. **Context recall** is RAGAS. **Latency** is mean retriever wall time in seconds. Graph / faithfulness / answer-correctness rows are not in yet.
 
-| Setup | Faithfulness | Answer correctness | Partial answers | Mean latency (seconds) | p50 latency (seconds) |
-|-------|--------------|--------------------|-----------------|------------------------|------------------------|
-| Hybrid search | — | — | — | — | — |
-| Hybrid search + rerank | — | — | — | — | — |
-| Full Citeflow pipeline | — | — | — | — | — |
+### Context recall
+
+**Dense + BM25**
+
+| Setup | No quantization | PQ-8 | PQ-16 | PQ-32 |
+|-------|-----------------|------|-------|-------|
+| Without enrichment | 0.81 | 0.80 | 0.81 | 0.82 |
+| With enrichment | 0.81 | 0.80 | 0.82 | 0.81 |
+
+**Dense + BM25 + ColBERT rerank**
+
+| Setup | No quantization | PQ-8 | PQ-16 | PQ-32 |
+|-------|-----------------|------|-------|-------|
+| Without enrichment | 0.87 | 0.86 | 0.86 | 0.86 |
+| With enrichment | 0.85 | 0.86 | 0.85 | 0.86 |
+
+### Mean latency (seconds)
+
+**Dense + BM25**
+
+| Setup | No quantization | PQ-8 | PQ-16 | PQ-32 |
+|-------|-----------------|------|-------|-------|
+| Without enrichment | 0.54 | 0.59 | 0.53 | 0.60 |
+| With enrichment | 0.52 | 0.53 | 0.55 | 0.57 |
+
+**Dense + BM25 + ColBERT rerank**
+
+| Setup | No quantization | PQ-8 | PQ-16 | PQ-32 |
+|-------|-----------------|------|-------|-------|
+| Without enrichment | 11.58 | 12.18 | 12.77 | 12.93 |
+| With enrichment | 12.09 | 10.50 | 11.21 | 13.23 |
 
 How to run: [benchmarking/hotpotqa/README.md](benchmarking/hotpotqa/README.md).
 

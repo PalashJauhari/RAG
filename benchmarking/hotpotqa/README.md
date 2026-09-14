@@ -89,16 +89,39 @@ Retrieval `--strategy` values: `fast_retrieval`, `keyword`, `fast_bm25_retrieval
 
 ## Metrics
 
-These are the columns on the root README. Graph mode fills all five. Retrieval-only fills latency (quality cells stay blank).
+Retrieval-only numbers on this page and the [root README](../../README.md) (distractor split, **200** questions). **Context recall** is RAGAS. **Latency** is mean retriever wall time in seconds. Graph mode still writes faithfulness, answer correctness, and partial-answer rate into the per-run report; those are not in the tables below yet.
 
-| Metric | Retrieval | Graph |
-|--------|-----------|-------|
-| Faithfulness | — | RAGAS vs retrieved passages |
-| Answer correctness | — | RAGAS vs the Hotpot gold answer |
-| Partial answers | — | share of turns that used the partial-answer path |
-| Mean / p50 latency | retriever wall time (seconds) | full graph wall time (seconds) |
+### Context recall
 
-Context recall is still scored in the report for both modes. It is just not a root-README column.
+**Dense + BM25**
+
+| Setup | No quantization | PQ-8 | PQ-16 | PQ-32 |
+|-------|-----------------|------|-------|-------|
+| Without enrichment | 0.81 | 0.80 | 0.81 | 0.82 |
+| With enrichment | 0.81 | 0.80 | 0.82 | 0.81 |
+
+**Dense + BM25 + ColBERT rerank**
+
+| Setup | No quantization | PQ-8 | PQ-16 | PQ-32 |
+|-------|-----------------|------|-------|-------|
+| Without enrichment | 0.87 | 0.86 | 0.86 | 0.86 |
+| With enrichment | 0.85 | 0.86 | 0.85 | 0.86 |
+
+### Mean latency (seconds)
+
+**Dense + BM25**
+
+| Setup | No quantization | PQ-8 | PQ-16 | PQ-32 |
+|-------|-----------------|------|-------|-------|
+| Without enrichment | 0.54 | 0.59 | 0.53 | 0.60 |
+| With enrichment | 0.52 | 0.53 | 0.55 | 0.57 |
+
+**Dense + BM25 + ColBERT rerank**
+
+| Setup | No quantization | PQ-8 | PQ-16 | PQ-32 |
+|-------|-----------------|------|-------|-------|
+| Without enrichment | 11.58 | 12.18 | 12.77 | 12.93 |
+| With enrichment | 12.09 | 10.50 | 11.21 | 13.23 |
 
 ---
 

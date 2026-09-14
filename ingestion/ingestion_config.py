@@ -52,7 +52,7 @@ class IngestionConfig(BaseSettings):
     unstructured_job_poll_seconds: int = 10
     unstructured_job_max_concurrent: int = 5
     unstructured_job_create_interval_seconds: int = 1
-    unstructured_job_max_file_bytes: int = 10_485_760
+    unstructured_job_max_file_bytes: int = 52_428_800
 
     raw_pdfs_dir: str = "raw_pdfs"
     chunks_output_path: str = "raw_pdfs/chunks.json"
