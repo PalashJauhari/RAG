@@ -1,4 +1,4 @@
-"""Upload HotpotQA contexts to Qdrant (optional LLM enrichment)."""
+"""Upload HotpotQA contexts to Qdrant."""
 
 from __future__ import annotations
 
@@ -10,9 +10,8 @@ import uuid
 from typing import Any
 
 import httpx
-from langchain_core.messages import HumanMessage, SystemMessage
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field
 from qdrant_client import AsyncQdrantClient, models
 
 from benchmarking.hotpotqa.benchmark_config import (
@@ -21,174 +20,32 @@ from benchmarking.hotpotqa.benchmark_config import (
     parse_pq_list,
 )
 from config.settings import settings
-from middleware.llm_client import get_llm_client
 from qdrant_pq import product_quantization_config
 
-logger = logging.getLogger(__name__)
-
 UPLOAD_BATCH_SIZE = 16
-ENRICH_CONCURRENCY = 10
-ENRICH_MAX_RETRIES = 3
-
-ENRICHMENT_SYSTEM_PROMPT = """
-You are a document indexing assistant for a retrieval benchmark.
-
-Given one passage (all sentences joined), produce structured metadata to improve search.
-Do not answer questions about the passage. Do not invent facts not supported by the text.
-
-Return JSON matching the schema:
-
-1. ``predicted_title``: concise title for this passage (your best guess).
-2. ``summary``: exactly two lines summarizing the passage (use a newline between lines).
-3. ``keywords``: deduplicated list of named entities (people, places, organizations) AND other
-   high-signal retrieval terms (dates, product or policy names, acronyms, exact phrases likely
-   in keyword search). Short strings only — no full sentences.
-4. ``facts``: list of objects with ``fact`` and ``fact_question``:
-   - ``fact``: checkable information need (what must be established), not the answer value.
-   - ``fact_question``: searchable query someone would use to retrieve evidence for that need.
-     Do not assert the answer in the question.
-
-Rules for facts:
-- Only include needs grounded in the passage.
-- ``fact_question`` should read like a web or corpus search query, not a chat answer.
-
-Return JSON only.
-""".strip()
 
 jina_request_sem = asyncio.Semaphore(2)
-
-
-class ContextFact(BaseModel):
-    """One checkable information need and a searchable query for it."""
-
-    fact: str
-    fact_question: str
-
-    @field_validator("fact", "fact_question")
-    @classmethod
-    def strip_non_empty(cls, value: str) -> str:
-        cleaned = value.strip()
-        if not cleaned:
-            raise ValueError("must be a non-empty string")
-        return cleaned
-
-
-class ContextEnrichmentResult(BaseModel):
-    """LLM-generated metadata for one HotpotQA context passage."""
-
-    predicted_title: str
-    summary: str
-    keywords: list[str] = Field(default_factory=list)
-    facts: list[ContextFact] = Field(default_factory=list)
-
-    @field_validator("predicted_title", "summary")
-    @classmethod
-    def strip_required(cls, value: str) -> str:
-        cleaned = value.strip()
-        if not cleaned:
-            raise ValueError("must be a non-empty string")
-        return cleaned
-
-    @model_validator(mode="after")
-    def normalize_keywords(self) -> "ContextEnrichmentResult":
-        seen: set[str] = set()
-        keywords: list[str] = []
-        for item in self.keywords:
-            cleaned = item.strip()
-            if cleaned and cleaned not in seen:
-                keywords.append(cleaned)
-                seen.add(cleaned)
-        self.keywords = keywords
-        return self
 
 
 class ChunkPayload(BaseModel):
     """Qdrant point payload for one HotpotQA context."""
 
     text: str
-    enrichments: dict[str, Any] = Field(default_factory=dict)
     additional_metadata: dict[str, Any] = Field(default_factory=dict)
 
     def to_qdrant_payload(self) -> dict[str, Any]:
         return self.model_dump()
 
 
-def build_enriched_text(
-    *,
-    raw_text: str,
-    enrichments: dict[str, Any] | None = None,
-    title: str | None = None,
-) -> str:
-    """Build the string embedded at upload time."""
-
-    passage = str(raw_text or "").strip()
-    if not passage:
-        return ""
-
-    enrichment = enrichments or {}
-    if not enrichment:
-        return passage
-
-    sections: list[str] = []
-    title_text = str(title or "").strip()
-    if title_text:
-        sections.extend(["Title:", title_text, ""])
-
-    summary = str(enrichment.get("summary") or "").strip()
-    if summary:
-        sections.extend(["Summary:", summary, ""])
-
-    facts = enrichment.get("facts") or []
-    fact_lines = [
-        f"- {str(row.get('fact') or '').strip()}"
-        for row in facts
-        if isinstance(row, dict) and str(row.get("fact") or "").strip()
-    ]
-    if fact_lines:
-        sections.append("Present Facts:")
-        sections.extend(fact_lines)
-        sections.append("")
-
-    question_lines = [
-        f"- {str(row.get('fact_question') or '').strip()}"
-        for row in facts
-        if isinstance(row, dict) and str(row.get("fact_question") or "").strip()
-    ]
-    if question_lines:
-        sections.append("Sample Query Questions:")
-        sections.extend(question_lines)
-        sections.append("")
-
-    keywords = enrichment.get("keywords") or []
-    keyword_text = ", ".join(
-        str(item).strip() for item in keywords if isinstance(item, str) and item.strip()
-    )
-    if keyword_text:
-        sections.extend(["Keywords:", keyword_text, ""])
-
-    sections.extend(["Passage:", passage])
-    return "\n".join(sections)
-
-
 def context_to_chunk(record: dict[str, Any], context: dict[str, Any]) -> tuple[str, ChunkPayload]:
     """Build stable point id and payload for one context."""
 
     raw_text = str(context.get("text") or "").strip()
-    enrichments = context.get("enrichment") or {}
-    if not isinstance(enrichments, dict):
-        enrichments = {}
-
-    enriched = build_enriched_text(
-        raw_text=raw_text,
-        enrichments=enrichments,
-        title=str(context.get("title") or ""),
-    )
     context_id = str(context["context_id"])
     point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, context_id))
 
     payload = ChunkPayload(
-        text=enriched,
-        enrichments=enrichments,
+        text=raw_text,
         additional_metadata={
             "raw_text": raw_text,
             "source": "hotpotqa",
@@ -264,74 +121,6 @@ async def create_late_interaction_embeddings(
                 response.raise_for_status()
                 return [row["embeddings"] for row in response.json()["data"]]
     raise RuntimeError("Jina embedding request failed")
-
-
-async def enrich_context(
-    context: dict[str, Any],
-    *,
-    llm: Any,
-    semaphore: asyncio.Semaphore,
-    index: int,
-    total: int,
-) -> None:
-    """Attach enrichment dict to one context (or null on failure)."""
-
-    passage = str(context.get("text") or "").strip()
-    if not passage:
-        context["enrichment"] = None
-        return
-
-    async with semaphore:
-        for attempt in range(1, ENRICH_MAX_RETRIES + 1):
-            try:
-                result = await llm.ainvoke(
-                    [
-                        SystemMessage(content=ENRICHMENT_SYSTEM_PROMPT),
-                        HumanMessage(content=passage),
-                    ]
-                )
-                parsed: ContextEnrichmentResult = result["parsed"]
-                context["enrichment"] = parsed.model_dump()
-                print(f"Enriched {index}/{total} ({context.get('context_id')})")
-                return
-            except Exception as exc:
-                if attempt >= ENRICH_MAX_RETRIES:
-                    logger.warning(
-                        "Enrichment failed for %s: %s",
-                        context.get("context_id"),
-                        exc,
-                    )
-                    context["enrichment"] = None
-                    print(f"Enriched {index}/{total} ({context.get('context_id')}) — skipped")
-                    return
-                await asyncio.sleep(0.5 * attempt)
-
-
-async def enrich_all_contexts(records: list[dict[str, Any]]) -> None:
-    """Run parallel LLM enrichment for every non-empty context."""
-
-    contexts: list[dict[str, Any]] = []
-    for record in records:
-        for context in record.get("contexts") or []:
-            if str(context.get("text") or "").strip():
-                contexts.append(context)
-
-    if not contexts:
-        return
-
-    llm = get_llm_client(
-        model=settings.query_decomposition_model,
-        output_schema=ContextEnrichmentResult,
-        include_raw=True,
-    )
-    semaphore = asyncio.Semaphore(ENRICH_CONCURRENCY)
-    total = len(contexts)
-    await asyncio.gather(
-        *[
-            enrich_context(context, llm=llm, semaphore=semaphore, index=index, total=total)
-            for index, context in enumerate(contexts, start=1)
-        ]
-    )
 
 
 async def recreate_collection(
@@ -442,22 +231,13 @@ async def upsert_embedded_chunks(
 
 
 async def run_upload(
-    do_enrich: bool,
     *,
     collection_base: str,
     dense_pq_values: list[str],
 ) -> None:
-    """Load JSON, optionally enrich, embed once, recreate each PQ collection, upsert."""
+    """Load JSON, embed once, recreate each PQ collection, upsert."""
 
     records = json.loads(PROCESSED_DATASET_PATH.read_text(encoding="utf-8"))
-
-    if do_enrich:
-        print(f"Enriching contexts for {len(records)} questions...")
-        await enrich_all_contexts(records)
-        PROCESSED_DATASET_PATH.write_text(
-            json.dumps(records, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
 
     chunks: list[tuple[str, ChunkPayload]] = []
     for record in records:
@@ -486,9 +266,6 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description="Upload HotpotQA contexts to Qdrant")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--enrich", action="store_true", help="LLM-enrich contexts before upload")
-    group.add_argument("--no-enrich", action="store_true", help="Upload without enrichment")
     parser.add_argument(
         "--collection-base",
         required=True,
@@ -503,7 +280,6 @@ def main() -> None:
     args = parser.parse_args()
     asyncio.run(
         run_upload(
-            do_enrich=args.enrich,
             collection_base=args.collection_base,
             dense_pq_values=parse_pq_list(args.pq),
         )

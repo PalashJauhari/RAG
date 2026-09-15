@@ -23,9 +23,8 @@ python -m ingestion.download_arxiv_pdfs
 # 2. Unstructured pipeline (layout + chunk → chunks.json)
 python -m ingestion.unstructured_pipeline
 
-# 3. Upload to Qdrant (pick one)
-python -m ingestion.upload_qdrant_embedding --no-enrich
-python -m ingestion.upload_qdrant_embedding --enrich
+# 3. Upload to Qdrant
+python -m ingestion.upload_qdrant_embedding
 ```
 
 Dry-run chunk batches without API calls:
@@ -57,7 +56,7 @@ All variables live in **`ingestion/.env`**. Key groups:
 | Group | Examples |
 |-------|----------|
 | Qdrant + embeddings | `QDRANT_*`, `OPENAI_*`, `JINA_*`, `USE_BM25`, `USE_LATE_INTERACTION` |
-| Upload | `INGESTION_UPLOAD_BATCH_SIZE` (default 16), `INGESTION_ENRICHMENT_MODEL`, `REQUEST_TIMEOUT_SECONDS` |
+| Upload | `INGESTION_UPLOAD_BATCH_SIZE` (default 16), `REQUEST_TIMEOUT_SECONDS` |
 | Unstructured | `UNSTRUCTURED_API_KEY`, partition/chunk settings |
 | Paths | `RAW_PDFS_DIR`, `CHUNKS_OUTPUT_PATH` |
 

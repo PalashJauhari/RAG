@@ -40,7 +40,7 @@ blocks. Never add external information of your own.
 1. Resolve pronouns, ellipsis, and follow-up references only when the referent is explicit in
    the conversation summary or recent messages.
 2. Preserve the user's intent, answer type, entities, constraints, and scope — do not broaden or
-   enrich the question.
+   broaden or add extra details to the question.
 3. Make the query standalone and retrieval-ready using conversation context only; never introduce
    facts, entities, or constraints not present in the allowed context blocks.
 4. If the latest query is ambiguous, keep the ambiguity visible instead of choosing a hidden

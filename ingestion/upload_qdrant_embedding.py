@@ -1,8 +1,7 @@
-"""Upload arXiv chunks from ``chunks.json`` to Qdrant (optional LLM enrichment)."""
+"""Upload arXiv chunks from ``chunks.json`` to Qdrant."""
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import logging
@@ -11,7 +10,7 @@ from typing import Any
 
 import httpx
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field
 from qdrant_client import AsyncQdrantClient, models
 
 from ingestion.chunk_media import (
@@ -20,144 +19,20 @@ from ingestion.chunk_media import (
     with_prefixed_tables,
 )
 from ingestion.ingestion_config import load_ingestion_config
+from ingestion.skip_reference_chunks import skip_reference_chunks
 from qdrant_pq import product_quantization_config
 
-logger = logging.getLogger(__name__)
-
-ENRICH_CONCURRENCY = 10
-ENRICH_MAX_RETRIES = 3
-
-ENRICHMENT_SYSTEM_PROMPT = """
-You are a document indexing assistant for a computer-science literature retrieval system.
-
-Given one text chunk from an arXiv paper, produce structured metadata to improve search.
-Do not answer questions about the passage. Do not invent facts not supported by the text.
-
-Return JSON matching the schema:
-
-1. ``predicted_title``: concise title for this chunk (your best guess).
-2. ``summary``: exactly two lines summarizing the chunk (use a newline between lines).
-3. ``keywords``: deduplicated list of named entities AND other high-signal retrieval terms.
-4. ``facts``: list of objects with ``fact`` and ``fact_question``:
-   - ``fact``: checkable information need (what must be established), not the answer value.
-   - ``fact_question``: searchable query someone would use to retrieve evidence for that need.
-
-Return JSON only.
-""".strip()
-
 jina_request_sem = asyncio.Semaphore(2)
-
-
-class ContextFact(BaseModel):
-    """One checkable information need and a searchable query for it."""
-
-    fact: str
-    fact_question: str
-
-    @field_validator("fact", "fact_question")
-    @classmethod
-    def strip_non_empty(cls, value: str) -> str:
-        cleaned = value.strip()
-        if not cleaned:
-            raise ValueError("must be a non-empty string")
-        return cleaned
-
-
-class ContextEnrichmentResult(BaseModel):
-    """LLM-generated metadata for one arXiv chunk."""
-
-    predicted_title: str
-    summary: str
-    keywords: list[str] = Field(default_factory=list)
-    facts: list[ContextFact] = Field(default_factory=list)
-
-    @field_validator("predicted_title", "summary")
-    @classmethod
-    def strip_required(cls, value: str) -> str:
-        cleaned = value.strip()
-        if not cleaned:
-            raise ValueError("must be a non-empty string")
-        return cleaned
-
-    @model_validator(mode="after")
-    def normalize_keywords(self) -> "ContextEnrichmentResult":
-        seen: set[str] = set()
-        keywords: list[str] = []
-        for item in self.keywords:
-            cleaned = item.strip()
-            if cleaned and cleaned not in seen:
-                keywords.append(cleaned)
-                seen.add(cleaned)
-        self.keywords = keywords
-        return self
 
 
 class ChunkPayload(BaseModel):
     """Qdrant point payload (embed and LLM ``text``; ``raw_text`` is unused by the graph)."""
 
     text: str
-    enrichments: dict[str, Any] = Field(default_factory=dict)
     additional_metadata: dict[str, Any] = Field(default_factory=dict)
 
     def to_qdrant_payload(self) -> dict[str, Any]:
         return self.model_dump()
-
-
-def build_enriched_text(
-    *,
-    raw_text: str,
-    enrichments: dict[str, Any] | None = None,
-    title: str | None = None,
-) -> str:
-    """Build the string embedded at upload time."""
-
-    passage = str(raw_text or "").strip()
-    if not passage:
-        return ""
-
-    enrichment = enrichments or {}
-    if not enrichment:
-        return passage
-
-    sections: list[str] = []
-    title_text = str(title or "").strip()
-    if title_text:
-        sections.extend(["Title:", title_text, ""])
-
-    summary = str(enrichment.get("summary") or "").strip()
-    if summary:
-        sections.extend(["Summary:", summary, ""])
-
-    facts = enrichment.get("facts") or []
-    fact_lines = [
-        f"- {str(row.get('fact') or '').strip()}"
-        for row in facts
-        if isinstance(row, dict) and str(row.get("fact") or "").strip()
-    ]
-    if fact_lines:
-        sections.append("Present Facts:")
-        sections.extend(fact_lines)
-        sections.append("")
-
-    question_lines = [
-        f"- {str(row.get('fact_question') or '').strip()}"
-        for row in facts
-        if isinstance(row, dict) and str(row.get("fact_question") or "").strip()
-    ]
-    if question_lines:
-        sections.append("Sample Query Questions:")
-        sections.extend(question_lines)
-        sections.append("")
-
-    keywords = enrichment.get("keywords") or []
-    keyword_text = ", ".join(
-        str(item).strip() for item in keywords if isinstance(item, str) and item.strip()
-    )
-    if keyword_text:
-        sections.extend(["Keywords:", keyword_text, ""])
-
-    sections.extend(["Passage:", passage])
-    return "\n".join(sections)
 
 
 def pdf_basename(pdf_path: str) -> str:
@@ -199,12 +74,7 @@ def element_to_chunk(
     if not raw_text and not table_html:
         return None
 
-    enrichments = element.get("enrichment") or {}
-    if not isinstance(enrichments, dict):
-        enrichments = {}
-
-    enriched = build_enriched_text(raw_text=raw_text, enrichments=enrichments)
-    embed_text = with_prefixed_tables(enriched, table_html)
+    embed_text = with_prefixed_tables(raw_text, table_html)
     filename = str(file_result.get("filename") or "")
     element_id = str(element.get("element_id") or "")
     if not element_id:
@@ -220,7 +90,6 @@ def element_to_chunk(
     paper = manifest_lookup.get(filename) or {}
     payload = ChunkPayload(
         text=embed_text,
-        enrichments=enrichments,
         additional_metadata={
             "raw_text": raw_text,
             "source": paper.get("abs_url") or "",
@@ -297,84 +166,6 @@ async def create_late_interaction_embeddings(
                 response.raise_for_status()
                 return [row["embeddings"] for row in response.json()["data"]]
     raise RuntimeError("Jina embedding request failed")
-
-
-async def enrich_element(
-    element: dict[str, Any],
-    *,
-    client: AsyncOpenAI,
-    model: str,
-    semaphore: asyncio.Semaphore,
-    index: int,
-    total: int,
-) -> None:
-    """Attach enrichment dict to one chunk element (or null on failure)."""
-
-    passage = str(element.get("text") or "").strip()
-    if not passage:
-        element["enrichment"] = None
-        return
-
-    async with semaphore:
-        for attempt in range(1, ENRICH_MAX_RETRIES + 1):
-            try:
-                response = await client.beta.chat.completions.parse(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": ENRICHMENT_SYSTEM_PROMPT},
-                        {"role": "user", "content": passage},
-                    ],
-                    response_format=ContextEnrichmentResult,
-                )
-                parsed = response.choices[0].message.parsed
-                if parsed is None:
-                    raise ValueError("Empty parsed enrichment response")
-                element["enrichment"] = parsed.model_dump()
-                label = element.get("element_id") or index
-                print(f"Enriched {index}/{total} ({label})")
-                return
-            except Exception as exc:
-                if attempt >= ENRICH_MAX_RETRIES:
-                    logger.warning(
-                        "Enrichment failed for %s: %s",
-                        element.get("element_id"),
-                        exc,
-                    )
-                    element["enrichment"] = None
-                    print(f"Enriched {index}/{total} ({element.get('element_id')}) — skipped")
-                    return
-                await asyncio.sleep(0.5 * attempt)
-
-
-async def enrich_all_elements(file_results: list[dict[str, Any]], config) -> None:
-    """Run parallel LLM enrichment for every non-empty chunk element."""
-
-    elements: list[dict[str, Any]] = []
-    for file_result in file_results:
-        for element in file_result.get("elements") or []:
-            if isinstance(element, dict) and str(element.get("text") or "").strip():
-                elements.append(element)
-
-    if not elements:
-        return
-
-    client = AsyncOpenAI(api_key=config.openai_api_key)
-    model = config.ingestion_enrichment_model
-    semaphore = asyncio.Semaphore(ENRICH_CONCURRENCY)
-    total = len(elements)
-    await asyncio.gather(
-        *[
-            enrich_element(
-                element,
-                client=client,
-                model=model,
-                semaphore=semaphore,
-                index=index,
-                total=total,
-            )
-            for index, element in enumerate(elements, start=1)
-        ]
-    )
 
 
 async def recreate_collection(client: AsyncQdrantClient, config) -> None:
@@ -476,10 +267,16 @@ def collect_chunks(
     """Build all Qdrant points from chunks.json file results."""
 
     chunks: list[tuple[str, ChunkPayload]] = []
+    skipped_references = 0
     for file_result in file_results:
-        for element in file_result.get("elements") or []:
-            if not isinstance(element, dict):
-                continue
+        raw_elements = [
+            element
+            for element in (file_result.get("elements") or [])
+            if isinstance(element, dict)
+        ]
+        elements, skipped = skip_reference_chunks(raw_elements)
+        skipped_references += skipped
+        for element in elements:
             row = element_to_chunk(
                 file_result,
                 element,
@@ -487,24 +284,18 @@ def collect_chunks(
             )
             if row is not None:
                 chunks.append(row)
+    if skipped_references:
+        print(f"Skipped {skipped_references} bibliography chunk(s) (not embedded)")
     return chunks
 
 
-async def run_upload(do_enrich: bool) -> None:
-    """Load chunks.json, optionally enrich, recreate collection, upsert."""
+async def run_upload() -> None:
+    """Load chunks.json, recreate collection, upsert."""
 
     config = load_ingestion_config()
     file_results = json.loads(config.chunks_path.read_text(encoding="utf-8"))
     if not isinstance(file_results, list):
         raise ValueError("chunks.json must be a JSON array of file results")
-
-    if do_enrich:
-        print(f"Enriching chunks across {len(file_results)} file(s)...")
-        await enrich_all_elements(file_results, config)
-        config.chunks_path.write_text(
-            json.dumps(file_results, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
 
     manifest_lookup: dict[str, dict[str, str]] = {}
     if config.manifest_path.is_file():
@@ -532,12 +323,7 @@ def main() -> None:
     """CLI entry: upload arXiv chunks to Qdrant."""
 
     logging.basicConfig(level=logging.INFO)
-    parser = argparse.ArgumentParser(description="Upload arXiv chunks to Qdrant")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--enrich", action="store_true", help="LLM-enrich chunks before upload")
-    group.add_argument("--no-enrich", action="store_true", help="Upload without enrichment")
-    args = parser.parse_args()
-    asyncio.run(run_upload(do_enrich=args.enrich))
+    asyncio.run(run_upload())
 
 
 if __name__ == "__main__":

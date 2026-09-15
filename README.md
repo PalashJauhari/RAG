@@ -62,33 +62,29 @@ Offline HotpotQA (distractor split, **200** questions). Retrieval-only. **Contex
 
 **Dense + BM25**
 
-| Setup | No quantization | PQ-8 | PQ-16 | PQ-32 |
-|-------|-----------------|------|-------|-------|
-| Without enrichment | 0.81 | 0.80 | 0.81 | 0.82 |
-| With enrichment | 0.81 | 0.80 | 0.82 | 0.81 |
+| No quantization | PQ-8 | PQ-16 | PQ-32 |
+|-----------------|------|-------|-------|
+| 0.82 | 0.81 | 0.82 | 0.82 |
 
 **Dense + BM25 + ColBERT rerank**
 
-| Setup | No quantization | PQ-8 | PQ-16 | PQ-32 |
-|-------|-----------------|------|-------|-------|
-| Without enrichment | 0.87 | 0.86 | 0.86 | 0.86 |
-| With enrichment | 0.85 | 0.86 | 0.85 | 0.86 |
+| No quantization | PQ-8 | PQ-16 | PQ-32 |
+|-----------------|------|-------|-------|
+| 0.87 | 0.86 | 0.85 | 0.86 |
 
 ### Mean latency (seconds)
 
 **Dense + BM25**
 
-| Setup | No quantization | PQ-8 | PQ-16 | PQ-32 |
-|-------|-----------------|------|-------|-------|
-| Without enrichment | 0.54 | 0.59 | 0.53 | 0.60 |
-| With enrichment | 0.52 | 0.53 | 0.55 | 0.57 |
+| No quantization | PQ-8 | PQ-16 | PQ-32 |
+|-----------------|------|-------|-------|
+| 0.60 | 0.57 | 0.60 | 0.73 |
 
 **Dense + BM25 + ColBERT rerank**
 
-| Setup | No quantization | PQ-8 | PQ-16 | PQ-32 |
-|-------|-----------------|------|-------|-------|
-| Without enrichment | 11.58 | 12.18 | 12.77 | 12.93 |
-| With enrichment | 12.09 | 10.50 | 11.21 | 13.23 |
+| No quantization | PQ-8 | PQ-16 | PQ-32 |
+|-----------------|------|-------|-------|
+| 3.63 | 4.29 | 5.11 | 4.81 |
 
 How to run: [benchmarking/hotpotqa/README.md](benchmarking/hotpotqa/README.md).
 

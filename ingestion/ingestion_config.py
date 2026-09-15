@@ -20,10 +20,6 @@ class IngestionConfig(BaseSettings):
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dimensions: int = 1536
-    ingestion_enrichment_model: str = Field(
-        default="gpt-4o-mini",
-        alias="INGESTION_ENRICHMENT_MODEL",
-    )
 
     qdrant_url: str = ""
     qdrant_api_key: str = ""
