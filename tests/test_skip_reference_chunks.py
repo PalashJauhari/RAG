@@ -6,7 +6,7 @@ from ingestion.skip_reference_chunks import (
     skip_reference_chunks,
     update_reference_skip_state,
 )
-from ingestion.upload_qdrant_embedding import collect_chunks
+from ingestion.upload_qdrant_embedding import collect_chunks, select_file_results
 
 
 def test_body_mentions_references_are_kept() -> None:
@@ -36,7 +36,31 @@ def test_page_number_then_bibliography() -> None:
     assert in_refs is True
 
 
-def test_continuation_and_table_dropped_until_appendix() -> None:
+def test_numbered_acknowledgements_then_refs_in_same_chunk_is_skipped() -> None:
+    skip, in_refs = update_reference_skip_state(
+        "7. Acknowledgements\n\nWe thank collaborators.\n\nReferences\n\nAdam, M. A paper.",
+        False,
+    )
+    assert skip is True
+    assert in_refs is True
+
+
+def test_letter_appendix_heading_exits_skip() -> None:
+    skip, in_refs = update_reference_skip_state(
+        "A. Details on the Working Agent Definition for this Project\n\nPlans refers to code flow.",
+        True,
+    )
+    assert skip is False
+    assert in_refs is False
+
+
+def test_citation_author_initial_does_not_exit() -> None:
+    skip, in_refs = update_reference_skip_state(
+        "A. Vaswani, N. Shazeer, Attention is all you need. NeurIPS, 2017.",
+        True,
+    )
+    assert skip is True
+    assert in_refs is True
     elements = [
         {"text": "Intro prose about transformers."},
         {"text": "References\n\n[1] Foo."},
@@ -93,3 +117,13 @@ def test_collect_chunks_skips_bibliography() -> None:
     chunks = collect_chunks(file_results, lookup)
     assert len(chunks) == 1
     assert chunks[0][1].additional_metadata["element_id"] == "keep"
+
+
+def test_select_file_results_none_keeps_all() -> None:
+    rows = [{"filename": "a.pdf"}, {"filename": "b.pdf"}]
+    assert select_file_results(rows, None) == rows
+
+
+def test_select_file_results_max_files_takes_prefix() -> None:
+    rows = [{"filename": "a.pdf"}, {"filename": "b.pdf"}, {"filename": "c.pdf"}]
+    assert select_file_results(rows, 2) == rows[:2]

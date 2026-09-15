@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
@@ -260,6 +261,19 @@ async def upsert_chunks(
         print(f"Uploaded {min(start + batch_size, len(chunks))}/{len(chunks)} points")
 
 
+def select_file_results(
+    file_results: list[dict[str, Any]],
+    max_files: int | None,
+) -> list[dict[str, Any]]:
+    """Keep the first ``max_files`` PDFs in chunks.json order; None means all."""
+
+    if max_files is None:
+        return file_results
+    if max_files < 1:
+        raise ValueError("--max-files must be >= 1")
+    return file_results[:max_files]
+
+
 def collect_chunks(
     file_results: list[dict[str, Any]],
     manifest_lookup: dict[str, dict[str, str]],
@@ -289,13 +303,16 @@ def collect_chunks(
     return chunks
 
 
-async def run_upload() -> None:
+async def run_upload(*, max_files: int | None = None) -> None:
     """Load chunks.json, recreate collection, upsert."""
 
     config = load_ingestion_config()
     file_results = json.loads(config.chunks_path.read_text(encoding="utf-8"))
     if not isinstance(file_results, list):
         raise ValueError("chunks.json must be a JSON array of file results")
+
+    file_results = select_file_results(file_results, max_files)
+    print(f"Uploading {len(file_results)} PDF file(s) from chunks.json")
 
     manifest_lookup: dict[str, dict[str, str]] = {}
     if config.manifest_path.is_file():
@@ -323,7 +340,15 @@ def main() -> None:
     """CLI entry: upload arXiv chunks to Qdrant."""
 
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(run_upload())
+    parser = argparse.ArgumentParser(description="Upload arXiv chunks.json to Qdrant")
+    parser.add_argument(
+        "--max-files",
+        type=int,
+        default=None,
+        help="Embed only the first N PDFs in chunks.json order. Omit to embed all.",
+    )
+    args = parser.parse_args()
+    asyncio.run(run_upload(max_files=args.max_files))
 
 
 if __name__ == "__main__":

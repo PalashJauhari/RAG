@@ -32,16 +32,19 @@ _REFS_HEADING_LINE = re.compile(
 _NEW_SECTION_HEADING_LINE = re.compile(
     r"""
     ^
-    (?:\d+(?:\.\d+)*\s+)?
     (?:
-        appendix(?:es)?\b.*
-        | supplementary\b.*
-        | supplement\b.*
-        | acknowledgements?\b.*
-        | acknowledgments?\b.*
+        (?:\d+\.\s+)?
+        (?:
+            appendix(?:es)?\b.*
+            | supplementary\b.*
+            | supplement\b.*
+            | acknowledgements?\b.*
+            | acknowledgments?\b.*
+        )
         | appendix\s+[a-z]\b.*
-        | [a-z](?:\.\d+)*\s+appendix\b.*
+        | [a-h]\.\s+[A-Z][a-z]+(?:\s|$)
     )
+    .*
     $
     """,
     re.IGNORECASE | re.VERBOSE,
@@ -81,8 +84,10 @@ def update_reference_skip_state(text: str, in_references: bool) -> tuple[bool, b
     """
 
     lines = _content_lines(text)
-    opens_refs = any(_is_refs_heading(line) for line in lines)
-    if opens_refs:
+    first = lines[0] if lines else ""
+    if first and _is_refs_heading(first):
+        return True, True
+    if any(_is_refs_heading(line) for line in lines[1:]):
         return True, True
 
     if not in_references:

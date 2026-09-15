@@ -198,6 +198,10 @@ class RetrievalState(TypedDict, total=False):
 ERROR_ANSWER_USER_MESSAGE = "An error occurred while processing your request. Please try again."
 
 
+class RecallCatalogIdError(ValueError):
+    """Invalid evidence ids after in-function LLM feedback retries (skip node RetryPolicy)."""
+
+
 def handle_node_failure(state: RetrievalState, error: NodeError) -> Command:
     """Route retry-exhausted node failures to deterministic ``error_answer`` output."""
 
@@ -231,14 +235,11 @@ def unsupported_facts(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in facts if not row.get("verification_status")]
 
 
-def ensure_evidence_document_ids_in_catalog(
+def invalid_evidence_document_ids(
     facts: list[dict[str, Any]],
     catalog: dict[str, dict[str, Any]] | None,
-) -> None:
-    """Raise if any fact's ``evidence_document_ids`` are missing from ``document_catalog``.
-
-    Used after recall_check LLM merge so invalid ids fail the node and trigger RetryPolicy.
-    """
+) -> list[str]:
+    """Unique evidence ids that are not keys in ``document_catalog``."""
 
     catalog = catalog or {}
     keys = set(catalog.keys())
@@ -254,6 +255,19 @@ def ensure_evidence_document_ids_in_catalog(
                 continue
             seen.add(label)
             invalid.append(label)
+    return invalid
+
+
+def ensure_evidence_document_ids_in_catalog(
+    facts: list[dict[str, Any]],
+    catalog: dict[str, dict[str, Any]] | None,
+) -> None:
+    """Raise if any fact's ``evidence_document_ids`` are missing from ``document_catalog``.
+
+    Used after recall_check LLM merge so invalid ids fail the node and trigger RetryPolicy.
+    """
+
+    invalid = invalid_evidence_document_ids(facts, catalog)
     if invalid:
         raise ValueError(
             "recall_check evidence_document_ids not in document_catalog: "
@@ -270,7 +284,9 @@ async def verify_all_facts(
     """Verify every fact in one batched recall-check LLM call.
 
     Uses ``RecallVerifyResult`` and merges verdicts onto input rows by ``fact_id``.
-    Raises if any ``evidence_document_ids`` are missing from ``catalog`` (node retry).
+    Invalid catalog ids are sent back as human feedback and the LLM is retried
+    up to ``graph_node_retry_max_attempts`` times inside this function. Exhaustion
+    raises ``RecallCatalogIdError`` (not retried by node RetryPolicy).
     """
 
     if not facts:
@@ -284,40 +300,61 @@ async def verify_all_facts(
     facts_for_prompt = [
         {"fact_id": row.get("fact_id"), "fact": row.get("fact")} for row in facts
     ]
-    human_content = (
-        f"## Normalized query\n{normalized_query}\n\n"
-        f"## Facts to verify\n"
-        f"{json.dumps(facts_for_prompt, ensure_ascii=False)}\n\n"
-        f"## Document catalog\n{catalog_docs_block(catalog)}"
-    )
-    messages_for_llm = [
-        SystemMessage(content=VERIFY_ALL_FACTS_PROMPT),
-        HumanMessage(content=human_content),
-    ]
-    llm_response = await verifier.ainvoke(messages_for_llm)
-    verdicts = llm_response["parsed"].facts
+    catalog_block = catalog_docs_block(catalog)
+    feedback = ""
+    last_invalid: list[str] = []
+    attempts = max(1, int(settings.graph_node_retry_max_attempts))
 
-    verdict_by_id = {
-        verdict.fact_id: verdict for verdict in verdicts if verdict.fact_id is not None
-    }
-
-    updated: list[dict[str, Any]] = []
-    for row in facts:
-        fact_id = row.get("fact_id")
-        verdict = verdict_by_id.get(fact_id)
-        if verdict is None:
-            raise ValueError(
-                f"recall_check batch output missing verification for fact_id={fact_id!r}"
-            )
-        updated.append(
-            {
-                **row,
-                "verification_status": verdict.verification_status,
-                "evidence_document_ids": list(verdict.evidence_document_ids),
-            }
+    for _ in range(attempts):
+        human_content = (
+            f"## Normalized query\n{normalized_query}\n\n"
+            f"## Facts to verify\n"
+            f"{json.dumps(facts_for_prompt, ensure_ascii=False)}\n\n"
+            f"## Document catalog\n{catalog_block}"
         )
-    ensure_evidence_document_ids_in_catalog(updated, catalog)
-    return updated
+        if feedback:
+            human_content = f"## Id validation feedback\n{feedback}\n\n{human_content}"
+        messages_for_llm = [
+            SystemMessage(content=VERIFY_ALL_FACTS_PROMPT),
+            HumanMessage(content=human_content),
+        ]
+        llm_response = await verifier.ainvoke(messages_for_llm)
+        verdicts = llm_response["parsed"].facts
+
+        verdict_by_id = {
+            verdict.fact_id: verdict for verdict in verdicts if verdict.fact_id is not None
+        }
+
+        updated: list[dict[str, Any]] = []
+        for row in facts:
+            fact_id = row.get("fact_id")
+            verdict = verdict_by_id.get(fact_id)
+            if verdict is None:
+                raise ValueError(
+                    f"recall_check batch output missing verification for fact_id={fact_id!r}"
+                )
+            updated.append(
+                {
+                    **row,
+                    "verification_status": verdict.verification_status,
+                    "evidence_document_ids": list(verdict.evidence_document_ids),
+                }
+            )
+        last_invalid = invalid_evidence_document_ids(updated, catalog)
+        if not last_invalid:
+            return updated
+        valid_ids = [str(point_id) for point_id in (catalog or {}).keys()]
+        feedback = (
+            "Previous attempt cited evidence_document_ids that are not in document_catalog: "
+            f"{json.dumps(last_invalid, ensure_ascii=False)}. "
+            "Copy the exact `id=` UUID from the catalog lines. Do not use the [n] line number. "
+            f"Valid point ids: {json.dumps(valid_ids, ensure_ascii=False)}."
+        )
+
+    raise RecallCatalogIdError(
+        "recall_check evidence_document_ids not in document_catalog: "
+        f"{json.dumps(last_invalid, ensure_ascii=False)}"
+    )
 
 
 def create_fact_list_with_metadata(response: RequiredFactsResult) -> list[dict[str, Any]]:
@@ -911,7 +948,7 @@ class RetrievalGraph:
             recall_sufficient: bool — ``True`` only when every fact has
                 ``verification_status`` true.
 
-        Raises when evidence_document_ids are not in document_catalog (node RetryPolicy).
+        Invalid evidence ids: LLM is retried inside verify_all_facts with feedback; exhaustion still raises.
 
         Routes via: ``route_after_recall_check`` (answer | partial_answer | create_queries_for_unsupported_facts).
         """
@@ -1455,12 +1492,18 @@ class RetrievalGraph:
         """
         builder = StateGraph(RetrievalState)
         node_retry = RetryPolicy(max_attempts=settings.graph_node_retry_max_attempts, initial_interval=1.0, backoff_factor=2.0)
+        recall_retry = RetryPolicy(
+            max_attempts=settings.graph_node_retry_max_attempts,
+            initial_interval=1.0,
+            backoff_factor=2.0,
+            retry_on=lambda error: not isinstance(error, RecallCatalogIdError),
+        )
         builder.add_node("query_normalisation", self.query_normalisation_node, retry_policy=node_retry, error_handler=handle_node_failure)
         builder.add_node("fact_decomposition", self.fact_decomposition_node, retry_policy=node_retry, error_handler=handle_node_failure)
         builder.add_node("query_complexity", self.query_complexity_node)
         builder.add_node("query_splitter", self.query_splitter_node, retry_policy=node_retry, error_handler=handle_node_failure)
         builder.add_node("retrieval", self.retrieval_node, retry_policy=node_retry, error_handler=handle_node_failure)
-        builder.add_node("recall_check", self.recall_check_node, retry_policy=node_retry, error_handler=handle_node_failure)
+        builder.add_node("recall_check", self.recall_check_node, retry_policy=recall_retry, error_handler=handle_node_failure)
         builder.add_node("create_queries_for_unsupported_facts", self.create_queries_for_unsupported_facts_node, retry_policy=node_retry, error_handler=handle_node_failure)
         builder.add_node("strategy_upgrade", self.strategy_upgrade_node)
         builder.add_node("answer", self.answer_node, retry_policy=node_retry)

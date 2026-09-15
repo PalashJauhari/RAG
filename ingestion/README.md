@@ -23,8 +23,9 @@ python -m ingestion.download_arxiv_pdfs
 # 2. Unstructured pipeline (layout + chunk → chunks.json)
 python -m ingestion.unstructured_pipeline
 
-# 3. Upload to Qdrant
+# 3. Upload to Qdrant (omit --max-files to embed every PDF in chunks.json)
 python -m ingestion.upload_qdrant_embedding
+python -m ingestion.upload_qdrant_embedding --max-files 5
 ```
 
 Dry-run chunk batches without API calls:

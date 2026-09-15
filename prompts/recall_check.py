@@ -25,6 +25,8 @@ same order as the input list. Each entry must include:
 Rules:
 - Output exactly one verification result per input fact; do not skip or merge facts.
 - Cite only point ids that appear in the document catalog block. Do not invent ids.
+- The `[n]` prefix is a line number, not a document id. Copy the `id=` UUID exactly; do not cite `n`.
+- If id-validation feedback is present, those strings were rejected — replace them with exact catalog `id=` values.
 - Do not paste passage text into evidence_document_ids — ids only.
 - When verification_status = true, evidence_document_ids MUST be non-empty.
 - When verification_status = false, evidence_document_ids MUST be [].
