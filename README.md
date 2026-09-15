@@ -58,6 +58,14 @@ Multi-turn chat is checkpointed per `session_id`. Scratch from one question (fac
 
 Offline HotpotQA (distractor split, **200** questions). Retrieval-only. **Context recall** is RAGAS. **Latency** is mean retriever wall time in seconds. Graph / faithfulness / answer-correctness rows are not in yet.
 
+Retrieval setup (root `.env` at eval time):
+
+- Final hits returned: **5** (`RETRIEVAL_TOP_K`)
+- Dense prefetch: **50** candidates, **MMR on** (`USE_MMR=true`, diversity **0.5**)
+- BM25 prefetch: **50** candidates
+- Hybrid: RRF of dense + BM25, then cut to 5
+- Hybrid + ColBERT: RRF pool of **25**, then ColBERT rerank to 5
+
 ### Context recall
 
 **Dense + BM25**
