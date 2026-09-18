@@ -44,6 +44,9 @@ htmlcov/
 *.swo
 .DS_Store
 
+# --- Local interview revision notes ---
+interview-revision.html
+
 # --- Logs ---
 *.log
 logs/
