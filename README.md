@@ -162,7 +162,15 @@ Retrieval was evaluated on **200 HotpotQA distractor questions**. Every configur
 | **Dense + BM25 + ColBERT** | **PQ-16** | **0.87** | **0.53** | **4.80 s** |
 | Dense + BM25 + ColBERT | PQ-8 | 0.86 | 0.52 | 5.20 s |
 
-ColBERT improves retrieval quality, with the expected latency trade-off. The [HotpotQA benchmark guide](benchmarking/hotpotqa/README.md) contains the full setup, commands, metrics, and output format.
+ColBERT improves retrieval quality, with the expected latency trade-off.
+
+## Graph benchmark
+
+| Workflow | Quantization | Context recall | Context precision | Faithfulness | Factual correctness | Relevancy | Partial answers | Mean latency |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **Citeflow graph** | **PQ-16** | **0.89** | **0.59** | **0.86** | **0.31** | **0.48** | **24.50%** | **28.22 s** |
+
+The [HotpotQA benchmark guide](benchmarking/hotpotqa/README.md) contains the full setup, commands, metrics, and output format.
 
 ## Document ingestion
 

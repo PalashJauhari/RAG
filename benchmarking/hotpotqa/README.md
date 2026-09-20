@@ -23,6 +23,10 @@ The retrieval benchmark uses **200 questions**, returns five passages per questi
 
 Context recall measures how much of the gold answer is supported by retrieved passages. Context precision measures whether useful passages are ranked ahead of irrelevant ones. Latency is retriever wall time and does not include RAGAS scoring.
 
+| Workflow | Quantization | Context recall | Context precision | Faithfulness | Factual correctness | Relevancy | Partial answers | Mean latency |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **Citeflow graph** | **PQ-16** | **0.89** | **0.59** | **0.86** | **0.31** | **0.48** | **24.50%** | **28.22 s** |
+
 ## Evaluation modes
 
 ### Retrieval

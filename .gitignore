@@ -46,6 +46,7 @@ htmlcov/
 
 # --- Local interview revision notes ---
 interview-revision.html
+score_existing_hotpot.py
 
 # --- Logs ---
 *.log
