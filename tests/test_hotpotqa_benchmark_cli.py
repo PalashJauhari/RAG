@@ -55,10 +55,21 @@ def test_write_benchmark_report_retrieval_latency_seconds(tmp_path) -> None:
                     "total_scored": 2,
                     "skipped_empty_contexts": 0,
                     "mean_context_recall": 0.75,
+                    "mean_context_precision": 0.65,
                 },
                 "rows": [
-                    {"type": "bridge", "level": "hard", "context_recall": 1.0},
-                    {"type": "comparison", "level": "hard", "context_recall": 0.5},
+                    {
+                        "type": "bridge",
+                        "level": "hard",
+                        "context_recall": 1.0,
+                        "context_precision": 0.8,
+                    },
+                    {
+                        "type": "comparison",
+                        "level": "hard",
+                        "context_recall": 0.5,
+                        "context_precision": 0.5,
+                    },
                 ],
             }
         ),
@@ -90,13 +101,16 @@ def test_write_benchmark_report_retrieval_latency_seconds(tmp_path) -> None:
     write_benchmark_report(_Cfg(), "retrieval", metadata)
     text = report_path.read_text(encoding="utf-8")
     assert "Context recall" in text
+    assert "Context precision" in text
     assert "0.7500" in text
+    assert "0.6500" in text
     assert "Retriever latency" in text
     assert "| seconds |" in text
     assert "| Mean | 10.10 |" in text
     assert "| p50 | 9.00 |" in text
-    assert "Context precision" not in text
     assert "Faithfulness" not in text
+    assert "Factual correctness" not in text
+    assert "Relevancy" not in text
     assert "Answer correctness" not in text
     assert "hotpot_base_none" in text
 
@@ -112,8 +126,10 @@ def test_write_benchmark_report_graph_quality_and_latency(tmp_path) -> None:
                     "skipped_empty_contexts": 0,
                     "skipped_empty_answers": 0,
                     "mean_context_recall": 0.8,
+                    "mean_context_precision": 0.75,
                     "mean_faithfulness": 0.7,
-                    "mean_answer_correctness": 0.6,
+                    "mean_factual_correctness": 0.6,
+                    "mean_response_relevancy": 0.85,
                     "partial_answer_count": 1,
                     "partial_answer_percent": 50.0,
                 },
@@ -122,15 +138,19 @@ def test_write_benchmark_report_graph_quality_and_latency(tmp_path) -> None:
                         "type": "bridge",
                         "level": "hard",
                         "context_recall": 1.0,
+                        "context_precision": 0.9,
                         "faithfulness": 0.8,
-                        "answer_correctness": 0.5,
+                        "factual_correctness": 0.5,
+                        "response_relevancy": 0.9,
                     },
                     {
                         "type": "comparison",
                         "level": "hard",
                         "context_recall": 0.6,
+                        "context_precision": 0.6,
                         "faithfulness": 0.6,
-                        "answer_correctness": 0.7,
+                        "factual_correctness": 0.7,
+                        "response_relevancy": 0.8,
                     },
                 ],
             }
@@ -164,7 +184,10 @@ def test_write_benchmark_report_graph_quality_and_latency(tmp_path) -> None:
     write_benchmark_report(_Cfg(), "graph", metadata)
     text = report_path.read_text(encoding="utf-8")
     assert "| Faithfulness | 0.7000 |" in text
-    assert "| Answer correctness | 0.6000 |" in text
+    assert "| Factual correctness | 0.6000 |" in text
+    assert "| Relevancy | 0.8500 |" in text
+    assert "| Context precision | 0.7500 |" in text
+    assert "Answer correctness" not in text
     assert "| Partial answers | 1 (50.00%) |" in text
     assert "| Mean | 12.50 |" in text
     assert "| p50 | 11.00 |" in text

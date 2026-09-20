@@ -1,111 +1,121 @@
+<div align="center">
+
 # Citeflow
 
-Citeflow is a **question-answering system over a private document collection**. You ask in natural language; it searches the corpus, checks that the evidence actually covers the question, and only then writes an answer.
+### Evidence-first RAG for research papers and private documents
 
-Most RAG apps retrieve a few passages and let the model improvise. Citeflow treats answering as a **small workflow**: split the question into claims, gather evidence for each, fill gaps if something is missing, then ground the final wording in those passages. If the collection cannot support a full answer, it says so instead of guessing.
+Ask a question, retrieve the supporting evidence, repair missing context, and receive a cited answer that is checked before it is returned.
 
-Typical use: research papers, internal docs, or any corpus where **being wrong is worse than being incomplete**.
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-1C3C3C)](https://github.com/langchain-ai/langgraph)
+[![Qdrant](https://img.shields.io/badge/Vector_DB-Qdrant-DC244C?logo=qdrant&logoColor=white)](https://qdrant.tech/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
----
-
-## What you get
-
-- Answers tied to **specific retrieved passages**, not a black-box summary
-- **Citations** with source link and page when those exist (e.g. arXiv papers)
-- **Tables and figures** from cited chunks in the chat UI, when they were stored at ingest
-- A streaming **progress view** so you can see retrieve → check → answer as it runs
-- An HTTP API for the same pipeline (batch or streaming)
-
-The default production corpus is **computer-science papers from arXiv**. Ingestion is a separate pipeline (download → layout-aware chunking → embeddings → Qdrant).
+</div>
 
 ---
 
-## How a turn works
+## What is Citeflow?
 
-```mermaid
-flowchart TD
-  start([Question]) --> rewrite[Rewrite query]
-  rewrite --> claims[Split into claims]
-  claims --> split{More than one claim?}
-  split -->|Yes| queries[Write search queries]
-  queries --> retrieve[Retrieve]
-  split -->|No| retrieve
-  retrieve --> recall[Check recall]
-  recall -->|Gaps remain| gap[New queries]
-  gap --> upgrade[Upgrade search]
-  upgrade --> retrieve
-  recall -->|Covered| answer[Answer]
-  recall -->|Retry budget out| partial[Partial answer]
-  answer --> faith[Faithfulness check]
-  partial --> faith
-  faith -->|Retry| answer
-  faith -->|OK| done([Done])
+Citeflow is a question-answering workspace for document collections where an unsupported answer is worse than an incomplete one.
+
+Instead of retrieving a few passages and immediately asking a model to respond, Citeflow first works out what evidence the question requires. It searches for that evidence, checks whether every required fact is covered, and runs focused follow-up searches when something is missing.
+
+The final response cites the passages it used. If the collection cannot support a complete answer within the retry budget, Citeflow returns a partial answer rather than filling the gaps with outside knowledge.
+
+## Highlights
+
+- **Evidence-aware answering** — answers are generated from an explicit catalog of retrieved passages.
+- **Automatic retrieval repair** — uncovered facts trigger focused queries and a stronger search strategy.
+- **Hybrid search** — combines dense retrieval and BM25 with reciprocal-rank fusion.
+- **Optional ColBERT reranking** — improves retrieval quality when additional latency is acceptable.
+- **Layout-aware PDF ingestion** — processes multi-column papers, tables, figures, and captions.
+- **Cited tables and figures** — preserves rich content from supporting chunks for the chat UI.
+- **Faithfulness checks** — validates citations and verifies that material answer claims are supported.
+- **Safe partial answers** — stops short of a complete answer when the corpus lacks enough evidence.
+- **Live progress** — streams retrieval, verification, repair, and answer events to the interface.
+- **Optional observability** — traces graph nodes and model calls with Langfuse.
+
+## Example questions
+
+After indexing a paper collection, try:
+
+```text
+Compare the retrieval methods used by ColBERT and DPR.
+Cite the passages that support the comparison.
 ```
 
-1. **Rewrite** the latest message into a standalone question (so follow-ups still search well).
-2. **Break it into facts** — the checkable pieces the answer would need.
-3. **Search** a hybrid index (semantic vectors + keyword search; optional ColBERT re-ranking).
-4. **Recall check** — for each fact, is there enough evidence in what came back?
-5. **Repair** — if not, form better queries and search again (budgeted; not an infinite loop).
-6. **Answer** using only the catalog of retrieved passages, citing which ones were used.
-7. **Faithfulness** — cited ids must be real, and the wording must be supported by those passages. Failures retry; exhaustion yields a partial or last-known answer rather than a silent hallucination.
+```text
+What assumptions do these papers make about long-context retrieval,
+and where do their conclusions disagree?
+```
 
-Multi-turn chat is checkpointed per `session_id`. Scratch from one question (facts, retrieved set) does not leak into the next.
-
----
-
-## Evaluation
-
-Offline HotpotQA (distractor split, **200** questions). Retrieval-only. **Context recall** is RAGAS. **Latency** is mean retriever wall time in seconds. Graph / faithfulness / answer-correctness rows are not in yet.
-
-Retrieval setup (root `.env` at eval time):
-
-- Final hits returned: **5** (`RETRIEVAL_TOP_K`)
-- Dense prefetch: **50** candidates, **MMR on** (`USE_MMR=true`, diversity **0.5**)
-- BM25 prefetch: **50** candidates
-- Hybrid: RRF of dense + BM25, then cut to 5
-- Hybrid + ColBERT: RRF pool of **25**, then ColBERT rerank to 5
-
-### Context recall
-
-**Dense + BM25**
-
-| No quantization | PQ-8 | PQ-16 | PQ-32 |
-|-----------------|------|-------|-------|
-| 0.82 | 0.81 | 0.82 | 0.82 |
-
-**Dense + BM25 + ColBERT rerank**
-
-| No quantization | PQ-8 | PQ-16 | PQ-32 |
-|-----------------|------|-------|-------|
-| 0.87 | 0.86 | 0.85 | 0.86 |
-
-### Mean latency (seconds)
-
-**Dense + BM25**
-
-| No quantization | PQ-8 | PQ-16 | PQ-32 |
-|-----------------|------|-------|-------|
-| 0.60 | 0.57 | 0.60 | 0.73 |
-
-**Dense + BM25 + ColBERT rerank**
-
-| No quantization | PQ-8 | PQ-16 | PQ-32 |
-|-----------------|------|-------|-------|
-| 3.63 | 4.29 | 5.11 | 4.81 |
-
-How to run: [benchmarking/hotpotqa/README.md](benchmarking/hotpotqa/README.md).
-
----
+```text
+Summarize the reported benchmark results. Include the relevant table
+and return a partial answer if any requested metric is unavailable.
+```
 
 ## Quick start
 
+### Prerequisites
+
+- Python 3.10 or newer
+- An OpenAI API key
+- A Qdrant collection
+- A Jina API key only if you want ColBERT reranking
+
+### 1. Install
+
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
+git clone https://github.com/PalashJauhari/RAG.git
+cd RAG
+
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # OpenAI + Qdrant keys, collection name
+```
+
+### 2. Configure
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` and add your OpenAI and Qdrant credentials:
+
+```dotenv
+OPENAI_API_KEY="your-key"
+QDRANT_URL="https://your-cluster"
+QDRANT_API_KEY="your-key"
+QDRANT_COLLECTION_NAME="your-collection"
+```
+
+All settings are documented in [`.env.example`](.env.example). The local `.env` file is ignored by Git and should never be committed.
+
+### 3. Load documents
+
+Use the included [arXiv ingestion pipeline](ingestion/README.md) to download research papers, extract their layout, create embeddings, and upload them to Qdrant.
+
+### 4. Run
+
+Start the API:
+
+```bash
 uvicorn api.main:app --reload
 ```
+
+In a second terminal, start the chat UI:
+
+```bash
+python -m ui.dash_app
+```
+
+Then open:
+
+- UI: http://127.0.0.1:8050
+- API: http://127.0.0.1:8000
+
+Ask a question directly through the API:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/run \
@@ -113,39 +123,94 @@ curl -X POST http://127.0.0.1:8000/run \
   -d '{"session_id":"demo","message":"What does the Transformer paper say about attention?"}'
 ```
 
-Chat UI: `python ui/dash_app.py` (port 8050). Streamed progress: `POST /run/stream`.
+## How it works
 
-Load a corpus first (arXiv PDFs → Qdrant): [ingestion/README.md](ingestion/README.md).
+```text
+Receive a question
+    ↓
+Rewrite it as a standalone query
+    ↓
+Identify the facts required for a complete answer
+    ↓
+Retrieve evidence with hybrid search
+    ↓
+Check whether every fact is supported
+    ↓
+Fill gaps and upgrade retrieval when needed
+    ↓
+Generate a cited full or partial answer
+    ↓
+Validate citations and faithfulness
+```
 
----
+Citeflow uses a LangGraph workflow with dedicated steps for query normalization, fact decomposition, retrieval, evidence coverage, gap filling, answer generation, and faithfulness.
 
-## Stack
+The repair loop is budgeted. Each failed coverage check produces targeted queries for unsupported facts and can upgrade retrieval from Dense + BM25 to Dense + BM25 with ColBERT. The answer and partial-answer paths both pass through the same final grounding check.
 
-| Piece | Role |
-|-------|------|
-| [LangGraph](https://github.com/langchain-ai/langgraph) | Orchestrates the steps above |
-| [Qdrant](https://qdrant.tech/) | Vector + keyword (+ optional ColBERT) search |
-| OpenAI | Embeddings and the per-step language models |
-| Jina (optional) | ColBERT-style re-ranking |
-| FastAPI + Dash | API and chat UI |
-| Langfuse (optional) | Tracing |
-| RAGAS | Offline recall, faithfulness, and answer-correctness scoring |
+## Retrieval benchmark
 
-Python 3.10+. MIT license.
+Retrieval was evaluated on **200 HotpotQA distractor questions**. Every configuration returned five passages. Context recall and context precision were scored with RAGAS; latency is mean retriever wall time.
 
----
+| Retrieval | Quantization | Context recall | Context precision | Mean latency |
+|---|---:|---:|---:|---:|
+| Dense + BM25 | None | 0.82 | 0.48 | 0.51 s |
+| Dense + BM25 | PQ-8 | 0.80 | 0.48 | 0.52 s |
+| Dense + BM25 | PQ-16 | 0.80 | 0.49 | 0.52 s |
+| Dense + BM25 | PQ-32 | 0.81 | 0.50 | 0.53 s |
+| Dense + BM25 + ColBERT | None | 0.86 | 0.54 | 4.90 s |
+| Dense + BM25 + ColBERT | PQ-8 | 0.86 | 0.52 | 5.20 s |
+| Dense + BM25 + ColBERT | PQ-16 | 0.87 | 0.53 | 4.80 s |
+| Dense + BM25 + ColBERT | PQ-32 | 0.87 | 0.52 | 5.22 s |
 
-## Repository map
+ColBERT improves retrieval quality, with the expected latency trade-off. The [HotpotQA benchmark guide](benchmarking/hotpotqa/README.md) contains the full setup, commands, metrics, and output format.
 
-| Path | What it is |
-|------|------------|
-| `graph/` | The agent workflow |
-| `retriever/` | Qdrant search |
-| `ingestion/` | Papers → chunks → index |
-| `api/` · `ui/` | Service and chat |
-| `benchmarking/hotpotqa/` | Offline eval |
-| `prompts/` · `output_validation/` | Node instructions and structured outputs |
+## Document ingestion
 
-Configuration lives in `.env` (see `.env.example`). Tests: `make test`. Local API + UI: `./start.sh`.
+The ingestion pipeline is designed for research PDFs rather than plain-text documents.
 
-More for contributors: [CONTRIBUTING.md](CONTRIBUTING.md).
+It uses Unstructured for layout-aware partitioning and section-based chunking, enriches detected figures with text descriptions, preserves table structure as HTML, and stores source metadata for citations. Text, tables, and image descriptions are embedded together while original image data remains in metadata.
+
+See [ingestion/README.md](ingestion/README.md) for setup and commands.
+
+## Project structure
+
+```text
+RAG/
+├── api/                    Application API and streaming endpoints
+├── benchmarking/hotpotqa/ Offline retrieval and graph evaluation
+├── config/                 Application settings
+├── graph/                  LangGraph orchestration and repair loop
+├── ingestion/              PDF processing, chunking, and indexing
+├── middleware/             LLM clients, rate limiting, and context handling
+├── observability/          Optional Langfuse tracing
+├── output_validation/      Structured model outputs
+├── prompts/                Instructions for graph nodes
+├── retriever/              Qdrant retrieval, fusion, MMR, and reranking
+├── tests/                  Test suite
+└── ui/                     Plotly Dash chat interface
+```
+
+## Observability
+
+Langfuse tracing is optional. Enable it in `.env`:
+
+```dotenv
+LANGFUSE_TRACING_ENABLED=true
+LANGFUSE_SECRET_KEY="..."
+LANGFUSE_PUBLIC_KEY="..."
+LANGFUSE_HOST="https://cloud.langfuse.com"
+```
+
+Traces cover graph nodes, retrieval decisions, model generations, retries, and final outputs.
+
+## Development
+
+```bash
+make test
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the local workflow and contribution guidelines.
+
+## License
+
+Citeflow is available under the [MIT License](LICENSE).

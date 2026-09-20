@@ -16,7 +16,17 @@ from langgraph.checkpoint.memory import InMemorySaver
 from openai import AsyncOpenAI
 from ragas.embeddings import OpenAIEmbeddings
 from ragas.llms import llm_factory
-from ragas.metrics.collections import AnswerCorrectness, ContextRecall, Faithfulness
+from ragas.metrics.collections import (
+    ContextPrecision,
+    ContextRecall,
+    FactualCorrectness,
+    Faithfulness,
+)
+
+try:
+    from ragas.metrics.collections import AnswerRelevancy as ResponseRelevancy
+except ImportError:  # pragma: no cover
+    from ragas.metrics.collections import ResponseRelevancy
 
 from benchmarking.hotpotqa.benchmark_config import (
     DEFAULT_RAGAS_MODEL,
@@ -455,21 +465,25 @@ def metric_float(value: Any) -> float | None:
 
 
 async def run_ragas(config, mode: str) -> dict[str, Any]:
-    """Score results with RAGAS and write ragas_results.json."""
+    """Score results with RAGAS and write ragas_results.json.
+
+    Retrieval and graph: LLM context recall + context precision.
+    Graph also: faithfulness, factual correctness, response relevancy (N=3).
+    """
 
     rows = json.loads(config.results_path.read_text(encoding="utf-8"))
     client = AsyncOpenAI(api_key=settings.openai_api_key)
     llm = llm_factory(config.hotpotqa_ragas_model, client=client)
+    embeddings = OpenAIEmbeddings(
+        client=client,
+        model=settings.openai_embedding_model,
+    )
     context_recall = ContextRecall(llm=llm)
+    context_precision = ContextPrecision(llm=llm)
     faithfulness = Faithfulness(llm=llm) if mode == "graph" else None
-    answer_correctness = (
-        AnswerCorrectness(
-            llm=llm,
-            embeddings=OpenAIEmbeddings(
-                client=client,
-                model=settings.openai_embedding_model,
-            ),
-        )
+    factual_correctness = FactualCorrectness(llm=llm) if mode == "graph" else None
+    response_relevancy = (
+        ResponseRelevancy(llm=llm, embeddings=embeddings, strictness=3)
         if mode == "graph"
         else None
     )
@@ -492,12 +506,18 @@ async def run_ragas(config, mode: str) -> dict[str, Any]:
             reference=reference,
             retrieved_contexts=retrieved_contexts,
         )
+        precision = await context_precision.ascore(
+            user_input=question,
+            reference=reference,
+            retrieved_contexts=retrieved_contexts,
+        )
         scored: dict[str, Any] = {
             "id": row["id"],
             "question": question,
             "type": row.get("type", "unknown"),
             "level": row.get("level", "unknown"),
             "context_recall": metric_float(recall.value),
+            "context_precision": metric_float(precision.value),
         }
         if mode == "graph":
             scored["is_partial"] = bool(row.get("is_partial", False))
@@ -505,22 +525,28 @@ async def run_ragas(config, mode: str) -> dict[str, Any]:
             if not response:
                 skipped_empty_answers += 1
                 scored["faithfulness"] = None
-                scored["answer_correctness"] = None
+                scored["factual_correctness"] = None
+                scored["response_relevancy"] = None
             else:
                 assert faithfulness is not None
-                assert answer_correctness is not None
+                assert factual_correctness is not None
+                assert response_relevancy is not None
                 faith = await faithfulness.ascore(
                     user_input=question,
                     response=response,
                     retrieved_contexts=retrieved_contexts,
                 )
-                correct = await answer_correctness.ascore(
-                    user_input=question,
+                factual = await factual_correctness.ascore(
                     response=response,
                     reference=reference,
                 )
+                relevancy = await response_relevancy.ascore(
+                    user_input=question,
+                    response=response,
+                )
                 scored["faithfulness"] = metric_float(faith.value)
-                scored["answer_correctness"] = metric_float(correct.value)
+                scored["factual_correctness"] = metric_float(factual.value)
+                scored["response_relevancy"] = metric_float(relevancy.value)
         scored_rows.append(scored)
         print(f"Scored {index}/{len(rows)} questions")
 
@@ -531,13 +557,15 @@ async def run_ragas(config, mode: str) -> dict[str, Any]:
         "total_scored": len(scored_rows),
         "skipped_empty_contexts": skipped_empty_contexts,
         "mean_context_recall": group_mean(scored_rows, "context_recall"),
+        "mean_context_precision": group_mean(scored_rows, "context_precision"),
     }
     if mode == "graph":
         question_count = len(rows)
         partial_count = sum(1 for row in rows if row.get("is_partial"))
         summary["skipped_empty_answers"] = skipped_empty_answers
         summary["mean_faithfulness"] = group_mean(scored_rows, "faithfulness")
-        summary["mean_answer_correctness"] = group_mean(scored_rows, "answer_correctness")
+        summary["mean_factual_correctness"] = group_mean(scored_rows, "factual_correctness")
+        summary["mean_response_relevancy"] = group_mean(scored_rows, "response_relevancy")
         summary["partial_answer_count"] = partial_count
         summary["partial_answer_percent"] = (
             round(100.0 * partial_count / question_count, 2) if question_count else 0.0
@@ -623,6 +651,7 @@ def write_benchmark_report(config, mode: str, metadata: dict[str, Any]) -> None:
         "| Metric | Value |",
         "|--------|-------|",
         f"| Context recall | {format_metric(s.get('mean_context_recall'))} |",
+        f"| Context precision | {format_metric(s.get('mean_context_precision'))} |",
         f"| Questions scored | {s.get('total_scored', '—')} |",
         f"| Skipped (empty contexts) | {s.get('skipped_empty_contexts', 0)} |",
     ]
@@ -630,7 +659,8 @@ def write_benchmark_report(config, mode: str, metadata: dict[str, Any]) -> None:
         quality_rows.extend(
             [
                 f"| Faithfulness | {format_metric(s.get('mean_faithfulness'))} |",
-                f"| Answer correctness | {format_metric(s.get('mean_answer_correctness'))} |",
+                f"| Factual correctness | {format_metric(s.get('mean_factual_correctness'))} |",
+                f"| Relevancy | {format_metric(s.get('mean_response_relevancy'))} |",
                 f"| Partial answers | {partial_count} ({format_metric(partial_percent, 2)}%) |",
                 f"| Skipped (empty answers) | {s.get('skipped_empty_answers', 0)} |",
             ]
@@ -675,8 +705,8 @@ def write_benchmark_report(config, mode: str, metadata: dict[str, Any]) -> None:
         if mode == "graph":
             lines.extend(
                 [
-                    "| Type | Level | Count | Context recall | Faithfulness | Answer correctness |",
-                    "|------|-------|-------|----------------|--------------|--------------------|",
+                    "| Type | Level | Count | Context recall | Context precision | Faithfulness | Factual correctness | Relevancy |",
+                    "|------|-------|-------|----------------|-------------------|--------------|---------------------|-----------|",
                 ]
             )
             for (qtype, level), group_rows in sorted(groups.items()):
@@ -684,21 +714,24 @@ def write_benchmark_report(config, mode: str, metadata: dict[str, Any]) -> None:
                 lines.append(
                     f"| {qtype} | {level} | {n} | "
                     f"{format_metric(group_mean(group_rows, 'context_recall'))} | "
+                    f"{format_metric(group_mean(group_rows, 'context_precision'))} | "
                     f"{format_metric(group_mean(group_rows, 'faithfulness'))} | "
-                    f"{format_metric(group_mean(group_rows, 'answer_correctness'))} |"
+                    f"{format_metric(group_mean(group_rows, 'factual_correctness'))} | "
+                    f"{format_metric(group_mean(group_rows, 'response_relevancy'))} |"
                 )
         else:
             lines.extend(
                 [
-                    "| Type | Level | Count | Context recall |",
-                    "|------|-------|-------|----------------|",
+                    "| Type | Level | Count | Context recall | Context precision |",
+                    "|------|-------|-------|----------------|-------------------|",
                 ]
             )
             for (qtype, level), group_rows in sorted(groups.items()):
                 n = len(group_rows)
                 lines.append(
                     f"| {qtype} | {level} | {n} | "
-                    f"{format_metric(group_mean(group_rows, 'context_recall'))} |"
+                    f"{format_metric(group_mean(group_rows, 'context_recall'))} | "
+                    f"{format_metric(group_mean(group_rows, 'context_precision'))} |"
                 )
         lines.append("")
 
@@ -824,7 +857,7 @@ def main() -> None:
         "--ragas-model",
         default=DEFAULT_RAGAS_MODEL,
         help=(
-            f"LLM for RAGAS context recall, faithfulness, and answer correctness "
+            f"LLM for RAGAS context recall/precision, faithfulness, factual correctness, and relevancy "
             f"(default: {DEFAULT_RAGAS_MODEL})"
         ),
     )
