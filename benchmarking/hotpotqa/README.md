@@ -13,13 +13,13 @@ The retrieval benchmark uses **200 questions**, returns five passages per questi
 | Retrieval | Quantization | Context recall | Context precision | Mean latency |
 |---|---:|---:|---:|---:|
 | Dense + BM25 | None | 0.82 | 0.48 | 0.51 s |
-| Dense + BM25 | PQ-8 | 0.80 | 0.48 | 0.52 s |
-| Dense + BM25 | PQ-16 | 0.80 | 0.49 | 0.52 s |
 | Dense + BM25 | PQ-32 | 0.81 | 0.50 | 0.53 s |
+| **Dense + BM25** | **PQ-16** | **0.80** | **0.49** | **0.52 s** |
+| Dense + BM25 | PQ-8 | 0.80 | 0.48 | 0.52 s |
 | Dense + BM25 + ColBERT | None | 0.86 | 0.54 | 4.90 s |
-| Dense + BM25 + ColBERT | PQ-8 | 0.86 | 0.52 | 5.20 s |
-| Dense + BM25 + ColBERT | PQ-16 | 0.87 | 0.53 | 4.80 s |
 | Dense + BM25 + ColBERT | PQ-32 | 0.87 | 0.52 | 5.22 s |
+| **Dense + BM25 + ColBERT** | **PQ-16** | **0.87** | **0.53** | **4.80 s** |
+| Dense + BM25 + ColBERT | PQ-8 | 0.86 | 0.52 | 5.20 s |
 
 Context recall measures how much of the gold answer is supported by retrieved passages. Context precision measures whether useful passages are ranked ahead of irrelevant ones. Latency is retriever wall time and does not include RAGAS scoring.
 
